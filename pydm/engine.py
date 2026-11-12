@@ -26,6 +26,9 @@ import urllib.request
 from collections import deque
 from email.message import Message
 
+from .categories import category_for
+from .limiter import GLOBAL_LIMITER, RateLimiter
+
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/120.0 Safari/537.36"
@@ -98,17 +101,18 @@ def unique_path(path: str) -> str:
         i += 1
 
 
-def _request(url: str, start: int | None = None, end: int | None = None, method: str = "GET"):
-    req = urllib.request.Request(url, method=method, headers={"User-Agent": USER_AGENT})
+def _request(url: str, start: int | None = None, end: int | None = None,
+             headers: dict | None = None):
+    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT, **(headers or {})})
     if start is not None:
         req.add_header("Range", f"bytes={start}-{'' if end is None else end}")
     return urllib.request.urlopen(req, timeout=TIMEOUT)
 
 
-def probe(url: str) -> dict:
+def probe(url: str, headers: dict | None = None) -> dict:
     """Find out size, final URL, file name and range support for ``url``."""
     # A 1-byte range GET is more reliable than HEAD (many servers mishandle HEAD).
-    with _request(url, 0, 0) as resp:
+    with _request(url, 0, 0, headers) as resp:
         headers = resp.headers
         final_url = resp.geturl()
         size = None
@@ -132,7 +136,8 @@ class DownloadTask:
     """A single download. Thread-safe to call start()/pause() from a GUI."""
 
     def __init__(self, url: str, dest_dir: str, connections: int = 8,
-                 filename: str | None = None, task_id: str | None = None):
+                 filename: str | None = None, task_id: str | None = None,
+                 headers: dict | None = None, speed_limit: int = 0):
         self.id = task_id or f"{time.time_ns():x}"
         self.url = url
         self.dest_dir = dest_dir
@@ -147,6 +152,8 @@ class DownloadTask:
         self.downloaded = 0
         self.speed = 0.0
         self.added_at = time.time()
+        self.headers = dict(headers or {})  # e.g. Referer / Cookie sent by the browser
+        self.limiter = RateLimiter(speed_limit)
 
         self._stop = threading.Event()
         self._lock = threading.Lock()
@@ -167,6 +174,18 @@ class DownloadTask:
         if not self.size or self.speed <= 0:
             return None
         return (self.size - self.downloaded) / self.speed
+
+    @property
+    def speed_limit(self) -> int:
+        return int(self.limiter.rate)
+
+    @speed_limit.setter
+    def speed_limit(self, value: int) -> None:
+        self.limiter.rate = max(0, int(value))
+
+    @property
+    def category(self) -> str:
+        return category_for(self.filename or self.url)
 
     @property
     def active_connections(self) -> int:
@@ -201,11 +220,13 @@ class DownloadTask:
             "connections": self.connections, "filename": self.filename,
             "path": self.path, "size": self.size, "status": self.status,
             "downloaded": self.downloaded, "added_at": self.added_at,
+            "headers": self.headers, "speed_limit": self.speed_limit,
         }
 
     @classmethod
     def from_dict(cls, d: dict) -> "DownloadTask":
-        t = cls(d["url"], d["dest_dir"], d.get("connections", 8), d.get("filename"), d.get("id"))
+        t = cls(d["url"], d["dest_dir"], d.get("connections", 8), d.get("filename"), d.get("id"),
+                d.get("headers"), d.get("speed_limit", 0))
         t.path = d.get("path")
         t.size = d.get("size")
         t.downloaded = d.get("downloaded", 0)
@@ -289,7 +310,7 @@ class DownloadTask:
         os.makedirs(self.dest_dir, exist_ok=True)
         if self.path and self.segments and os.path.exists(self._part_path):
             return  # resuming from saved state
-        info = probe(self.url)
+        info = probe(self.url, self.headers)
         self.url = info["url"]
         self.size = info["size"]
         self.resumable = info["resumable"]
@@ -312,7 +333,7 @@ class DownloadTask:
         self.downloaded = 0
         self._active_workers = 1
         try:
-            with _request(self.url) as resp, open(self._part_path, "wb") as f:
+            with _request(self.url, headers=self.headers) as resp, open(self._part_path, "wb") as f:
                 while not self._stop.is_set():
                     chunk = resp.read(CHUNK_SIZE)
                     if not chunk:
@@ -320,6 +341,7 @@ class DownloadTask:
                     f.write(chunk)
                     self.downloaded += len(chunk)
                     self._update_speed()
+                    self._throttle(len(chunk))
         finally:
             self._active_workers = 0
         if self._stop.is_set():
@@ -417,7 +439,7 @@ class DownloadTask:
             with open(self._part_path, "r+b") as f:
                 while not self._stop.is_set() and seg.remaining > 0:
                     try:
-                        with _request(self.url, seg.pos, seg.end) as resp:
+                        with _request(self.url, seg.pos, seg.end, self.headers) as resp:
                             if resp.status != 206:
                                 raise RuntimeError("O servidor parou de aceitar downloads em partes")
                             while not self._stop.is_set():
@@ -433,6 +455,7 @@ class DownloadTask:
                                     if seg.remaining == 0:
                                         break
                                 retries = 0
+                                self._throttle(len(chunk))
                     except (urllib.error.URLError, OSError, TimeoutError) as exc:
                         if isinstance(exc, urllib.error.HTTPError) and exc.code in (401, 403, 404, 410):
                             raise RuntimeError(f"HTTP {exc.code}: {exc.reason}") from exc
@@ -446,6 +469,11 @@ class DownloadTask:
             seg.active = False
             with self._lock:
                 self._active_workers -= 1
+
+    def _throttle(self, nbytes: int) -> None:
+        delay = max(GLOBAL_LIMITER.reserve(nbytes), self.limiter.reserve(nbytes))
+        if delay > 0:
+            self._stop.wait(delay)
 
     def _update_speed(self) -> None:
         now = time.monotonic()

@@ -7,7 +7,7 @@ import os
 import threading
 from pathlib import Path
 
-from .engine import DownloadTask, Status
+from .engine import DownloadTask, Status, sanitize_filename
 
 
 def default_download_dir() -> str:
@@ -54,8 +54,11 @@ class DownloadManager:
 
     # -------------------------------------------------------------- operations
     def add(self, url: str, dest_dir: str | None = None, connections: int = 8,
-            start: bool = True) -> DownloadTask:
-        task = DownloadTask(url.strip(), dest_dir or default_download_dir(), connections)
+            start: bool = True, filename: str | None = None,
+            headers: dict | None = None) -> DownloadTask:
+        task = DownloadTask(url.strip(), dest_dir or default_download_dir(), connections,
+                            filename=sanitize_filename(filename) if filename else None,
+                            headers=headers)
         if not start:
             task.status = Status.PAUSED
         with self._lock:
@@ -90,6 +93,16 @@ class DownloadManager:
                 except OSError:
                     pass
         self.save()
+
+    def resume_all(self) -> None:
+        for t in list(self.tasks):
+            if t.status in (Status.PAUSED, Status.ERROR):
+                t.status = Status.QUEUED
+        self.tick()
+
+    def all_finished(self) -> bool:
+        return bool(self.tasks) and not any(
+            t.is_running() or t.status == Status.QUEUED for t in self.tasks)
 
     def pause_all(self) -> None:
         for t in list(self.tasks):
