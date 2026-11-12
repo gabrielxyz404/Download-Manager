@@ -15,7 +15,19 @@ async function updateBadge() {
   await chrome.action.setBadgeBackgroundColor({ color: "#c62828" });
 }
 
-async function appAlive() {
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// The app restarts itself (in under a second) to free memory; retry briefly so a
+// request made at that exact moment is not lost.
+async function appAlive(tries = 4) {
+  for (let i = 0; i < tries; i++) {
+    if (await pingOnce()) return true;
+    if (i < tries - 1) await sleep(350);
+  }
+  return false;
+}
+
+async function pingOnce() {
   try {
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), 800);
@@ -27,17 +39,20 @@ async function appAlive() {
   }
 }
 
-async function postApp(path, payload) {
-  try {
-    const r = await fetch(APP + path, {
-      method: "POST",
-      headers: { ...HEADERS, "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-    });
-    return r.ok;
-  } catch {
-    return false;
+async function postApp(path, payload, tries = 4) {
+  for (let i = 0; i < tries; i++) {
+    try {
+      const r = await fetch(APP + path, {
+        method: "POST",
+        headers: { ...HEADERS, "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      return r.ok;
+    } catch {
+      if (i < tries - 1) await sleep(350);
+    }
   }
+  return false;
 }
 
 async function sendToApp(url, filename, referrer) {
@@ -46,16 +61,7 @@ async function sendToApp(url, filename, referrer) {
     const list = await chrome.cookies.getAll({ url });
     cookies = list.map((c) => `${c.name}=${c.value}`).join("; ");
   } catch {}
-  try {
-    const r = await fetch(APP + "/add", {
-      method: "POST",
-      headers: { ...HEADERS, "Content-Type": "application/json" },
-      body: JSON.stringify({ url, filename, referrer, cookies }),
-    });
-    return r.ok;
-  } catch {
-    return false;
-  }
+  return postApp("/add", { url, filename, referrer, cookies });
 }
 
 chrome.runtime.onInstalled.addListener(() => {
@@ -72,7 +78,7 @@ chrome.runtime.onStartup.addListener(updateBadge);
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   (async () => {
     if (msg.type === "status") {
-      sendResponse({ enabled: await isEnabled(), app: await appAlive() });
+      sendResponse({ enabled: await isEnabled(), app: await appAlive(2) });
     } else if (msg.type === "toggle") {
       await chrome.storage.local.set({ enabled: !!msg.enabled });
       await updateBadge();

@@ -112,6 +112,15 @@ No menu da extensão também pode ligar/desligar a captura de downloads (quando 
 
 Se o servidor não aceita partes, o download é feito com uma conexão só (e não pode ser retomado).
 
+## Testes
+
+```bash
+python -m unittest tests.test_engine tests.test_features tests.test_video tests.test_service  # motor, vídeo, serviço
+python -m unittest tests.test_gui                     # interface (precisa de ecrã; no Linux: xvfb-run)
+node tests/e2e/extension.e2e.js                       # extensão num Chromium real (Playwright + xdotool)
+python tests/e2e/system_e2e.py                        # falta de luz, internet instável, Ctrl+C, consumo... (Linux)
+```
+
 ## Estrutura
 
 ```

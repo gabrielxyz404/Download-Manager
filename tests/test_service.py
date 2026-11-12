@@ -100,3 +100,29 @@ class ServiceTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RestartTests(unittest.TestCase):
+    def test_port_can_be_reused_right_after_restart(self):
+        """Regression: after a restart the port was still held by connections in TIME_WAIT."""
+        from flowdl.bridge import BrowserBridge
+        got = []
+        first = BrowserBridge(got.append, port=0).start()
+        port = first.port
+        for _ in range(3):  # leave some closed connections behind
+            post(port, "/show", {})
+        first.stop()
+        second = BrowserBridge(got.append, port=port).start()  # must not raise EADDRINUSE
+        try:
+            self.assertEqual(post(port, "/show", {}), 200)
+        finally:
+            second.stop()
+
+    def test_two_instances_cannot_listen_together(self):
+        from flowdl.bridge import BrowserBridge
+        first = BrowserBridge(lambda i: None, port=0).start()
+        try:
+            with self.assertRaises(OSError):
+                BrowserBridge(lambda i: None, port=first.port)
+        finally:
+            first.stop()

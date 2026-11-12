@@ -70,6 +70,10 @@ class BrowserBridge:
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):  # Windows: never share the port
             self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        else:
+            # POSIX: allow re-binding right after a restart while old connections are in
+            # TIME_WAIT (it does not let two programs listen on the port at the same time).
+            self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
             self.sock.bind(("127.0.0.1", port))
             self.sock.listen(16)

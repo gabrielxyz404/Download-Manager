@@ -27,6 +27,7 @@ from .settings import Settings
 from .status import ACTIVE, Status
 
 SCHEDULER_CHECK_S = 30
+SLIM_AFTER_IDLE_S = 5  # restart to free memory only after this many quiet seconds
 ROOT = Path(__file__).resolve().parent.parent
 
 
@@ -69,15 +70,21 @@ class Service:
         return any(t.get("status") in ACTIVE for t in data.get("tasks", []))
 
     # -------------------------------------------------------------- bridge
-    def start_bridge(self) -> bool:
+    def start_bridge(self, retries: int = 0) -> bool:
+        """Listen for the browser. ``retries``: extra attempts, 0.5 s apart (used at start-up,
+        e.g. right after a restart when the previous process is still releasing the port)."""
+        import time
         if self.bridge:
             return True
-        try:
-            self.bridge = BrowserBridge(lambda item: self.events.put(("item", item)), self.port).start()
-            return True
-        except OSError:
-            self.bridge = None
-            return False
+        for attempt in range(retries + 1):
+            try:
+                self.bridge = BrowserBridge(lambda item: self.events.put(("item", item)), self.port).start()
+                return True
+            except OSError:
+                self.bridge = None
+                if attempt < retries:
+                    time.sleep(0.5)
+        return False
 
     def stop_bridge(self) -> None:
         if self.bridge:
@@ -142,13 +149,23 @@ class Service:
         Returns "main" (show the main window), "dialog" (only the browser's dialog),
         "countdown" (shutdown countdown), "slim" (restart to free memory) or None to exit.
         """
+        import time
+        slim_at = None
         while not self.exit_requested:
             timeout = SCHEDULER_CHECK_S if self._scheduler_enabled() else None
+            if slim_at is not None:
+                left = max(0.0, slim_at - time.monotonic())
+                timeout = left if timeout is None else min(timeout, left)
             try:
                 kind, data = self.events.get(timeout=timeout)
             except queue.Empty:
                 self.check_scheduler()
+                if slim_at is not None and time.monotonic() >= slim_at:
+                    if self.can_slim_down():
+                        return "slim"
+                    slim_at = None
                 continue
+            slim_at = None  # any activity postpones the restart
             if kind == "tick":
                 action = self.on_tick(data)
                 if action == "quit":
@@ -156,7 +173,7 @@ class Service:
                 if action == "countdown":
                     return "countdown"
                 if self.can_slim_down():
-                    return "slim"
+                    slim_at = time.monotonic() + SLIM_AFTER_IDLE_S
             elif kind == "item":
                 if self.accept_item(data):
                     return "main" if data.get("kind") == "show" else "dialog"
@@ -206,7 +223,7 @@ def run(background: bool = False) -> None:
     svc = Service()
     svc.slim_enabled = True
     if svc.settings.browser_integration:
-        svc.start_bridge()
+        svc.start_bridge(retries=20)
     if svc.settings.auto_resume and svc.has_saved_active_downloads():
         svc.manager.tick()  # interrupted downloads continue right away
     mode = None if background else "main"
@@ -217,11 +234,14 @@ def run(background: bool = False) -> None:
         if mode:
             from .gui import App  # Tkinter is only loaded when a window is needed
             App(svc, mode).mainloop()
+            # Free the window objects now, in this (the Tk) thread. Otherwise the garbage
+            # collector may do it later from a download thread, which Tkinter does not allow.
+            import gc
+            gc.collect()
             if svc.exit_requested or not svc.settings.run_in_background:
                 break
             if svc.can_slim_down():
-                mode = "slim"
-                continue
+                svc.events.put(("tick", None))  # start the quiet-period countdown in wait()
         mode = svc.wait()
         if mode is None:
             break

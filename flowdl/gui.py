@@ -331,6 +331,8 @@ class VideoDialog(tk.Toplevel):
         self.tree.column("info", width=360)
         self.tree.pack(fill="both", expand=True)
         self.tree.bind("<Double-1>", lambda _e: self._download())
+        self.bind("<Return>", lambda _e: self._download())
+        self.bind("<Escape>", lambda _e: self.destroy())
 
         self.info = tk.StringVar()
         ttk.Label(frm, textvariable=self.info, foreground=app.colors["muted"], wraplength=580
@@ -579,11 +581,20 @@ class App(tk.Tk):
                 "Para fechar de vez: menu Tarefas → Sair.\n"
                 "Para voltar a abrir: abra o Flow Downloads de novo ou use o botão da extensão.", parent=self)
         self._save_ui_settings()
-        self.destroy()
+        self.close_gui()
 
     def quit_all(self) -> None:
         self._save_ui_settings()
         self.service.exit_requested = True
+        self.close_gui()
+
+    def close_gui(self) -> None:
+        """Destroy the window cleanly: cancel pending timers first, so nothing fires afterwards."""
+        try:
+            for after_id in self.tk.splitlist(self.tk.call("after", "info")):
+                self.after_cancel(after_id)
+        except tk.TclError:
+            pass
         self.destroy()
 
     def _save_ui_settings(self) -> None:
@@ -1046,7 +1057,7 @@ class App(tk.Tk):
             if state == "withdrawn":
                 # Dialog-only mode: go back to the background once the dialogs are closed.
                 if not self._dialogs_open() and not self.service.pending:
-                    self.destroy()
+                    self.close_gui()
                     return
                 self.after(300, self._refresh)
                 return

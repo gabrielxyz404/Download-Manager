@@ -147,6 +147,28 @@ class EngineTests(unittest.TestCase):
             self.assertEqual(a.end + 1, b.start)
         self.assertEqual(segs[-1].end, len(DATA) - 1)
 
+    def test_checkpoint_never_records_unsynced_bytes(self):
+        """Power-loss safety: progress is recorded only for data already forced to disk."""
+        import json
+        from unittest import mock
+        task = DownloadTask(self.base + "/x.bin", self.tmp.name, 2)
+        task.path, task.size, task.resumable = os.path.join(self.tmp.name, "x.bin"), 1000, True
+        task.segments = [engine.Segment(0, 499, 100), engine.Segment(500, 999, 600)]
+        order = []
+
+        def fake_fsync(fd):
+            order.append("fsync")
+            task.segments[0].pos = 400  # more data arrives while the disk is syncing
+
+        real_save = task._save_state
+        with mock.patch.object(engine.os, "fsync", fake_fsync), \
+                mock.patch.object(task, "_save_state", lambda segs=None: (order.append("save"), real_save(segs))):
+            task._checkpoint(0)
+        self.assertEqual(order, ["fsync", "save"])
+        with open(task.path + ".part.json") as f:
+            saved = json.load(f)["segments"]
+        self.assertEqual(saved[0], [0, 499, 100])  # not 400: those bytes were not synced yet
+
     def test_http_404_reports_error(self):
         class NotFound(BaseHTTPRequestHandler):
             def log_message(self, *a):

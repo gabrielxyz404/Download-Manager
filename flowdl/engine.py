@@ -266,12 +266,23 @@ class DownloadTask:
             return False
         return state.get("url") == self.url and os.path.exists(path + ".part")
 
-    def _save_state(self) -> None:
+    def _checkpoint(self, sync_fd: int) -> None:
+        """Power-loss safe progress save: note the positions, force the data written so far
+        onto the disk, and only then record those positions. The record can never claim
+        bytes that were not really stored."""
+        snapshot = [s.to_list() for s in self.segments]
+        try:
+            os.fsync(sync_fd)
+        except OSError:
+            return
+        self._save_state(snapshot)
+
+    def _save_state(self, segments: list | None = None) -> None:
         if not self.path or not self.resumable or self.status == Status.COMPLETED:
             return
         state = {
             "url": self.url, "size": self.size, "resumable": self.resumable,
-            "segments": [s.to_list() for s in self.segments],
+            "segments": segments if segments is not None else [s.to_list() for s in self.segments],
         }
         tmp = self._state_path + ".tmp"
         try:
@@ -358,6 +369,7 @@ class DownloadTask:
 
         workers: list[threading.Thread] = []
         last_save = time.monotonic()
+        sync_fd = os.open(self._part_path, os.O_RDWR | getattr(os, "O_BINARY", 0))
 
         def spawn(seg: Segment) -> None:
             seg.active = True
@@ -384,14 +396,15 @@ class DownloadTask:
                     if new_seg is None:
                         break
                     spawn(new_seg)
-            if time.monotonic() - last_save > 1.0:
-                self._save_state()
+            if time.monotonic() - last_save > 2.0:
+                self._checkpoint(sync_fd)
                 last_save = time.monotonic()
             if not any(t.is_alive() for t in workers):
                 break
 
         self.downloaded = sum(s.pos - s.start for s in self.segments)
-        self._save_state()
+        self._checkpoint(sync_fd)
+        os.close(sync_fd)
         if self._worker_error:
             raise RuntimeError(self._worker_error)
         if all(s.remaining == 0 for s in self.segments):
@@ -431,7 +444,9 @@ class DownloadTask:
     def _worker(self, seg: Segment) -> None:
         retries = 0
         try:
-            with open(self._part_path, "r+b") as f:
+            # Unbuffered: every chunk goes straight to the operating system, so nothing
+            # sits in a Python buffer that would be lost if the app is killed.
+            with open(self._part_path, "r+b", buffering=0) as f:
                 while not self._stop.is_set() and seg.remaining > 0:
                     try:
                         with _request(self.url, seg.pos, seg.end, self.headers) as resp:
