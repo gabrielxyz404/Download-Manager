@@ -42,8 +42,8 @@ def is_enabled() -> bool:
 def set_enabled(enabled: bool) -> None:
     if sys.platform.startswith("win"):
         import winreg
-        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Run",
-                            0, winreg.KEY_SET_VALUE) as key:
+        # CreateKey opens the key, or creates it: on a new Windows profile it may not exist yet.
+        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Run") as key:
             if enabled:
                 winreg.SetValueEx(key, APP_NAME, 0, winreg.REG_SZ, _command())
             else:
