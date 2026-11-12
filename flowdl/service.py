@@ -372,7 +372,12 @@ class Service:
         sys.stderr.flush()
         if sys.platform.startswith("win"):
             flags = getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(subprocess, "CREATE_NO_WINDOW", 0)
-            subprocess.Popen(args, creationflags=flags, close_fds=True)
+            env = dict(os.environ)
+            # A packaged program started from itself would otherwise inherit the first one's
+            # internal settings and behave like its helper process (PyInstaller): start fresh.
+            env["PYINSTALLER_RESET_ENVIRONMENT"] = "1"
+            log("restart: starting", args)
+            subprocess.Popen(args, creationflags=flags, close_fds=True, env=env)
             os._exit(0)
         os.execv(sys.executable, args)
 

@@ -207,6 +207,10 @@ def main() -> int:
     proc.kill()
     server.shutdown()
     passed = sum(RESULTS)
+    if passed != len(RESULTS):
+        for log in ("crash.log", "debug.log"):
+            path = cfg / "FlowDownloads" / log
+            print(f"--- {log}:", path.read_text(encoding="utf-8", errors="replace")[-3000:] if path.exists() else "(não existe)")
     print(f"\n{passed}/{len(RESULTS)} verificações passaram")
     return 0 if passed == len(RESULTS) else 1
 
