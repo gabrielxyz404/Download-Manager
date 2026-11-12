@@ -1,4 +1,7 @@
-"""Local HTTP server that receives downloads from the browser extension.
+"""Tiny local HTTP server that receives downloads from the browser extension.
+
+Written directly on sockets (instead of http.server) so the background process
+stays small: it sleeps in accept() and uses no CPU until the browser calls.
 
 Listens only on 127.0.0.1. Requests must carry the ``X-PyDM`` header and must
 not come from a regular web page origin, so websites cannot push downloads.
@@ -7,94 +10,132 @@ not come from a regular web page origin, so websites cannot push downloads.
 from __future__ import annotations
 
 import json
+import socket
 import threading
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Callable
 
 DEFAULT_PORT = 17890
+MAX_HEADER = 64 * 1024
+MAX_BODY = 2_000_000
+REASONS = {200: "OK", 400: "Bad Request", 403: "Forbidden"}
 
 
-class _Handler(BaseHTTPRequestHandler):
-    on_add: Callable[[dict], None] = staticmethod(lambda item: None)
+def _video_item(data: dict) -> dict:
+    page = str(data.get("page", ""))
+    if not page.startswith(("http://", "https://")):
+        raise ValueError("página inválida")
+    media = []
+    for m in data.get("media") or []:
+        url = str(m.get("url", ""))
+        if url.startswith(("http://", "https://")):
+            media.append({"url": url, "mime": str(m.get("mime", "")),
+                          "size": int(m.get("size") or 0), "hls": bool(m.get("hls"))})
+    jar = [c for c in data.get("cookie_jar") or [] if isinstance(c, dict)]
+    return {"kind": "video", "page": page, "title": str(data.get("title", ""))[:300],
+            "media": media[:30], "cookie_jar": jar[:300]}
 
-    def log_message(self, *args):
-        pass
 
-    def _allowed(self) -> bool:
-        origin = self.headers.get("Origin", "")
-        if origin.startswith(("http://", "https://")):
-            return False
-        return self.headers.get("X-PyDM") == "1"
+def _download_item(data: dict) -> dict:
+    url = str(data.get("url", ""))
+    if not url.startswith(("http://", "https://", "ftp://")):
+        raise ValueError("url inválida")
+    return {"url": url, "filename": data.get("filename") or None,
+            "referrer": data.get("referrer") or None, "cookies": data.get("cookies") or None}
 
-    def _reply(self, code: int, payload: dict) -> None:
-        body = json.dumps(payload).encode()
-        self.send_response(code)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
 
-    def do_GET(self):
-        if self.path == "/ping" and self._allowed():
-            self._reply(200, {"app": "pydm", "ok": True})
+def handle_request(method: str, path: str, headers: dict, body: bytes,
+                   on_add: Callable[[dict], None]) -> tuple[int, dict]:
+    origin = headers.get("origin", "")
+    if origin.startswith(("http://", "https://")) or headers.get("x-pydm") != "1":
+        return 403, {"ok": False}
+    if method == "GET" and path == "/ping":
+        return 200, {"app": "pydm", "ok": True}
+    if method != "POST" or path not in ("/add", "/video", "/show"):
+        return 403, {"ok": False}
+    try:
+        if path == "/show":
+            item = {"kind": "show"}
         else:
-            self._reply(403, {"ok": False})
-
-    def do_POST(self):
-        if self.path not in ("/add", "/video") or not self._allowed():
-            self._reply(403, {"ok": False})
-            return
-        try:
-            length = min(int(self.headers.get("Content-Length", 0)), 2_000_000)
-            data = json.loads(self.rfile.read(length) or b"{}")
-            if self.path == "/video":
-                item = self._video_item(data)
-                type(self).on_add(item)
-                self._reply(200, {"ok": True})
-                return
-            url = str(data.get("url", ""))
-            if not url.startswith(("http://", "https://", "ftp://")):
-                raise ValueError("url inválida")
-            item = {
-                "url": url,
-                "filename": data.get("filename") or None,
-                "referrer": data.get("referrer") or None,
-                "cookies": data.get("cookies") or None,
-            }
-        except (ValueError, TypeError, AttributeError) as exc:
-            self._reply(400, {"ok": False, "error": str(exc)})
-            return
-        type(self).on_add(item)
-        self._reply(200, {"ok": True})
-
-    @staticmethod
-    def _video_item(data: dict) -> dict:
-        page = str(data.get("page", ""))
-        if not page.startswith(("http://", "https://")):
-            raise ValueError("página inválida")
-        media = []
-        for m in data.get("media") or []:
-            url = str(m.get("url", ""))
-            if url.startswith(("http://", "https://")):
-                media.append({"url": url, "mime": str(m.get("mime", "")),
-                              "size": int(m.get("size") or 0), "hls": bool(m.get("hls"))})
-        jar = [c for c in data.get("cookie_jar") or [] if isinstance(c, dict)]
-        return {"kind": "video", "page": page, "title": str(data.get("title", ""))[:300],
-                "media": media[:30], "cookie_jar": jar[:300]}
+            data = json.loads(body or b"{}")
+            item = _video_item(data) if path == "/video" else _download_item(data)
+    except (ValueError, TypeError, AttributeError) as exc:
+        return 400, {"ok": False, "error": str(exc)}
+    on_add(item)
+    return 200, {"ok": True}
 
 
 class BrowserBridge:
     def __init__(self, on_add: Callable[[dict], None], port: int = DEFAULT_PORT):
-        handler = type("Handler", (_Handler,), {"on_add": staticmethod(on_add)})
-        self.server = ThreadingHTTPServer(("127.0.0.1", port), handler)
-        self.server.daemon_threads = True
-        self.port = self.server.server_address[1]
-        self._thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.on_add = on_add
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):  # Windows: never share the port
+            self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        try:
+            self.sock.bind(("127.0.0.1", port))
+            self.sock.listen(16)
+        except OSError:
+            self.sock.close()
+            raise
+        self.port = self.sock.getsockname()[1]
+        self._running = False
+        self._thread = threading.Thread(target=self._serve, name="bridge", daemon=True)
 
     def start(self) -> "BrowserBridge":
+        self._running = True
         self._thread.start()
         return self
 
     def stop(self) -> None:
-        self.server.shutdown()
-        self.server.server_close()
+        self._running = False
+        try:  # wake the blocked accept() so the thread can exit
+            socket.create_connection(("127.0.0.1", self.port), timeout=1).close()
+        except OSError:
+            pass
+        self._thread.join(2)
+        self.sock.close()
+
+    def _serve(self) -> None:
+        while self._running:
+            try:
+                conn, _addr = self.sock.accept()  # sleeps here: no CPU while idle
+            except OSError:
+                return
+            if not self._running:
+                conn.close()
+                return
+            threading.Thread(target=self._client, args=(conn,), daemon=True).start()
+
+    def _client(self, conn: socket.socket) -> None:
+        try:
+            conn.settimeout(5)
+            data = b""
+            while b"\r\n\r\n" not in data:
+                chunk = conn.recv(4096)
+                if not chunk or len(data) > MAX_HEADER:
+                    return
+                data += chunk
+            head, body = data.split(b"\r\n\r\n", 1)
+            lines = head.decode("latin-1").split("\r\n")
+            method, path, _version = lines[0].split(" ", 2)
+            headers = {}
+            for line in lines[1:]:
+                if ":" in line:
+                    k, v = line.split(":", 1)
+                    headers[k.strip().lower()] = v.strip()
+            length = min(int(headers.get("content-length") or 0), MAX_BODY)
+            while len(body) < length:
+                chunk = conn.recv(min(65536, length - len(body)))
+                if not chunk:
+                    break
+                body += chunk
+            code, payload = handle_request(method, path.split("?")[0], headers, body[:length], self.on_add)
+        except (OSError, ValueError):
+            code, payload = 400, {"ok": False}
+        try:
+            out = json.dumps(payload).encode()
+            conn.sendall(f"HTTP/1.1 {code} {REASONS.get(code, '')}\r\nContent-Type: application/json\r\n"
+                         f"Content-Length: {len(out)}\r\nConnection: close\r\n\r\n".encode() + out)
+        except OSError:
+            pass
+        finally:
+            conn.close()

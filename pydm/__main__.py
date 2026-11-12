@@ -1,10 +1,11 @@
 import sys
 
-if len(sys.argv) > 1:
+args = [a for a in sys.argv[1:] if a != "--background"]
+if args:
     from .cli import main as cli_main
 
-    sys.exit(cli_main())
+    sys.exit(cli_main(args))
 else:
-    from .gui import main
+    from .service import run
 
-    main()
+    run(background="--background" in sys.argv[1:])

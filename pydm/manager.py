@@ -8,17 +8,7 @@ import threading
 from pathlib import Path
 
 from .engine import DownloadTask, Status, sanitize_filename
-
-
-def default_download_dir() -> str:
-    return str(Path.home() / "Downloads")
-
-
-def config_dir() -> Path:
-    base = os.environ.get("APPDATA") or os.environ.get("XDG_CONFIG_HOME") or str(Path.home() / ".config")
-    path = Path(base) / "pydm"
-    path.mkdir(parents=True, exist_ok=True)
-    return path
+from .paths import config_dir, default_download_dir  # noqa: F401 (re-exported)
 
 
 def task_from_dict(d: dict):
@@ -37,6 +27,8 @@ class DownloadManager:
         self._lock = threading.RLock()
         self._last_saved: str | None = None
         self._resume_ids: set[str] = set()
+        self._signature: tuple = ()
+        self.on_change = None  # set by the service: called when a download stops/finishes
         self.load(auto_resume)
 
     # ------------------------------------------------------------- persistence
@@ -56,6 +48,7 @@ class DownloadManager:
                 continue
             if auto_resume and d.get("status") in active:
                 task.status = Status.QUEUED
+            task.on_done = self._task_done
             self.tasks.append(task)
 
     def save(self) -> None:
@@ -83,15 +76,15 @@ class DownloadManager:
         task = DownloadTask(url.strip(), dest_dir or default_download_dir(), connections,
                             filename=sanitize_filename(filename) if filename else None,
                             headers=headers)
-        if not start:
-            task.status = Status.PAUSED
-        with self._lock:
-            self.tasks.append(task)
-        self.tick()
-        return task
+        return self.add_task(task, start)
+
+    def _task_done(self, task) -> None:
+        if self.on_change:
+            self.on_change(task)
 
     def add_task(self, task, start: bool = True):
         """Add any task object (DownloadTask or video.VideoTask)."""
+        task.on_done = self._task_done
         if not start:
             task.status = Status.PAUSED
         with self._lock:
@@ -160,4 +153,7 @@ class DownloadManager:
                 if t.status == Status.QUEUED and not t.is_running():
                     t.start()
                     running += 1
-        self.save()
+            signature = tuple((t.id, t.status) for t in self.tasks)
+        if signature != self._signature:  # only touch the disk when something changed
+            self._signature = signature
+            self.save()

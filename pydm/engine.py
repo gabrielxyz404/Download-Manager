@@ -28,6 +28,7 @@ from email.message import Message
 
 from .categories import category_for
 from .limiter import GLOBAL_LIMITER, RateLimiter
+from .status import Status  # noqa: F401 (re-exported)
 
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -37,15 +38,6 @@ CHUNK_SIZE = 64 * 1024
 MIN_SPLIT_SIZE = 512 * 1024  # do not split segments smaller than 2x this
 MAX_RETRIES = 8
 TIMEOUT = 30
-
-
-class Status:
-    QUEUED = "Na fila"
-    CONNECTING = "Conectando"
-    DOWNLOADING = "Baixando"
-    PAUSED = "Pausado"
-    COMPLETED = "Concluído"
-    ERROR = "Erro"
 
 
 class Segment:
@@ -161,6 +153,7 @@ class DownloadTask:
         self._samples: deque[tuple[float, int]] = deque()
         self._active_workers = 0
         self._worker_error: str | None = None
+        self.on_done = None  # called (from the download thread) when it stops for any reason
 
     # ------------------------------------------------------------------ public
     @property
@@ -305,6 +298,8 @@ class DownloadTask:
         finally:
             self.speed = 0.0
             self._save_state()
+            if self.on_done:
+                self.on_done(self)
 
     def _prepare(self) -> None:
         os.makedirs(self.dest_dir, exist_ok=True)
@@ -377,7 +372,7 @@ class DownloadTask:
                 spawn(seg)
 
         while True:
-            time.sleep(0.2)
+            time.sleep(0.5)
             self.downloaded = sum(s.pos - s.start for s in self.segments)
             self._update_speed()
             if self._worker_error:

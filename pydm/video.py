@@ -19,14 +19,23 @@ from collections import deque
 from .categories import category_for
 from .engine import Status, sanitize_filename
 
-try:  # optional dependency
-    import yt_dlp  # type: ignore
-except ImportError:  # pragma: no cover - depends on the machine
-    yt_dlp = None
+yt_dlp = None  # optional dependency, imported only when a video is requested (it costs ~25 MB)
 
 
 def available() -> bool:
-    return yt_dlp is not None
+    if yt_dlp is not None:
+        return True
+    import importlib.util
+    importlib.invalidate_caches()
+    return importlib.util.find_spec("yt_dlp") is not None
+
+
+def _lib():
+    global yt_dlp
+    if yt_dlp is None:
+        import yt_dlp as module  # type: ignore
+        yt_dlp = module
+    return yt_dlp
 
 
 def has_ffmpeg() -> bool:
@@ -85,7 +94,7 @@ def get_options(url: str, cookiefile: str | None = None, headers: dict | None = 
     """Ask yt-dlp which qualities exist. Returns {title, options: [{label, format, audio_only}]}."""
     if not available():
         raise RuntimeError("yt-dlp não está instalado")
-    with yt_dlp.YoutubeDL(_base_opts(cookiefile, headers)) as ydl:
+    with _lib().YoutubeDL(_base_opts(cookiefile, headers)) as ydl:
         info = ydl.extract_info(url, download=False)
     if info.get("_type") == "playlist" and info.get("entries"):
         info = next(e for e in info["entries"] if e)
@@ -165,6 +174,7 @@ class VideoTask:
         self._streams: dict[str, tuple[int, int]] = {}
         self._eta: float | None = None
         self._samples: deque = deque()
+        self.on_done = None
 
     # ------------------------------------------------------------- interface
     @property
@@ -291,7 +301,7 @@ class VideoTask:
             else:
                 opts["merge_output_format"] = "mp4"
         try:
-            with yt_dlp.YoutubeDL(opts) as ydl:
+            with _lib().YoutubeDL(opts) as ydl:
                 info = ydl.extract_info(self.url, download=True)
             if info.get("_type") == "playlist" and info.get("entries"):
                 info = next(e for e in info["entries"] if e)
@@ -314,3 +324,5 @@ class VideoTask:
         finally:
             self.speed = 0.0
             self._eta = None
+            if self.on_done:
+                self.on_done(self)

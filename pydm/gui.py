@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import os
 import queue
 import subprocess
@@ -16,12 +15,13 @@ import importlib
 import urllib.parse
 
 from . import grabber, video
-from .bridge import DEFAULT_PORT, BrowserBridge
+from . import autostart
 from .categories import CATEGORIES, OTHER
 from .engine import Status, format_size, format_time
 from .limiter import GLOBAL_LIMITER
-from .manager import DownloadManager, config_dir, default_download_dir
-from .scheduler import ACTIONS, Scheduler, shutdown_computer
+from .manager import config_dir
+from .scheduler import ACTIONS, shutdown_computer
+from .settings import DEFAULT_COLUMNS, Settings  # noqa: F401 (re-exported)
 from .video import VideoTask
 
 REFRESH_MS = 500
@@ -45,7 +45,6 @@ COLUMNS = {
     "added": ("Adicionado", 115),
     "url": ("Endereço", 200),
 }
-DEFAULT_COLUMNS = ["name", "size", "progress", "speed", "eta", "conns", "status"]
 
 THEMES = {
     "light": dict(bg="#f3f3f3", fg="#1b1b1b", field="#ffffff", head="#e6e6e6", border="#c8c8c8",
@@ -71,34 +70,6 @@ def progress_bar(fraction: float, width: int = 10) -> str:
     return "█" * filled + "░" * (width - filled) + f" {fraction * 100:5.1f}%"
 
 
-class Settings:
-    def __init__(self) -> None:
-        self.path = config_dir() / "settings.json"
-        self.dest_dir = default_download_dir()
-        self.connections = 8
-        self.max_active = 3
-        self.watch_clipboard = True
-        self.dark = False
-        self.columns = list(DEFAULT_COLUMNS)
-        self.global_limit_kb = 0
-        self.browser_integration = True
-        self.auto_resume = True
-        self.confirm_browser = True
-        self.scheduler: dict = {}
-        try:
-            data = json.loads(self.path.read_text(encoding="utf-8"))
-            self.__dict__.update({k: v for k, v in data.items() if k != "path"})
-        except (OSError, ValueError):
-            pass
-
-    def save(self) -> None:
-        data = {k: v for k, v in self.__dict__.items() if k != "path"}
-        try:
-            self.path.write_text(json.dumps(data, indent=1), encoding="utf-8")
-        except OSError:
-            pass
-
-
 # ------------------------------------------------------------------- dialogs
 class AddDialog(tk.Toplevel):
     """'Download file info' dialog: confirm name / folder before downloading."""
@@ -108,7 +79,7 @@ class AddDialog(tk.Toplevel):
         super().__init__(app)
         self.app, self.headers = app, headers
         self.title(title)
-        self.transient(app)
+        app.attach_dialog(self)
         self.resizable(True, False)
         frm = ttk.Frame(self, padding=14)
         frm.pack(fill="both", expand=True)
@@ -171,7 +142,7 @@ class SchedulerDialog(tk.Toplevel):
         self.app = app
         s = app.scheduler
         self.title("Agendador")
-        self.transient(app)
+        app.attach_dialog(self)
         self.resizable(False, False)
         frm = ttk.Frame(self, padding=14)
         frm.pack(fill="both", expand=True)
@@ -236,7 +207,7 @@ class GrabberDialog(tk.Toplevel):
         super().__init__(app)
         self.app = app
         self.title("Capturar arquivos de um site")
-        self.transient(app)
+        app.attach_dialog(self)
         self.geometry("820x480")
         self.results: queue.Queue = queue.Queue()
         self.items: dict[str, dict] = {}
@@ -338,7 +309,7 @@ class VideoDialog(tk.Toplevel):
         self.app, self.page, self.media = app, page, media or []
         self.browser_title = (title or "").strip()
         self.title("Baixar vídeo")
-        self.transient(app)
+        app.attach_dialog(self)
         self.geometry("620x400")
         self.results: queue.Queue = queue.Queue()
         self.choices: dict[str, dict] = {}
@@ -524,7 +495,7 @@ class ShutdownCountdown(tk.Toplevel):
 
     def _tick(self) -> None:
         if self.left <= 0:
-            self.app.close_app()
+            self.app.quit_all()
             shutdown_computer()
             return
         self.msg.set(f"Downloads concluídos. O computador será desligado em {self.left} s.")
@@ -536,24 +507,24 @@ class ShutdownCountdown(tk.Toplevel):
 class App(tk.Tk):
     SIDEBAR = [("all", "Todos os downloads"), ("unfinished", "Incompletos"), ("finished", "Concluídos")]
 
-    def __init__(self) -> None:
+    def __init__(self, service, mode: str = "main") -> None:
+        """``mode``: "main" shows the window; "dialog" only shows the browser's dialog;
+        "countdown" only shows the shutdown countdown."""
         super().__init__()
+        self.withdraw()
         self.title("PyDM - Gerenciador de Downloads")
         self.geometry("1100x580")
         self.minsize(820, 400)
 
-        self.settings = Settings()
-        self.manager = DownloadManager(max_active=self.settings.max_active,
-                                       auto_resume=self.settings.auto_resume)
-        self.scheduler = Scheduler(self.settings.scheduler)
-        GLOBAL_LIMITER.rate = self.settings.global_limit_kb * 1024
+        self.service = service
+        self.settings = service.settings
+        self.manager = service.manager
+        self.scheduler = service.scheduler
         self.colors = THEMES["dark" if self.settings.dark else "light"]
         self._last_clip = ""
-        self._incoming: queue.Queue = queue.Queue()
         self._statuses: dict[str, str] = {t.id: t.status for t in self.manager.tasks}
-        self._was_busy = False
         self._filter = "all"
-        self.bridge: BrowserBridge | None = None
+        self._last_save = time.monotonic()
 
         try:
             self.iconphoto(True, tk.PhotoImage(file=os.path.join(os.path.dirname(__file__), "icon.png")))
@@ -564,10 +535,60 @@ class App(tk.Tk):
         self._build_ui()
         self.apply_theme()
         self._apply_columns()
-        if self.settings.browser_integration:
-            self._start_bridge()
-        self.protocol("WM_DELETE_WINDOW", self.close_app)
+        self.protocol("WM_DELETE_WINDOW", self.close_window)
+        self.bind("<FocusIn>", self._on_focus)  # check copied links only when the user comes back
+        if service.bridge is None and self.settings.browser_integration:
+            self.status_var.set("Integração com navegador indisponível: a porta já está em uso")
+        if mode == "main":
+            self.show_window()
+        elif mode == "countdown":
+            ShutdownCountdown(self)
+        self._process_events()
         self.after(REFRESH_MS, self._refresh)
+
+    # --------------------------------------------------------- window life
+    def show_window(self) -> None:
+        self.deiconify()
+        self.lift()
+        self.focus_force()
+        self._refresh(schedule=False)
+
+    def attach_dialog(self, dialog: tk.Toplevel) -> None:
+        # A dialog tied to a hidden main window would be hidden too, so only attach when visible.
+        if self.state() != "withdrawn":
+            dialog.transient(self)
+
+    def _dialogs_open(self) -> bool:
+        return any(isinstance(w, tk.Toplevel) for w in self.winfo_children())
+
+    def close_window(self) -> None:
+        """Window X: keep running in the background (unless disabled), freeing the GUI."""
+        if not self.settings.run_in_background:
+            self.quit_all()
+            return
+        if not self.settings.background_hint_shown:
+            self.settings.background_hint_shown = True
+            messagebox.showinfo(
+                "Continua em segundo plano",
+                "O PyDM continua a funcionar em segundo plano (quase sem gastar memória ou CPU), "
+                "pronto para receber downloads do navegador.\n\n"
+                "Para fechar de vez: menu Tarefas → Sair.\n"
+                "Para voltar a abrir: abra o PyDM de novo ou use o botão da extensão.", parent=self)
+        self._save_ui_settings()
+        self.destroy()
+
+    def quit_all(self) -> None:
+        self._save_ui_settings()
+        self.service.exit_requested = True
+        self.destroy()
+
+    def _save_ui_settings(self) -> None:
+        self.settings.watch_clipboard = bool(self.clip_var.get())
+        self.settings.confirm_browser = bool(self.confirm_var.get())
+        self.settings.auto_resume = bool(self.resume_var.get())
+        self.settings.scheduler = self.scheduler.to_dict()
+        self.settings.save()
+        self.manager.save()
 
     # ------------------------------------------------------------------- menu
     def _build_menu(self) -> None:
@@ -579,7 +600,9 @@ class App(tk.Tk):
         tasks.add_command(label="Baixar vídeo (YouTube, Instagram...)...", command=self.open_video_dialog)
         tasks.add_command(label="Capturar arquivos de um site...", command=lambda: GrabberDialog(self))
         tasks.add_separator()
-        tasks.add_command(label="Sair", command=self.close_app)
+        tasks.add_command(label="Fechar janela (continua em segundo plano)", accelerator="Ctrl+W",
+                          command=self.close_window)
+        tasks.add_command(label="Sair", accelerator="Ctrl+Q", command=self.quit_all)
         menubar.add_cascade(label="Tarefas", menu=tasks)
 
         dl = tk.Menu(menubar, tearoff=False)
@@ -617,6 +640,13 @@ class App(tk.Tk):
         opts.add_checkbutton(label="Capturar links copiados", variable=self.clip_var)
         self.resume_var = tk.BooleanVar(value=self.settings.auto_resume)
         opts.add_checkbutton(label="Retomar downloads ao abrir o PyDM", variable=self.resume_var)
+        self.bg_var = tk.BooleanVar(value=self.settings.run_in_background)
+        opts.add_checkbutton(label="Continuar em segundo plano ao fechar a janela", variable=self.bg_var,
+                             command=lambda: setattr(self.settings, "run_in_background", self.bg_var.get()))
+        self.autostart_var = tk.BooleanVar(value=autostart.supported() and autostart.is_enabled())
+        opts.add_checkbutton(label="Iniciar com o computador (em segundo plano)", variable=self.autostart_var,
+                             command=self._toggle_autostart,
+                             state="normal" if autostart.supported() else "disabled")
         opts.add_command(label="Instalar/atualizar suporte a vídeos (yt-dlp)",
                          command=lambda: VideoDialog.install(self))
         opts.add_command(label="Downloads simultâneos...", command=self._max_active)
@@ -633,6 +663,8 @@ class App(tk.Tk):
         self.menus += [tasks, dl, view, cols, opts, helpm]
         self.config(menu=menubar)
         self.bind_all("<Control-n>", lambda _e: self.open_add_dialog())
+        self.bind("<Control-w>", lambda _e: self.close_window())
+        self.bind("<Control-q>", lambda _e: self.quit_all())
 
     # --------------------------------------------------------------------- UI
     def _build_ui(self) -> None:
@@ -891,30 +923,45 @@ class App(tk.Tk):
         self.tree.configure(displaycolumns=cols)
 
     # ------------------------------------------------------- browser bridge
-    def _start_bridge(self) -> None:
-        try:
-            self.bridge = BrowserBridge(self._incoming.put, DEFAULT_PORT).start()
-        except OSError:
-            self.bridge = None
-            self.status_var.set(f"Integração com navegador indisponível: porta {DEFAULT_PORT} em uso "
-                                "(o PyDM já está aberto?)")
-
     def _toggle_bridge(self) -> None:
         self.settings.browser_integration = self.bridge_var.get()
-        if self.bridge_var.get() and not self.bridge:
-            self._start_bridge()
-        elif not self.bridge_var.get() and self.bridge:
-            self.bridge.stop()
-            self.bridge = None
+        if self.bridge_var.get():
+            if not self.service.start_bridge():
+                self.status_var.set("Integração com navegador indisponível: a porta já está em uso")
+        else:
+            self.service.stop_bridge()
 
-    def _handle_incoming(self) -> None:
+    def _toggle_autostart(self) -> None:
+        try:
+            autostart.set_enabled(self.autostart_var.get())
+        except OSError as exc:
+            messagebox.showerror("Iniciar com o computador", str(exc), parent=self)
+            self.autostart_var.set(autostart.is_enabled())
+
+    def _process_events(self) -> None:
+        """Handle what the background service received while the window is open."""
+        svc = self.service
         while True:
             try:
-                item = self._incoming.get_nowait()
+                kind, data = svc.events.get_nowait()
             except queue.Empty:
+                break
+            if kind == "tick":
+                action = svc.on_tick(data)
+                if action == "countdown":
+                    ShutdownCountdown(self)
+                elif action == "quit":
+                    self.after(2000, self.quit_all)
+            elif kind == "item":
+                if svc.accept_item(data) and data.get("kind") == "show":
+                    self.show_window()
+            elif kind == "quit":
+                self.quit_all()
                 return
+        svc.check_scheduler()
+        while svc.pending:
+            item = svc.pending.pop(0)
             if item.get("kind") == "video":
-                self.deiconify()
                 VideoDialog(self, item["page"], item.get("title"), item.get("media"), item.get("cookie_jar"))
                 continue
             headers = {}
@@ -922,12 +969,7 @@ class App(tk.Tk):
                 headers["Referer"] = item["referrer"]
             if item.get("cookies"):
                 headers["Cookie"] = item["cookies"]
-            if self.confirm_var.get():
-                self.deiconify()
-                AddDialog(self, item["url"], item.get("filename"), headers, title="Download do navegador")
-            else:
-                self.add_download(item["url"], self.settings.dest_dir, self.settings.connections, True,
-                                  item.get("filename"), headers)
+            AddDialog(self, item["url"], item.get("filename"), headers, title="Download do navegador")
 
     def _extension_help(self) -> None:
         folder = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "browser-extension")
@@ -943,6 +985,10 @@ class App(tk.Tk):
             "cole o link em 'Baixar vídeo' e escolha a qualidade.")
 
     # ---------------------------------------------------------------- refresh
+    def _on_focus(self, event) -> None:
+        if event.widget is self:
+            self._check_clipboard()
+
     def _check_clipboard(self) -> None:
         if not self.clip_var.get():
             return
@@ -987,25 +1033,26 @@ class App(tk.Tk):
             t.url,
         )
 
-    def _scheduler_tick(self) -> None:
-        for event in self.scheduler.due():
-            if event == "start":
-                self.manager.resume_all()
-                self.status_var.set("Agendador: downloads iniciados")
-            elif event == "stop":
-                self._pause_all()
-                self.status_var.set("Agendador: downloads pausados")
-        busy = any(t.is_running() or t.status == Status.QUEUED for t in self.manager.tasks)
-        if self._was_busy and not busy and self.manager.all_finished():
-            action = self.scheduler.on_complete
-            if action == "shutdown":
-                ShutdownCountdown(self)
-            elif action == "close":
-                self.after(2000, self.close_app)
-        self._was_busy = busy
-
     def _refresh(self, schedule: bool = True) -> None:
-        self.manager.tick()
+        if schedule:
+            if not self.winfo_exists():
+                return
+            self._process_events()
+            state = self.state()
+            if state == "withdrawn":
+                # Dialog-only mode: go back to the background once the dialogs are closed.
+                if not self._dialogs_open() and not self.service.pending:
+                    self.destroy()
+                    return
+                self.after(300, self._refresh)
+                return
+            busy = any(t.is_running() for t in self.manager.tasks)
+            if state == "iconic":  # minimized: don't redraw anything
+                self.after(1000, self._refresh)
+                return
+            if busy and time.monotonic() - self._last_save > 5:
+                self._last_save = time.monotonic()
+                self.manager.save()  # keep progress in the list file
         total_speed = 0.0
         active = 0
         visible = [t for t in self.manager.tasks if self._visible(t)]
@@ -1036,29 +1083,16 @@ class App(tk.Tk):
             self.side.item(key, text=f"{label} ({counts[key]})")
 
         if schedule:
-            self._handle_incoming()
-            self._check_clipboard()
-            self._scheduler_tick()
             if active:
                 limit = f" (limite {self.settings.global_limit_kb} KB/s)" if self.settings.global_limit_kb else ""
                 self.status_var.set(f"{active} download(s) ativo(s) — {format_size(total_speed)}/s{limit}")
-            self.after(REFRESH_MS, self._refresh)
-
-    def close_app(self) -> None:
-        self.settings.watch_clipboard = bool(self.clip_var.get())
-        self.settings.confirm_browser = bool(self.confirm_var.get())
-        self.settings.scheduler = self.scheduler.to_dict()
-        self.settings.save()
-        if self.bridge:
-            self.bridge.stop()
-        self.settings.auto_resume = bool(self.resume_var.get())
-        self.settings.save()
-        self.manager.shutdown()
-        self.destroy()
+            # Fast refresh only while something is downloading.
+            self.after(REFRESH_MS if active else 1500, self._refresh)
 
 
 def main() -> None:
-    App().mainloop()
+    from .service import run
+    run()
 
 
 if __name__ == "__main__":

@@ -1,7 +1,6 @@
-"""PyDM - a free multi-connection download manager."""
+"""PyDM - a free multi-connection download manager.
 
-from .engine import DownloadTask, Status, probe
-from .manager import DownloadManager
+Kept empty on purpose: importing the package must stay cheap for the background service.
+"""
 
-__all__ = ["DownloadTask", "DownloadManager", "Status", "probe"]
-__version__ = "0.1.0"
+__version__ = "0.4.0"
