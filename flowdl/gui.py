@@ -75,9 +75,12 @@ class AddDialog(tk.Toplevel):
     """'Download file info' dialog: confirm name / folder before downloading."""
 
     def __init__(self, app: "App", url: str = "", filename: str | None = None,
-                 headers: dict | None = None, title: str = "Adicionar download"):
+                 headers: dict | None = None, title: str = "Adicionar download", rid: str | None = None):
         super().__init__(app)
         self.app, self.headers = app, headers
+        self.rid = rid  # set when the download came from the browser
+        self._decided = False
+        self.bind("<Destroy>", self._on_destroy)
         self.title(title)
         app.attach_dialog(self)
         self.resizable(True, False)
@@ -129,9 +132,21 @@ class AddDialog(tk.Toplevel):
             conns = max(1, min(32, int(self.conns.get())))
         except (tk.TclError, ValueError):
             conns = 8
-        self.app.add_download(url, self.folder.get(), conns, start,
-                              self.name.get().strip() or None, self.headers)
+        task = self.app.add_download(url, self.folder.get(), conns, start,
+                                     self.name.get().strip() or None, self.headers)
+        self._decided = True
+        svc = self.app.service
+        if start:
+            svc.bind_request(self.rid, task)  # the browser shows it too
+            if self.app.settings.show_progress_window:
+                ProgressWindow(self.app, task)
+        else:
+            svc.cancel_request(self.rid, "later")  # starts later, only in the app
         self.destroy()
+
+    def _on_destroy(self, event) -> None:
+        if event.widget is self and not self._decided:
+            self.app.service.cancel_request(self.rid)  # "Cancelar": the extension stops waiting
 
 
 class SchedulerDialog(tk.Toplevel):
@@ -482,6 +497,80 @@ def re_safe(text: str) -> str:
     return "".join(ch if ch.isalnum() or ch in ".-" else "_" for ch in text)[:80]
 
 
+class ProgressWindow(tk.Toplevel):
+    """Small window with a download's progress (like IDM's). Closes itself when done."""
+
+    def __init__(self, app: "App", task):
+        super().__init__(app)
+        self.app, self.task = app, task
+        app.attach_dialog(self)
+        self.resizable(False, False)
+        self.title("Flow Downloads")
+        frm = ttk.Frame(self, padding=14)
+        frm.pack(fill="both", expand=True)
+        self.vars = {}
+        rows = [("url", "Endereço"), ("state", "Estado"), ("size", "Tamanho"), ("done", "Baixado"),
+                ("speed", "Velocidade"), ("eta", "Tempo restante"), ("conns", "Conexões")]
+        for i, (key, label) in enumerate(rows):
+            ttk.Label(frm, text=label + ":").grid(row=i, column=0, sticky="w", pady=1)
+            self.vars[key] = tk.StringVar()
+            ttk.Label(frm, textvariable=self.vars[key], width=52).grid(row=i, column=1, sticky="w", padx=(8, 0))
+        self.vars["url"].set(task.url if len(task.url) <= 60 else task.url[:57] + "...")
+        self.bar = ttk.Progressbar(frm, length=440, mode="determinate", maximum=1000)
+        self.bar.grid(row=len(rows), column=0, columnspan=2, sticky="ew", pady=(10, 8))
+        btns = ttk.Frame(frm)
+        btns.grid(row=len(rows) + 1, column=0, columnspan=2, sticky="e")
+        self.pause_btn = ttk.Button(btns, text="Pausar", command=self._toggle)
+        self.pause_btn.pack(side="left", padx=4)
+        ttk.Button(btns, text="Cancelar", command=self._cancel).pack(side="left", padx=4)
+        ttk.Button(btns, text="Esconder", command=self.destroy).pack(side="left", padx=4)
+        self.protocol("WM_DELETE_WINDOW", self.destroy)
+        self.lift()
+        self.attributes("-topmost", True)
+        self.after(400, lambda: self.winfo_exists() and self.attributes("-topmost", False))
+        self._closing = False
+        self._update()
+
+    def _toggle(self) -> None:
+        if self.task.is_running():
+            self.app.manager.pause(self.task)
+        else:
+            self.app.manager.resume(self.task)
+
+    def _cancel(self) -> None:
+        if messagebox.askyesno("Cancelar download", "Cancelar este download?", parent=self):
+            self.app.manager.remove(self.task, delete_files=True)
+            self.destroy()
+
+    def _update(self) -> None:
+        if not self.winfo_exists():
+            return
+        t = self.task
+        running = t.is_running()
+        status = t.status
+        if status == Status.ERROR and t.error:
+            status = f"Erro: {t.error}"
+        elif status == Status.DOWNLOADING:
+            status = "Recebendo dados..." + (f" ({t.connection_note})" if getattr(t, "connection_note", "") else "")
+        self.vars["state"].set(status)
+        self.vars["size"].set(format_size(t.size))
+        self.vars["done"].set(f"{format_size(t.downloaded)} ({t.progress * 100:.1f}%)")
+        self.vars["speed"].set(f"{format_size(t.speed)}/s" if running else "-")
+        self.vars["eta"].set(format_time(t.eta) if running else "-")
+        self.vars["conns"].set(str(t.active_connections) if running else "-")
+        self.bar["value"] = int(t.progress * 1000)
+        self.title(f"{t.progress * 100:.0f}% {t.filename or ''}".strip())
+        self.pause_btn.configure(text="Pausar" if running or t.status == Status.QUEUED else "Retomar")
+        if t.status == Status.COMPLETED and not self._closing:
+            self._closing = True
+            self.after(1200, self.destroy)  # the browser's list now shows it finished
+            return
+        if t not in self.app.manager.tasks:  # removed elsewhere
+            self.destroy()
+            return
+        self.after(500, self._update)
+
+
 class ShutdownCountdown(tk.Toplevel):
     def __init__(self, app: "App", seconds: int = 30):
         super().__init__(app)
@@ -591,8 +680,10 @@ class App(tk.Tk):
     def close_gui(self) -> None:
         """Destroy the window cleanly: cancel pending timers first, so nothing fires afterwards."""
         try:
+            # Cancel in Tcl directly: after_cancel() also deletes the Python callback, which
+            # destroy() then tries to delete again ("can't delete Tcl command").
             for after_id in self.tk.splitlist(self.tk.call("after", "info")):
-                self.after_cancel(after_id)
+                self.tk.call("after", "cancel", after_id)
         except tk.TclError:
             pass
         self.destroy()
@@ -793,13 +884,14 @@ class App(tk.Tk):
         self.tree.tag_configure(Status.PAUSED, foreground=c["paused"])
 
     # ---------------------------------------------------------------- actions
-    def add_download(self, url, folder, conns, start=True, filename=None, headers=None) -> None:
+    def add_download(self, url, folder, conns, start=True, filename=None, headers=None):
         self.settings.dest_dir = folder or self.settings.dest_dir
         self.settings.connections = conns
-        self.manager.add(url, folder, conns, start=start, filename=filename, headers=headers)
+        task = self.manager.add(url, folder, conns, start=start, filename=filename, headers=headers)
         self._last_clip = url
         self.status_var.set(f"Adicionado: {filename or url}")
         self._refresh(schedule=False)
+        return task
 
     def open_add_dialog(self, url: str = "") -> None:
         AddDialog(self, url or self.url_var.get().strip())
@@ -906,6 +998,8 @@ class App(tk.Tk):
     def _open_folder(self) -> None:
         tasks = self._selected()
         folder = tasks[0].dest_dir if tasks else self.settings.dest_dir
+        if tasks and tasks[0].path and os.path.exists(tasks[0].path):
+            folder = os.path.dirname(tasks[0].path)  # e.g. the browser's folder
         if os.path.isdir(folder):
             open_path(folder)
 
@@ -976,6 +1070,11 @@ class App(tk.Tk):
         svc.check_scheduler()
         while svc.pending:
             item = svc.pending.pop(0)
+            if item.get("kind") == "progress":
+                task = next((t for t in self.manager.tasks if t.id == item["task"]), None)
+                if task is not None:
+                    ProgressWindow(self, task)
+                continue
             if item.get("kind") == "video":
                 VideoDialog(self, item["page"], item.get("title"), item.get("media"), item.get("cookie_jar"))
                 continue
@@ -984,7 +1083,8 @@ class App(tk.Tk):
                 headers["Referer"] = item["referrer"]
             if item.get("cookies"):
                 headers["Cookie"] = item["cookies"]
-            AddDialog(self, item["url"], item.get("filename"), headers, title="Download do navegador")
+            AddDialog(self, item["url"], item.get("filename"), headers, title="Download do navegador",
+                      rid=item.get("rid"))
 
     def _extension_help(self) -> None:
         folder = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "browser-extension")

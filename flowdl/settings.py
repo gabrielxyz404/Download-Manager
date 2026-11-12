@@ -20,7 +20,8 @@ class Settings:
         self.columns = list(DEFAULT_COLUMNS)
         self.global_limit_kb = 0
         self.browser_integration = True
-        self.confirm_browser = True
+        self.confirm_browser = False  # browser downloads start at once, with a progress window
+        self.show_progress_window = True
         self.auto_resume = True
         self.run_in_background = True
         self.background_hint_shown = False

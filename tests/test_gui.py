@@ -368,6 +368,48 @@ class GuiTests(unittest.TestCase):
         self.wait_status(task, "Concluído", 60)
         self.assertEqual(os.path.basename(task.path), "Meu vídeo.mp3")
 
+    # ---------------------------------------------------- progress window
+    def test_progress_window_follows_and_closes_when_done(self):
+        Handler.delay = 0.03
+        app = self.open_app()
+        task = app.add_download(self.base + "/progresso.bin", self.dl, 4)
+        win = self.gui.ProgressWindow(app, task)
+        self.assertTrue(pump(app, 10, lambda: win.bar["value"] > 0))
+        self.assertIn("progresso.bin", win.title())
+        Handler.delay = 0.0
+        self.assertTrue(pump(app, 30, lambda: not self._alive(win)), "the window should close by itself")
+        self.assertEqual(task.status, "Concluído")
+
+    def test_progress_window_pause_resume_cancel(self):
+        Handler.delay = 0.2
+        app = self.open_app()
+        task = app.add_download(self.base + "/controlo.bin", self.dl, 2)
+        win = self.gui.ProgressWindow(app, task)
+        self.wait_status(task, "Baixando", 10)
+        win._toggle()
+        self.wait_status(task, "Pausado", 10)
+        pump(app, 0.6)
+        self.assertEqual(str(win.pause_btn["text"]), "Retomar")
+        win._toggle()
+        self.wait_status(task, "Baixando", 10)
+        with mock.patch.object(self.gui.messagebox, "askyesno", return_value=True):
+            win._cancel()
+        pump(app, 0.5)
+        self.assertNotIn(task, self.svc.manager.tasks)
+        self.assertFalse(self._alive(win))
+
+    def test_quit_while_progress_window_is_open(self):
+        """Regression: closing the app with a progress window open raised a Tk error
+        ("can't delete Tcl command") and the app did not close."""
+        Handler.delay = 0.2
+        app = self.open_app()
+        task = app.add_download(self.base + "/sair.bin", self.dl, 2)
+        self.gui.ProgressWindow(app, task)
+        pump(app, 1)
+        app.quit_all()
+        self.assertFalse(self._alive(app))
+        self.assertTrue(self.svc.exit_requested)
+
     # -------------------------------------------------------- other windows
     def test_site_grabber(self):
         app = self.open_app()

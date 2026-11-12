@@ -10,6 +10,7 @@ not come from a regular web page origin, so websites cannot push downloads.
 from __future__ import annotations
 
 import json
+import secrets
 import socket
 import threading
 from typing import Callable
@@ -39,17 +40,28 @@ def _download_item(data: dict) -> dict:
     url = str(data.get("url", ""))
     if not url.startswith(("http://", "https://", "ftp://")):
         raise ValueError("url inválida")
-    return {"url": url, "filename": data.get("filename") or None,
+    item = {"url": url, "filename": data.get("filename") or None,
             "referrer": data.get("referrer") or None, "cookies": data.get("cookies") or None}
+    if data.get("mirror"):
+        # The extension wants to show this download in the browser too: it will ask about
+        # this request id until the download starts (or is cancelled in the app).
+        item["rid"] = secrets.token_urlsafe(12)
+    return item
 
 
 def handle_request(method: str, path: str, headers: dict, body: bytes,
-                   on_add: Callable[[dict], None]) -> tuple[int, dict]:
+                   on_add: Callable[[dict], None], api=None) -> tuple[int, dict]:
     origin = headers.get("origin", "")
     if origin.startswith(("http://", "https://")) or headers.get("x-flowdl") != "1":
         return 403, {"ok": False}
     if method == "GET" and path == "/ping":
         return 200, {"app": "flowdl", "ok": True}
+    if api is not None and (path.startswith("/request/") or path in ("/control", "/mirror-done")):
+        try:
+            data = json.loads(body or b"{}") if method == "POST" else {}
+        except ValueError:
+            return 400, {"ok": False}
+        return api(method, path, data)
     if method != "POST" or path not in ("/add", "/video", "/show"):
         return 403, {"ok": False}
     try:
@@ -61,12 +73,14 @@ def handle_request(method: str, path: str, headers: dict, body: bytes,
     except (ValueError, TypeError, AttributeError) as exc:
         return 400, {"ok": False, "error": str(exc)}
     on_add(item)
-    return 200, {"ok": True}
+    return 200, {"ok": True, **({"rid": item["rid"]} if "rid" in item else {})}
 
 
 class BrowserBridge:
-    def __init__(self, on_add: Callable[[dict], None], port: int = DEFAULT_PORT):
+    def __init__(self, on_add: Callable[[dict], None], port: int = DEFAULT_PORT, api=None, on_stream=None):
         self.on_add = on_add
+        self.api = api              # request status / control / browser finished
+        self.on_stream = on_stream  # sends a download's bytes to the browser
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):  # Windows: never share the port
             self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
@@ -82,6 +96,8 @@ class BrowserBridge:
             raise
         self.port = self.sock.getsockname()[1]
         self._running = False
+        self._clients = 0  # requests being answered right now
+        self._clients_cond = threading.Condition()
         self._thread = threading.Thread(target=self._serve, name="bridge", daemon=True)
 
     def start(self) -> "BrowserBridge":
@@ -97,6 +113,8 @@ class BrowserBridge:
             pass
         self._thread.join(2)
         self.sock.close()
+        with self._clients_cond:  # let requests already received finish (their events count)
+            self._clients_cond.wait_for(lambda: self._clients == 0, timeout=3)
 
     def _serve(self) -> None:
         while self._running:
@@ -107,7 +125,17 @@ class BrowserBridge:
             if not self._running:
                 conn.close()
                 return
-            threading.Thread(target=self._client, args=(conn,), daemon=True).start()
+            threading.Thread(target=self._client_counted, args=(conn,), daemon=True).start()
+
+    def _client_counted(self, conn: socket.socket) -> None:
+        with self._clients_cond:
+            self._clients += 1
+        try:
+            self._client(conn)
+        finally:
+            with self._clients_cond:
+                self._clients -= 1
+                self._clients_cond.notify_all()
 
     def _client(self, conn: socket.socket) -> None:
         try:
@@ -116,6 +144,7 @@ class BrowserBridge:
             while b"\r\n\r\n" not in data:
                 chunk = conn.recv(4096)
                 if not chunk or len(data) > MAX_HEADER:
+                    conn.close()
                     return
                 data += chunk
             head, body = data.split(b"\r\n\r\n", 1)
@@ -126,13 +155,18 @@ class BrowserBridge:
                 if ":" in line:
                     k, v = line.split(":", 1)
                     headers[k.strip().lower()] = v.strip()
+            if method == "GET" and path.startswith("/stream/") and self.on_stream:
+                # The token in the address is the key (the browser can't send our header).
+                self.on_stream(conn, path.split("?")[0], headers)  # closes the connection
+                return
             length = min(int(headers.get("content-length") or 0), MAX_BODY)
             while len(body) < length:
                 chunk = conn.recv(min(65536, length - len(body)))
                 if not chunk:
                     break
                 body += chunk
-            code, payload = handle_request(method, path.split("?")[0], headers, body[:length], self.on_add)
+            code, payload = handle_request(method, path.split("?")[0], headers, body[:length],
+                                           self.on_add, self.api)
         except (OSError, ValueError):
             code, payload = 400, {"ok": False}
         try:

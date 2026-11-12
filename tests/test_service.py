@@ -58,8 +58,15 @@ class ServiceTests(unittest.TestCase):
         self.assertFalse(t.is_alive(), "wait() did not return")
         return result[0]
 
+    def test_browser_download_without_confirmation_shows_progress_window(self):
+        self.settings.confirm_browser = False
+        post(self.port, "/add", {"url": self.base + "/progresso.bin"})
+        self.assertEqual(self.wait_mode(), "dialog")  # only the small progress window
+        self.assertEqual(self.svc.pending[0]["kind"], "progress")
+
     def test_silent_browser_download_needs_no_window(self):
         self.settings.confirm_browser = False
+        self.settings.show_progress_window = False
         self.settings.scheduler = {}
         self.svc.scheduler.on_complete = "close"  # returns from wait() once everything finished
         post(self.port, "/add", {"url": self.base + "/silent.bin"})
@@ -126,3 +133,23 @@ class RestartTests(unittest.TestCase):
                 BrowserBridge(lambda i: None, port=first.port)
         finally:
             first.stop()
+
+
+class BrowserListTests(unittest.TestCase):
+    def test_request_is_known_before_the_add_answer(self):
+        """Regression: the extension asked about its request before the main thread had
+        registered it, got 'unknown' and gave up (the download never showed in the browser)."""
+        tmp = tempfile.mkdtemp()
+        settings = Settings()
+        settings.path = type(settings.path)(os.path.join(tmp, "s.json"))
+        svc = Service(settings, DownloadManager(db_path=os.path.join(tmp, "db.json")), port=0)
+        svc.start_bridge()
+        try:
+            body = json.dumps({"url": "http://127.0.0.1:9/x.zip", "mirror": True}).encode()
+            req = urllib.request.Request(f"http://127.0.0.1:{svc.bridge.port}/add", data=body, method="POST",
+                                         headers={"X-FlowDL": "1", "Content-Type": "application/json"})
+            rid = json.loads(urllib.request.urlopen(req, timeout=5).read())["rid"]
+            # nobody is processing the event queue yet (main thread "busy")
+            self.assertEqual(svc.requests[rid]["state"], "waiting")
+        finally:
+            svc.stop_bridge()

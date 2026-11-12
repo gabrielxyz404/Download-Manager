@@ -15,6 +15,7 @@ How it works (same idea used by IDM):
 
 from __future__ import annotations
 
+import http.client
 import json
 import os
 import re
@@ -26,6 +27,7 @@ import urllib.request
 from collections import deque
 from email.message import Message
 
+from . import net
 from .categories import category_for
 from .limiter import GLOBAL_LIMITER, RateLimiter
 from .status import Status  # noqa: F401 (re-exported)
@@ -34,13 +36,26 @@ USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/120.0 Safari/537.36"
 )
-CHUNK_SIZE = 64 * 1024
+CHUNK_SIZE = 256 * 1024
 MIN_SPLIT_SIZE = 512 * 1024  # do not split segments smaller than 2x this
 MAX_RETRIES = 8
-START_CONNECTIONS = 2     # adaptive mode starts small...
+FIRST_REQUEST = 2 * 1024 * 1024  # the first request already fetches this much
+REQUEST_SECONDS = 2.0     # each later request asks for ~2 s worth of data...
+MIN_REQUEST = 1024 * 1024  # ...between 1 MB...
+MAX_REQUEST = 32 * 1024 * 1024  # ...and 32 MB, on a connection that stays open
+START_CONNECTIONS = 2     # adaptive mode starts small (4 for big files)...
+START_CONNECTIONS_BIG = 4
+BIG_FILE = 64 * 1024 * 1024
 RAMP_INTERVAL = 2.0       # ...measures the speed every 2 s...
 RAMP_MIN_GAIN = 1.15      # ...and doubles the connections while that gives 15%+ more speed
 LIMIT_CODES = (429, 503)  # "too many requests / busy": the server limits connections per user
+RECHECK_INTERVAL = 8.0    # after the test, re-check every 8 s...
+RECHECK_DROP = 0.7        # ...and test more connections if the speed fell below 70% of the best
+SLOW_FACTOR = 0.3         # a connection at <30% of the median speed...
+SLOW_MIN_AGE = 5.0        # ...for 5 s or more is reconnected (at most MAX_SWAPS times)
+MAX_SWAPS = 2
+ENDGAME_MIN_PIECE = 32 * 1024   # near the end, help connections that still need...
+ENDGAME_MIN_ETA = 1.5           # ...more than 1.5 s to finish their piece
 TIMEOUT = 30
 
 
@@ -53,6 +68,7 @@ class Segment:
         self.pos = start if pos is None else pos
         self.lock = threading.Lock()
         self.active = False
+        self.inflight_end = -1  # last byte of the request currently on its way
 
     @property
     def remaining(self) -> int:
@@ -99,33 +115,72 @@ def unique_path(path: str) -> str:
 
 def _request(url: str, start: int | None = None, end: int | None = None,
              headers: dict | None = None):
+    """One-off request with urllib (used by the grabber-style helpers and tests)."""
     req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT, **(headers or {})})
     if start is not None:
         req.add_header("Range", f"bytes={start}-{'' if end is None else end}")
     return urllib.request.urlopen(req, timeout=TIMEOUT)
 
 
+def _info_from_response(resp: net.Response) -> dict:
+    headers = resp.headers
+    size = None
+    resumable = False
+    if resp.status == 206:
+        m = re.search(r"/(\d+)\s*$", headers.get("Content-Range", ""))
+        if m:
+            size = int(m.group(1))
+            resumable = True
+    elif headers.get("Content-Length"):
+        size = int(headers["Content-Length"])
+    return {"url": resp.url, "size": size, "resumable": resumable,
+            "filename": _filename_from_headers(headers, resp.url)}
+
+
+def _headers(extra: dict | None) -> dict:
+    return {"User-Agent": USER_AGENT, **(extra or {})}
+
+
 def probe(url: str, headers: dict | None = None) -> dict:
     """Find out size, final URL, file name and range support for ``url``."""
-    # A 1-byte range GET is more reliable than HEAD (many servers mishandle HEAD).
-    with _request(url, 0, 0, headers) as resp:
-        headers = resp.headers
-        final_url = resp.geturl()
-        size = None
-        resumable = False
-        if resp.status == 206:
-            m = re.search(r"/(\d+)\s*$", headers.get("Content-Range", ""))
-            if m:
-                size = int(m.group(1))
-                resumable = True
-        elif headers.get("Content-Length"):
-            size = int(headers["Content-Length"])
-        return {
-            "url": final_url,
-            "size": size,
-            "resumable": resumable,
-            "filename": _filename_from_headers(headers, final_url),
-        }
+    conn = net.Connection(TIMEOUT)
+    try:
+        resp = conn.get(url, _headers(headers), 0, 0)
+        return _info_from_response(resp)
+    finally:
+        conn.close()
+
+
+class _Worker:
+    """State of one connection: what it is downloading and how fast."""
+
+    def __init__(self, seg: "Segment", conn=None, resp=None):
+        self.seg, self.conn, self.resp = seg, conn, resp
+        self.started = self.last_swap = time.monotonic()
+        self.alive = True
+        self.got_data = False
+        self.reconnect = False
+        self.swaps = 0
+        self.total = 0
+        self._samples: deque[tuple[float, int]] = deque([(self.started, 0)])
+
+    def count(self, n: int) -> None:
+        self.total += n
+        now = time.monotonic()
+        self._samples.append((now, self.total))
+        while len(self._samples) > 2 and now - self._samples[0][0] > 3.0:
+            self._samples.popleft()
+
+    def speed(self) -> float:
+        now = time.monotonic()
+        t0, b0 = self._samples[0]
+        return (self.total - b0) / (now - t0) if now - t0 > 0.2 else 0.0
+
+    def reset_speed(self) -> None:
+        self._samples = deque([(time.monotonic(), self.total)])
+
+    def request_size(self) -> int:
+        return int(max(MIN_REQUEST, min(MAX_REQUEST, self.speed() * REQUEST_SECONDS)))
 
 
 class DownloadTask:
@@ -162,7 +217,19 @@ class DownloadTask:
         self._wake = threading.Event()  # set when a connection finishes: react at once
         self.server_limit: int | None = None  # connections the server accepts, when it refuses more
         self.connection_note = ""  # shown in the list: speed test / limit found
+        self.reconnections = 0  # slow connections replaced
+        self._final_url: str | None = None  # after redirects; may expire, self.url never does
+        self._url_refreshed = 0.0
+        self._first = None
+        self._workers: list[_Worker] = []
+        # Browser mode: the browser also shows this download (it receives the bytes from the
+        # app while they arrive) and saves the final file itself.
+        self.mirror = False
+        self.stream_token: str | None = None
+        self.rid: str | None = None  # the extension's request id for this download
+        self.awaiting_browser = False  # finished here, waiting for the browser to take it
         self.on_done = None  # called (from the download thread) when it stops for any reason
+        self.on_change = None  # called when the file name / place is known (to save the list)
 
     # ------------------------------------------------------------------ public
     @property
@@ -223,6 +290,8 @@ class DownloadTask:
             "path": self.path, "size": self.size, "status": self.status,
             "downloaded": self.downloaded, "added_at": self.added_at,
             "headers": self.headers, "speed_limit": self.speed_limit,
+            "mirror": self.mirror, "stream_token": self.stream_token, "rid": self.rid,
+            "awaiting_browser": self.awaiting_browser,
         }
 
     @classmethod
@@ -233,6 +302,10 @@ class DownloadTask:
         t.size = d.get("size")
         t.downloaded = d.get("downloaded", 0)
         t.added_at = d.get("added_at", time.time())
+        t.mirror = d.get("mirror", False)
+        t.stream_token = d.get("stream_token")
+        t.rid = d.get("rid")
+        t.awaiting_browser = d.get("awaiting_browser", False)
         status = d.get("status", Status.PAUSED)
         if status == Status.COMPLETED:
             t.status = Status.COMPLETED
@@ -304,6 +377,8 @@ class DownloadTask:
     def _run(self) -> None:
         try:
             self._prepare()
+            if self.on_change:
+                self.on_change(self)
             if self._stop.is_set():
                 self.status = Status.PAUSED
                 return
@@ -323,10 +398,29 @@ class DownloadTask:
 
     def _prepare(self) -> None:
         os.makedirs(self.dest_dir, exist_ok=True)
+        self._first = None
         if self.path and self.segments and os.path.exists(self._part_path):
             return  # resuming from saved state
-        info = probe(self.url, self.headers)
-        self.url = info["url"]
+        if not self.path:
+            # An interrupted download of this same link in this folder? Resume it without
+            # asking the server anything (the name usually comes from the link).
+            guess = os.path.join(self.dest_dir, self.filename or sanitize_filename(
+                urllib.parse.unquote(os.path.basename(urllib.parse.urlparse(self.url).path))))
+            if self._state_matches(guess):
+                self.path = guess
+                self.filename = os.path.basename(guess)
+                if self._load_state() and self.segments:
+                    return
+        # The first request already asks for the first piece of the file: its answer tells
+        # us size / name / range support AND its data is kept (no wasted round trip).
+        conn = net.Connection(TIMEOUT)
+        try:
+            resp = conn.get(self.url, _headers(self.headers), 0, FIRST_REQUEST - 1)
+        except Exception:
+            conn.close()
+            raise
+        info = _info_from_response(resp)
+        self._final_url = info["url"]
         self.size = info["size"]
         self.resumable = info["resumable"]
         if not self.filename:
@@ -339,18 +433,39 @@ class DownloadTask:
                 self.path = unique_path(candidate)
             self.filename = os.path.basename(self.path)
         if self._load_state() and self.size == info["size"]:
+            conn.close()  # we already have these bytes
             return
         self.segments = []
         self.downloaded = 0
+        self._first = (conn, resp)
+
+    def _current_url(self) -> str:
+        return self._final_url or self.url
+
+    def _refresh_url(self) -> None:
+        """Signed download links (GitHub, cloud storage...) expire after a while. Ask the
+        original link again for a fresh one."""
+        with self._lock:
+            if time.monotonic() - self._url_refreshed < 5:
+                return
+            self._url_refreshed = time.monotonic()
+        info = probe(self.url, self.headers)
+        if info["size"] != self.size:
+            raise RuntimeError("O ficheiro mudou no servidor")
+        self._final_url = info["url"]
 
     # -- single connection (server does not support ranges / unknown size)
     def _download_single(self) -> None:
         self.downloaded = 0
         self._active_workers = 1
+        conn, resp = self._first or (net.Connection(TIMEOUT), None)
+        self._first = None
         try:
-            with _request(self.url, headers=self.headers) as resp, open(self._part_path, "wb") as f:
+            if resp is None or resp.status == 206:  # need the whole body in one answer
+                resp = conn.get(self.url, _headers(self.headers))
+            with open(self._part_path, "wb") as f:
                 while not self._stop.is_set():
-                    chunk = resp.read(CHUNK_SIZE)
+                    chunk = resp.read1(CHUNK_SIZE)
                     if not chunk:
                         break
                     f.write(chunk)
@@ -358,6 +473,7 @@ class DownloadTask:
                     self._update_speed()
                     self._throttle(len(chunk))
         finally:
+            conn.close()
             self._active_workers = 0
         if self._stop.is_set():
             # Can't resume without range support: start over next time.
@@ -370,37 +486,56 @@ class DownloadTask:
 
     # -- multiple connections
     def _download_segmented(self) -> None:
+        first = self._first
+        self._first = None
         if not self.segments:
-            self._create_segments()
+            first_len = 0
+            if first is not None:
+                m = re.match(r"bytes (\d+)-(\d+)/", first[1].headers.get("Content-Range", ""))
+                first_len = int(m.group(2)) + 1 if m and int(m.group(1)) == 0 else 0
+            self._create_segments(first_len)
         if not os.path.exists(self._part_path):
             with open(self._part_path, "wb") as f:
                 f.truncate(self.size)
 
-        workers: list[threading.Thread] = []
+        threads: list[threading.Thread] = []
         last_save = time.monotonic()
         sync_fd = os.open(self._part_path, os.O_RDWR | getattr(os, "O_BINARY", 0))
+        self._workers = []
 
-        def spawn(seg: Segment) -> None:
-            seg.active = True
+        def spawn(seg: Segment, conn=None, resp=None) -> None:
+            w = _Worker(seg, conn, resp)
             with self._lock:
                 self._active_workers += 1
-            t = threading.Thread(target=self._worker, args=(seg,), daemon=True)
-            workers.append(t)
+                self._workers.append(w)
+            t = threading.Thread(target=self._worker, args=(w,), daemon=True)
+            threads.append(t)
             t.start()
 
-        # Server speed test: start with a few connections and double them while the
-        # total speed keeps growing. Stop when more connections stop helping (the line
-        # or the server is saturated) or when the server refuses them (its limit).
+        # Server speed test: start with a few connections (more for big files) and double
+        # them while the total speed keeps growing. Stop when more connections stop helping
+        # (the line or the server is saturated) or when the server refuses them (its limit).
+        # Keep measuring: if the speed drops later, try more connections again.
         cap = self.connections
-        target = min(START_CONNECTIONS, cap)
+        start_n = START_CONNECTIONS_BIG if self.size >= BIG_FILE else START_CONNECTIONS
+        target = min(start_n, cap)
         ramping = target < cap
         ramp_at = time.monotonic() + RAMP_INTERVAL
         ramp_speed: float | None = None
-        self.connection_note = "a testar velocidade" if ramping else ""
+        best_speed = 0.0
+        recheck_at = 0.0
+        self.connection_note = "testando velocidade" if ramping else ""
         self.server_limit = None
 
+        if first is not None:
+            seg0 = self.segments[0]
+            seg0.active = True
+            seg0.inflight_end = min(seg0.end, int(re.match(r"bytes \d+-(\d+)/",
+                                                           first[1].headers["Content-Range"]).group(1)))
+            spawn(seg0, *first)
         for seg in self.segments:
-            if seg.remaining > 0 and self._active_workers < target:
+            if seg.remaining > 0 and not seg.active and self._active_workers < target:
+                seg.active = True
                 spawn(seg)
 
         while True:
@@ -427,9 +562,22 @@ class DownloadTask:
                         self.connection_note = ""
                 else:
                     ramping = False  # more connections did not make it faster
-                    self.connection_note = f"{self._active_workers} ligações chegam"
-            # Dynamic segmentation: keep `target` workers busy.
+                    self.connection_note = f"{self._active_workers} conexões bastam"
+                    recheck_at = now + RECHECK_INTERVAL
+            elif (not ramping and self.server_limit is None and target < cap
+                  and recheck_at and now >= recheck_at):
+                # Speed dropped a lot since the best moment? Test more connections again.
+                current = self._recent_speed(3.0)
+                recheck_at = now + RECHECK_INTERVAL
+                if best_speed and current < best_speed * RECHECK_DROP:
+                    ramp_speed, ramping = current, True
+                    target = min(cap, target * 2)
+                    ramp_at = now + RAMP_INTERVAL
+                    self.connection_note = "testando velocidade"
+            best_speed = max(best_speed, self._recent_speed(3.0))
             if not self._stop.is_set():
+                self._replace_slow_connections(now)
+                # Dynamic segmentation: keep `target` connections busy.
                 while self._active_workers < target:
                     new_seg = self._split_largest()
                     if new_seg is None:
@@ -438,12 +586,13 @@ class DownloadTask:
             if time.monotonic() - last_save > 2.0:
                 self._checkpoint(sync_fd)
                 last_save = time.monotonic()
-            if not any(t.is_alive() for t in workers):
+            if not any(t.is_alive() for t in threads):
                 break
 
         self.downloaded = sum(s.pos - s.start for s in self.segments)
         self._checkpoint(sync_fd)
         os.close(sync_fd)
+        self._workers = []
         if self._worker_error:
             raise RuntimeError(self._worker_error)
         if all(s.remaining == 0 for s in self.segments):
@@ -451,7 +600,7 @@ class DownloadTask:
         else:
             self.status = Status.PAUSED
 
-    def _create_segments(self) -> None:
+    def _create_segments(self, first_len: int = 0) -> None:
         n = max(1, min(self.connections, self.size // MIN_SPLIT_SIZE or 1))
         step = self.size // n
         self.segments = []
@@ -459,62 +608,163 @@ class DownloadTask:
             start = i * step
             end = self.size - 1 if i == n - 1 else (i + 1) * step - 1
             self.segments.append(Segment(start, end))
+        if first_len > self.segments[0].end + 1:
+            # The first answer already covers more than the first piece: grow piece 0 so
+            # that connection is not cut, and shrink / drop the pieces it overlaps.
+            seg0 = self.segments[0]
+            seg0.end = min(first_len, self.size) - 1
+            rest = []
+            for s in self.segments[1:]:
+                if s.end <= seg0.end:
+                    continue
+                if s.start <= seg0.end:
+                    s.start = s.pos = seg0.end + 1
+                rest.append(s)
+            self.segments = [seg0] + rest
 
     def _split_largest(self) -> Segment | None:
+        """Work for a free connection: an idle piece, or the second half of the largest
+        piece still to download (never cutting a request already on its way)."""
         with self._lock:
-            candidates = [s for s in self.segments if s.remaining >= 2 * MIN_SPLIT_SIZE]
-            # Idle segments (left over from a previous session) are picked up as-is.
             idle = [s for s in self.segments if not s.active and s.remaining > 0]
             if idle:
+                idle[0].active = True
                 return idle[0]
-            if not candidates:
-                return None
-            seg = max(candidates, key=lambda s: s.remaining)
-            with seg.lock:
-                if seg.remaining < 2 * MIN_SPLIT_SIZE:
-                    return None
-                mid = seg.pos + seg.remaining // 2
-                new = Segment(mid, seg.end)
-                seg.end = mid - 1
-            self.segments.append(new)
-            self.segments.sort(key=lambda s: s.start)
-            return new
+            best, best_free = None, 0
+            for s in self.segments:
+                with s.lock:
+                    free_from = max(s.pos, s.inflight_end + 1) if s.active else s.pos
+                    free = s.end - free_from + 1
+                if free >= 2 * MIN_SPLIT_SIZE and free > best_free:
+                    best, best_free = s, free
+            if best is not None:
+                with best.lock:
+                    free_from = max(best.pos, best.inflight_end + 1) if best.active else best.pos
+                    free = best.end - free_from + 1
+                    if free >= 2 * MIN_SPLIT_SIZE:
+                        mid = free_from + free // 2
+                        new = Segment(mid, best.end)
+                        best.end = mid - 1
+                        return self._add_segment(new)
+            return self._endgame_split()
 
-    def _worker(self, seg: Segment) -> None:
+    def _endgame_split(self) -> Segment | None:
+        """Near the end, help the slowest connection by taking over most of what it still has
+        to receive, even inside its current request (it stops at the new boundary). It keeps
+        only the share it can finish in the same time as a fast connection. This avoids the
+        classic wait at 99% for one slow connection. Called with self._lock held."""
+        best, best_eta, best_speed = None, ENDGAME_MIN_ETA, 1.0
+        fast = max([w.speed() for w in self._workers] + [1.0])
+        for w in self._workers:
+            s = w.seg
+            if s is None or not s.active:
+                continue
+            with s.lock:
+                remaining = s.remaining
+            speed = max(w.speed(), 1.0)
+            eta = remaining / speed
+            if remaining >= 2 * ENDGAME_MIN_PIECE and eta > best_eta:
+                best, best_eta, best_speed = s, eta, speed
+        if best is None:
+            return None
+        share = best_speed / (best_speed + max(fast, best_speed))  # slow one keeps this fraction
+        with best.lock:
+            if best.remaining < 2 * ENDGAME_MIN_PIECE:
+                return None
+            keep = max(ENDGAME_MIN_PIECE, min(best.remaining // 2, int(best.remaining * share)))
+            mid = best.pos + keep
+            new = Segment(mid, best.end)
+            best.end = mid - 1
+        return self._add_segment(new)
+
+    def _add_segment(self, new: Segment) -> Segment:
+        new.active = True
+        self.segments.append(new)
+        self.segments.sort(key=lambda s: s.start)
+        return new
+
+    def _replace_slow_connections(self, now: float) -> None:
+        """A connection much slower than the others is often stuck on a slow server node.
+        Ask it to reconnect (a new connection may land on a faster one)."""
+        with self._lock:
+            live = [w for w in self._workers if w.alive and w.got_data and now - w.started > SLOW_MIN_AGE]
+        if len(live) < 3:
+            return
+        speeds = sorted(w.speed() for w in live)
+        median = speeds[len(speeds) // 2]
+        for w in live:
+            if (w.speed() < median * SLOW_FACTOR and w.swaps < MAX_SWAPS
+                    and now - w.last_swap > SLOW_MIN_AGE and not w.reconnect):
+                w.reconnect = True
+                self.reconnections += 1
+
+    def _worker(self, w: "_Worker") -> None:
         retries = 0
-        got_data = False
         refusals = 0
+        url_refreshed = False
+        conn = w.conn or net.Connection(TIMEOUT)
+        resp = w.resp
+        seg = w.seg
         try:
             # Unbuffered: every chunk goes straight to the operating system, so nothing
             # sits in a Python buffer that would be lost if the app is killed.
             with open(self._part_path, "r+b", buffering=0) as f:
-                while not self._stop.is_set() and seg.remaining > 0:
+                while not self._stop.is_set():
+                    if seg.remaining == 0 and resp is None:
+                        seg.active = False
+                        seg = w.seg = self._split_largest()  # keep the connection, take new work
+                        if seg is None:
+                            break
+                        continue
                     try:
-                        with _request(self.url, seg.pos, seg.end, self.headers) as resp:
+                        if resp is None:
+                            req_end = min(seg.end, seg.pos + w.request_size() - 1)
+                            with seg.lock:
+                                seg.inflight_end = req_end
+                            resp = conn.get(self._current_url(), _headers(self.headers), seg.pos, req_end)
                             if resp.status != 206:
                                 raise RuntimeError("O servidor parou de aceitar downloads em partes")
-                            while not self._stop.is_set():
-                                chunk = resp.read(CHUNK_SIZE)
-                                if not chunk:
-                                    break
-                                with seg.lock:
-                                    chunk = chunk[: seg.remaining]
-                                    if chunk:
-                                        f.seek(seg.pos)
-                                        f.write(chunk)
-                                        seg.pos += len(chunk)
-                                    if seg.remaining == 0:
-                                        break
-                                retries = 0
-                                if not got_data:
-                                    got_data = True
-                                    with self._lock:
-                                        self._streaming += 1
-                                self._throttle(len(chunk))
-                    except (urllib.error.URLError, OSError, TimeoutError) as exc:
-                        code = exc.code if isinstance(exc, urllib.error.HTTPError) else None
-                        refused = isinstance(getattr(exc, "reason", exc), ConnectionRefusedError)
-                        if (code in LIMIT_CODES or refused) and not got_data and self._active_workers > 1:
+                            self._final_url = resp.url
+                        while not self._stop.is_set():
+                            chunk = resp.read1(CHUNK_SIZE)
+                            if not chunk:
+                                break
+                            with seg.lock:
+                                last = min(seg.end, seg.inflight_end)
+                                n = max(0, min(len(chunk), last - seg.pos + 1))
+                                if n:
+                                    f.seek(seg.pos)
+                                    f.write(chunk[:n])
+                                    seg.pos += n
+                                request_done = seg.pos > last
+                            w.count(n)
+                            retries = 0
+                            if not w.got_data:
+                                w.got_data = True
+                                with self._lock:
+                                    self._streaming += 1
+                            self._throttle(n)
+                            if request_done or w.reconnect:
+                                break
+                        with seg.lock:
+                            seg.inflight_end = -1
+                        if not resp.finished:
+                            conn.close()  # stopped mid-answer: this connection can't be reused
+                        resp = None
+                        if w.reconnect:
+                            conn.close()
+                            w.reconnect = False
+                            w.swaps += 1
+                            w.last_swap = time.monotonic()
+                            w.reset_speed()
+                    except (net.HTTPError, OSError, http.client.HTTPException) as exc:
+                        with seg.lock:
+                            seg.inflight_end = -1
+                        resp = None
+                        conn.close()
+                        code = exc.code if isinstance(exc, net.HTTPError) else None
+                        refused = isinstance(exc, ConnectionRefusedError)
+                        if (code in LIMIT_CODES or refused) and not w.got_data and self._active_workers > 1:
                             # The server does not want one more connection from us. It may still
                             # be counting one we just closed, so try once more after a second;
                             # if refused again, that is its limit: hand the piece back (another
@@ -525,6 +775,13 @@ class DownloadTask:
                                 continue
                             self._limit_hit = max(self._limit_hit, self._streaming)
                             return
+                        if code in (401, 403, 410) and not url_refreshed:
+                            url_refreshed = True  # the download link probably expired
+                            try:
+                                self._refresh_url()
+                                continue
+                            except Exception:  # noqa: BLE001
+                                pass
                         if code in (401, 403, 404, 410):
                             raise RuntimeError(f"HTTP {exc.code}: {exc.reason}") from exc
                         retries += 1
@@ -534,10 +791,15 @@ class DownloadTask:
         except Exception as exc:  # noqa: BLE001
             self._worker_error = str(exc)
         finally:
-            seg.active = False
+            conn.close()
+            if seg is not None:
+                with seg.lock:
+                    seg.inflight_end = -1
+                seg.active = False
+            w.alive = False
             with self._lock:
                 self._active_workers -= 1
-                if got_data:
+                if w.got_data:
                     self._streaming -= 1
             self._wake.set()
 
@@ -562,7 +824,57 @@ class DownloadTask:
         t0, b0 = self._samples[0]
         self.speed = (self.downloaded - b0) / (now - t0) if now > t0 else 0.0
 
+    def available_prefix(self) -> int:
+        """How many bytes from the start of the file are already downloaded, with no gap
+        (what can be handed to the browser right now)."""
+        if self.status == Status.COMPLETED:
+            return self.size or self.downloaded
+        if not self.resumable:
+            return self.downloaded
+        with self._lock:
+            for s in sorted(self.segments, key=lambda s: s.start):
+                if s.pos <= s.end:
+                    return s.pos
+        return self.size or 0
+
+    def data_path(self) -> str | None:
+        """Where the downloaded bytes are right now."""
+        if self.path and os.path.exists(self._part_path):
+            return self._part_path
+        return self.path
+
+    def finalize_local(self) -> None:
+        """Browser mode, but the browser never took the file: keep it in our folder."""
+        if not self.awaiting_browser:
+            return
+        self.awaiting_browser = False
+        self.mirror = False
+        self._finish()
+
+    def release_to_browser(self, browser_path: str | None = None) -> None:
+        """The browser saved the file: remove our temporary copy."""
+        for p in (self._part_path, self._state_path):
+            try:
+                os.remove(p)
+            except OSError:
+                pass
+        self.awaiting_browser = False
+        if browser_path:
+            self.path = browser_path
+            self.filename = os.path.basename(browser_path)
+
     def _finish(self) -> None:
+        if self.mirror:
+            # The browser is receiving the bytes and saves the final file itself; ours is
+            # only a temporary copy, removed once the browser has everything.
+            try:
+                os.remove(self._state_path)
+            except OSError:
+                pass
+            self.downloaded = self.size or self.downloaded
+            self.awaiting_browser = True
+            self.status = Status.COMPLETED
+            return
         final = self.path
         if os.path.exists(final):
             final = unique_path(final)

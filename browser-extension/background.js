@@ -55,14 +55,86 @@ async function postApp(path, payload, tries = 4) {
   return false;
 }
 
+async function postJson(path, payload, tries = 4) {
+  for (let i = 0; i < tries; i++) {
+    try {
+      const r = await fetch(APP + path, {
+        method: "POST",
+        headers: { ...HEADERS, "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      return r.ok ? await r.json() : null;
+    } catch {
+      if (i < tries - 1) await sleep(350);
+    }
+  }
+  return null;
+}
+
+// Hand a download to the app. It downloads with many connections; the browser then shows
+// the same download in its list (it receives the bytes from the app as they arrive).
 async function sendToApp(url, filename, referrer) {
   let cookies = "";
   try {
     const list = await chrome.cookies.getAll({ url });
     cookies = list.map((c) => `${c.name}=${c.value}`).join("; ");
   } catch {}
-  return postApp("/add", { url, filename, referrer, cookies });
+  const res = await postJson("/add", { url, filename, referrer, cookies, mirror: true });
+  if (!res) return false;
+  if (res.rid) showInBrowser(res.rid); // not awaited: may wait for the user's confirmation
+  return true;
 }
+
+async function showInBrowser(rid) {
+  for (let i = 0; i < 90; i++) { // up to ~30 min waiting for "Baixar agora" in the app
+    chrome.runtime.getPlatformInfo(() => {}); // keeps this service worker awake while we wait
+    let st = null;
+    try {
+      const r = await fetch(`${APP}/request/${rid}`, { headers: HEADERS }); // answers within 20 s
+      if (!r.ok) return;
+      st = await r.json();
+    } catch {
+      await sleep(1000);
+      continue;
+    }
+    if (st.state === "started") {
+      const id = await chrome.downloads.download({ url: APP + st.stream, conflictAction: "uniquify" });
+      const { mirrors = {} } = await chrome.storage.session.get("mirrors");
+      mirrors[id] = rid;
+      await chrome.storage.session.set({ mirrors });
+      return;
+    }
+    if (st.state !== "waiting") return; // cancelled, or "download later" (app only)
+  }
+}
+
+async function mirrorOf(downloadId) {
+  const { mirrors = {} } = await chrome.storage.session.get("mirrors");
+  return mirrors[downloadId];
+}
+
+async function forgetMirror(downloadId) {
+  const { mirrors = {} } = await chrome.storage.session.get("mirrors");
+  delete mirrors[downloadId];
+  await chrome.storage.session.set({ mirrors });
+}
+
+// The browser's buttons control the app's download: pause, resume, cancel; when the
+// browser has saved the file, the app removes its temporary copy.
+chrome.downloads.onChanged.addListener(async (delta) => {
+  const rid = await mirrorOf(delta.id);
+  if (!rid) return;
+  if (delta.state && delta.state.current === "complete") {
+    const [item] = await chrome.downloads.search({ id: delta.id });
+    await postApp("/mirror-done", { rid, path: item ? item.filename : "" });
+    await forgetMirror(delta.id);
+  } else if (delta.error && delta.error.current === "USER_CANCELED") {
+    await postApp("/control", { rid, action: "cancel" });
+    await forgetMirror(delta.id);
+  } else if (delta.paused) {
+    await postApp("/control", { rid, action: delta.paused.current ? "pause" : "resume" });
+  }
+});
 
 chrome.runtime.onInstalled.addListener(() => {
   chrome.contextMenus.create({
@@ -106,6 +178,7 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
 
 chrome.downloads.onCreated.addListener(async (item) => {
   const url = item.finalUrl || item.url;
+  if (url.startsWith(APP)) return; // the browser's copy of a download the app is doing
   if (!/^(https?|ftp):/i.test(url)) return; // blob:, data: etc. stay in the browser
   if (passThrough.delete(url)) return;
   if (!(await isEnabled())) return;

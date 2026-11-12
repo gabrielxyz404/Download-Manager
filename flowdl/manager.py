@@ -49,6 +49,7 @@ class DownloadManager:
             if auto_resume and d.get("status") in active:
                 task.status = Status.QUEUED
             task.on_done = self._task_done
+            task.on_change = self._task_changed
             self.tasks.append(task)
 
     def save(self) -> None:
@@ -78,6 +79,10 @@ class DownloadManager:
                             headers=headers)
         return self.add_task(task, start)
 
+    def _task_changed(self, task) -> None:
+        """The file name / place became known: save the list (not a 'finished' event)."""
+        self.save()
+
     def _task_done(self, task) -> None:
         if self.on_change:
             self.on_change(task)
@@ -85,6 +90,7 @@ class DownloadManager:
     def add_task(self, task, start: bool = True):
         """Add any task object (DownloadTask or video.VideoTask)."""
         task.on_done = self._task_done
+        task.on_change = self._task_changed
         if not start:
             task.status = Status.PAUSED
         with self._lock:
@@ -153,7 +159,7 @@ class DownloadManager:
                 if t.status == Status.QUEUED and not t.is_running():
                     t.start()
                     running += 1
-            signature = tuple((t.id, t.status) for t in self.tasks)
+            signature = tuple((t.id, t.status, t.path) for t in self.tasks)
         if signature != self._signature:  # only touch the disk when something changed
             self._signature = signature
             self.save()

@@ -87,7 +87,7 @@ class EngineTests(unittest.TestCase):
         task.wait(30)
         self.assertEqual(task.status, Status.COMPLETED, task.error)
         self.assertFileOk(task.path)
-        self.assertGreaterEqual(Handler.range_requests, 6)
+        self.assertGreaterEqual(Handler.range_requests, 2)  # several connections were used
         self.assertFalse(os.path.exists(task.path + ".part"))
         self.assertFalse(os.path.exists(task.path + ".part.json"))
 
@@ -310,13 +310,13 @@ class AdaptiveConnectionTests(unittest.TestCase):
 
     def test_fast_server_ramps_up_to_the_maximum(self):
         task, notes = self.run_download("per_connection", 12 * 1024 * 1024)
-        self.assertIn("a testar velocidade", notes)
+        self.assertIn("testando velocidade", notes)
         self.assertEqual(self.peak, 8)  # 2 -> 4 -> 8: every step was faster, never more than 8
 
     def test_saturated_line_stops_adding_connections(self):
         task, notes = self.run_download("shared", 5 * 1024 * 1024)
         self.assertLess(self.peak, 8)  # no point in 8 connections on a 1 MB/s line
-        self.assertTrue(any("chegam" in n for n in notes), notes)
+        self.assertTrue(any("bastam" in n for n in notes), notes)
 
     def test_server_connection_limit_is_respected_without_failing(self):
         # The server refuses (503) every connection beyond 2. The download must still finish,
@@ -327,3 +327,121 @@ class AdaptiveConnectionTests(unittest.TestCase):
         if task.server_limit is not None:  # shown to the user as "servidor aceita N"
             self.assertIn(f"servidor aceita {task.server_limit}", notes)
             self.assertLess(task.server_limit, 8)
+
+
+class KeepAliveServer(BaseHTTPRequestHandler):
+    """HTTP/1.1 server that counts TCP connections and requests (like a real CDN)."""
+    protocol_version = "HTTP/1.1"
+    connections = 0
+    requests = 0
+    first_range = None
+    slow_ports: set = set()
+    slow_first = 0  # make the first N connections very slow (a bad CDN node)
+    fast_rate = 2_000_000
+    lock = threading.Lock()
+
+    def log_message(self, *a):
+        pass
+
+    def setup(self):
+        super().setup()
+        cls = type(self)
+        with cls.lock:
+            cls.connections += 1
+            self.slow = cls.connections <= cls.slow_first
+
+    def do_GET(self):
+        cls = type(self)
+        with cls.lock:
+            cls.requests += 1
+            if cls.first_range is None:
+                cls.first_range = self.headers.get("Range")
+        m = re.match(r"bytes=(\d+)-(\d*)", self.headers.get("Range", ""))
+        start = int(m.group(1)) if m else 0
+        end = int(m.group(2)) if m and m.group(2) else len(BIG) - 1
+        body = BIG[start:end + 1]
+        self.send_response(206 if m else 200)
+        if m:
+            self.send_header("Content-Range", f"bytes {start}-{end}/{len(BIG)}")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        try:
+            for i in range(0, len(body), 64 * 1024):
+                self.wfile.write(body[i:i + 64 * 1024])
+                time.sleep(64 * 1024 / (20_000 if self.slow else cls.fast_rate))
+        except OSError:
+            pass
+
+
+class ConnectionReuseTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.server = ThreadingHTTPServer(("127.0.0.1", 0), KeepAliveServer)
+        cls.server.daemon_threads = True
+        threading.Thread(target=cls.server.serve_forever, daemon=True).start()
+        cls.base = f"http://127.0.0.1:{cls.server.server_address[1]}"
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.shutdown()
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        KeepAliveServer.connections = KeepAliveServer.requests = KeepAliveServer.slow_first = 0
+        KeepAliveServer.fast_rate = 2_000_000
+        KeepAliveServer.first_range = None
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def download(self, connections=8):
+        task = DownloadTask(self.base + "/grande.bin", self.tmp.name, connections)
+        peak = 0
+        task.start()
+        while task.is_running():
+            peak = max(peak, task.active_connections)
+            time.sleep(0.05)
+        self.assertEqual(task.status, Status.COMPLETED, task.error)
+        with open(task.path, "rb") as f:
+            self.assertEqual(hashlib.sha256(f.read()).digest(), hashlib.sha256(BIG).digest())
+        return task, peak
+
+    def test_connections_are_reused_for_many_pieces(self):
+        task, peak = self.download()
+        # many pieces (requests) went over few connections: no new handshake per piece
+        self.assertGreater(KeepAliveServer.requests, KeepAliveServer.connections)
+        self.assertLessEqual(KeepAliveServer.connections, task.connections + 1)
+
+    def test_first_request_already_downloads_data(self):
+        self.download()
+        self.assertEqual(KeepAliveServer.first_range, "bytes=0-2097151")  # not a 1-byte probe
+
+    def test_big_files_start_with_four_connections(self):
+        task = DownloadTask(self.base + "/grande.bin", self.tmp.name, 8)
+        import flowdl.engine as eng
+        old = eng.BIG_FILE
+        eng.BIG_FILE = 1024 * 1024  # treat our 15 MB test file as "big"
+        try:
+            task.start()
+            time.sleep(1.0)  # before the first speed check (2 s)
+            self.assertEqual(task.active_connections, 4)
+        finally:
+            eng.BIG_FILE = old
+            task.pause()
+            task.wait(10)
+
+    def test_slow_connection_is_replaced(self):
+        KeepAliveServer.slow_first = 1  # the very first connection lands on a slow node
+        KeepAliveServer.fast_rate = 300_000  # long enough download for the check to run
+        t0 = time.monotonic()
+        task, _ = self.download()
+        self.assertGreaterEqual(task.reconnections, 1)
+        self.assertLess(time.monotonic() - t0, 40)
+
+    def test_endgame_does_not_wait_for_a_slow_connection(self):
+        """The first piece (2 MB) lands on a 20 KB/s connection: alone it would take ~100 s.
+        The other connections take over half of what it still has to receive, repeatedly."""
+        KeepAliveServer.slow_first = 1
+        t0 = time.monotonic()
+        self.download()
+        self.assertLess(time.monotonic() - t0, 15)

@@ -14,9 +14,11 @@ from __future__ import annotations
 import json
 import os
 import queue
+import secrets
 import socket
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 from .bridge import DEFAULT_PORT, BrowserBridge
@@ -27,6 +29,17 @@ from .settings import Settings
 from .status import ACTIVE, Status
 
 SCHEDULER_CHECK_S = 30
+DEBUG = bool(os.environ.get("FLOWDL_DEBUG"))
+
+
+def log(*args) -> None:
+    """Diagnostics, only when the FLOWDL_DEBUG environment variable is set."""
+    if DEBUG:
+        import time
+        print(f"[flowdl {os.getpid()} {time.strftime('%H:%M:%S')}]", *args, file=sys.stderr, flush=True)
+REQUEST_WAIT_S = 20        # the extension asks "has it started?" and we answer within 20 s
+NO_BROWSER_AFTER_S = 30    # finished but the browser never came for the file: keep it here
+BROWSER_GONE_AFTER_S = 120  # the browser stopped receiving and did not come back
 SLIM_AFTER_IDLE_S = 5  # restart to free memory only after this many quiet seconds
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -45,6 +58,10 @@ class Service:
         self.pending: list[dict] = []  # browser requests waiting for a window
         self.exit_requested = False
         self.slim_enabled = False  # set by run(): allow restarting to free memory
+        # Downloads shown in the browser too (see mirror.py)
+        self.requests: dict[str, dict] = {}  # request id from the extension -> state
+        self._req_cond = threading.Condition()
+        self.active_streams = 0
         self._next_schedule_check = 0.0
 
     # ------------------------------------------------------- lazy manager
@@ -78,7 +95,8 @@ class Service:
             return True
         for attempt in range(retries + 1):
             try:
-                self.bridge = BrowserBridge(lambda item: self.events.put(("item", item)), self.port).start()
+                self.bridge = BrowserBridge(self._from_browser, self.port,
+                                            api=self.api, on_stream=self.stream).start()
                 return True
             except OSError:
                 self.bridge = None
@@ -93,9 +111,132 @@ class Service:
 
     # ------------------------------------------------------------- helpers
     def busy(self) -> bool:
+        if self.active_streams or any(r["state"] == "waiting" for r in list(self.requests.values())):
+            return True
         if self._manager is None:
             return False
-        return any(t.is_running() or t.status == Status.QUEUED for t in self._manager.tasks)
+        return any(t.is_running() or t.status == Status.QUEUED or getattr(t, "awaiting_browser", False)
+                   for t in self._manager.tasks)
+
+    def _from_browser(self, item: dict) -> None:
+        """Called in the bridge thread, before the extension gets its answer. The request id
+        is registered right here, so the extension's next question ("has it started?")
+        always finds it, even if the main thread is still busy."""
+        if item.get("rid"):
+            self._set_request(item["rid"], state="waiting")
+        self.events.put(("item", item))
+
+    # ------------------------------------------------- browser download list
+    def _set_request(self, rid: str | None, **state) -> None:
+        if not rid:
+            return
+        log("request", rid, state.get("state"))
+        with self._req_cond:
+            self.requests[rid] = state
+            self._req_cond.notify_all()
+
+    def bind_request(self, rid: str | None, task) -> None:
+        """The download asked by the browser has started: tell the extension where to get it."""
+        if not rid:
+            return
+        task.mirror = True
+        task.rid = rid
+        task.stream_token = task.stream_token or secrets.token_urlsafe(16)
+        self._set_request(rid, state="started", task=task.id, stream=f"/stream/{task.stream_token}")
+        self.manager.save()
+
+    def cancel_request(self, rid: str | None, state: str = "cancelled") -> None:
+        self._set_request(rid, state=state)
+
+    def _restore_request(self, rid: str) -> None:
+        """After a restart the request ids are known again from the saved downloads."""
+        if not rid or rid in self.requests:
+            return
+        for t in self.manager.tasks:
+            if getattr(t, "rid", None) == rid and t.stream_token:
+                with self._req_cond:
+                    self.requests.setdefault(rid, {"state": "started", "task": t.id,
+                                                   "stream": f"/stream/{t.stream_token}"})
+                return
+
+    def _task_for(self, rid: str):
+        tid = self.requests.get(rid, {}).get("task")
+        return next((t for t in self.manager.tasks if t.id == tid), None) if tid else None
+
+    def api(self, method: str, path: str, data: dict):
+        """Called from the bridge threads for the extension's questions."""
+        if method == "GET" and path.startswith("/request/"):
+            rid = path.split("/")[2]
+            self._restore_request(rid)
+            with self._req_cond:
+                if rid not in self.requests:
+                    log("unknown request", rid)
+                    return 404, {"ok": False}
+                self._req_cond.wait_for(lambda: self.requests[rid]["state"] != "waiting",
+                                        timeout=REQUEST_WAIT_S)
+                return 200, {"ok": True, **{k: v for k, v in self.requests[rid].items() if k != "task"}}
+        rid = str(data.get("rid", ""))
+        self._restore_request(rid)
+        task = self._task_for(rid) if rid in self.requests else None
+        if task is None:
+            return 404, {"ok": False}
+        if path == "/control":
+            action = data.get("action")
+            if action == "pause":
+                self.manager.pause(task)
+            elif action == "resume":
+                self.manager.resume(task)
+            elif action == "cancel":  # cancelled in the browser's list
+                self.manager.remove(task, delete_files=True)
+                self.events.put(("tick", None))
+            return 200, {"ok": True}
+        if path == "/mirror-done":  # the browser saved the file: drop our temporary copy
+            task.release_to_browser(str(data.get("path") or "") or None)
+            self.manager.save()
+            self.events.put(("tick", None))
+            return 200, {"ok": True}
+        return 404, {"ok": False}
+
+    def stream(self, conn, path: str, headers: dict) -> None:
+        """The browser downloads a task's bytes from us (see mirror.py)."""
+        from . import mirror
+        token = path.split("/")[2] if path.count("/") >= 2 else ""
+        task = next((t for t in self.manager.tasks
+                     if token and getattr(t, "stream_token", None) == token), None)
+        if task is None:
+            mirror._send_error(conn, 404, "Not Found")
+            conn.close()
+            return
+        log("stream start", task.filename, headers.get("range"))
+        with self._req_cond:
+            self.active_streams += 1
+            task.stream_attached = True
+        complete = False
+        try:
+            complete = mirror.serve(conn, task, headers, lambda: task in self.manager.tasks)
+        finally:
+            with self._req_cond:
+                self.active_streams -= 1
+                task.stream_attached = False
+            log("stream end", task.filename, "complete" if complete else "interrupted")
+            if complete:
+                task.release_to_browser()  # the extension tells us the final path soon after
+                self.manager.save()
+            elif task.status == Status.COMPLETED and task.awaiting_browser:
+                self._later(BROWSER_GONE_AFTER_S, self._keep_if_unclaimed, task)
+            self.events.put(("tick", None))
+
+    def _keep_if_unclaimed(self, task) -> None:
+        if task.awaiting_browser and not getattr(task, "stream_attached", False):
+            task.finalize_local()
+            self.manager.save()
+            self.events.put(("tick", None))
+
+    @staticmethod
+    def _later(seconds: float, fn, *args) -> None:
+        t = threading.Timer(seconds, fn, args)
+        t.daemon = True
+        t.start()
 
     def _scheduler_enabled(self) -> bool:
         s = self.scheduler
@@ -118,6 +259,10 @@ class Service:
         """A download stopped: start the next ones; if it was the last one to finish,
         return the 'when all downloads finish' action ("countdown" / "quit")."""
         self.manager.tick()
+        if (task is not None and task.status == Status.COMPLETED and getattr(task, "awaiting_browser", False)
+                and not getattr(task, "stream_attached", False)):
+            # Browser mode, but the browser has not started receiving: give it some time.
+            self._later(NO_BROWSER_AFTER_S, self._keep_if_unclaimed, task)
         if task is not None and task.status == Status.COMPLETED and not self.busy():
             return {"shutdown": "countdown", "close": "quit"}.get(self.scheduler.on_complete)
         return None
@@ -134,8 +279,12 @@ class Service:
             headers["Referer"] = item["referrer"]
         if item.get("cookies"):
             headers["Cookie"] = item["cookies"]
-        self.manager.add(item["url"], self.settings.dest_dir, self.settings.connections,
-                         filename=item.get("filename"), headers=headers)
+        task = self.manager.add(item["url"], self.settings.dest_dir, self.settings.connections,
+                                filename=item.get("filename"), headers=headers)
+        self.bind_request(item.get("rid"), task)
+        if self.settings.show_progress_window:
+            self.pending.append({"kind": "progress", "task": task.id})
+            return True
         return False
 
     def can_slim_down(self) -> bool:
@@ -175,6 +324,7 @@ class Service:
                 if self.can_slim_down():
                     slim_at = time.monotonic() + SLIM_AFTER_IDLE_S
             elif kind == "item":
+                log("item", data.get("kind") or data.get("url"))
                 if self.accept_item(data):
                     return "main" if data.get("kind") == "show" else "dialog"
             elif kind == "quit":
@@ -188,8 +338,17 @@ class Service:
         if self._manager is not None:
             self._manager.shutdown()
 
-    def restart_slim(self) -> None:
-        """Replace this process with a fresh background one (frees all window memory)."""
+    def restart_slim(self) -> bool:
+        """Replace this process with a fresh background one (frees all window memory).
+        Returns False (and keeps running) if something arrived at the last moment."""
+        had_bridge = self.bridge is not None
+        self.stop_bridge()  # no new requests; requests already received finish first
+        if not self.events.empty() or not self.can_slim_down():
+            log("restart cancelled: something arrived")
+            if had_bridge:
+                self.start_bridge(retries=10)
+            return False
+        log("restart to free memory")
         self.shutdown()
         code = (f"import sys; sys.path.insert(0, {str(ROOT)!r}); "
                 "from flowdl.service import run; run(background=True)")
@@ -229,8 +388,11 @@ def run(background: bool = False) -> None:
     mode = None if background else "main"
     while not svc.exit_requested:
         if mode == "slim":
-            svc.restart_slim()
-            return
+            svc.restart_slim()  # only returns if it was cancelled
+            mode = svc.wait()
+            if mode is None:
+                break
+            continue
         if mode:
             from .gui import App  # Tkinter is only loaded when a window is needed
             App(svc, mode).mainloop()

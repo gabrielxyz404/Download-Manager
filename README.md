@@ -36,6 +36,7 @@ Como consegue isto:
 | Captura de vídeos e áudios | ✅ cole o link no botão do Flow Downloads na barra do navegador e escolha a resolução (1080p, 720p...) ou só o áudio em MP3 — sem botões por cima dos vídeos |
 | Integração com o navegador | ✅ extensão para navegadores Chromium (Brave, Chrome, Edge, Opera); também clique-direito → "Baixar com Flow Downloads" |
 | Download com um clique | ✅ ao clicar num link de download no navegador, o Flow Downloads assume |
+| Download também visível no navegador | ✅ a transferência aparece na lista de downloads do navegador (com progresso), abre-se uma janelinha de progresso da app, e no fim o navegador mostra o download concluído, como sem a app |
 | Limitador de velocidade | ✅ limite total e por download |
 | Agendador | ✅ iniciar/parar em horários e dias definidos; ao terminar, fechar o app ou desligar o PC |
 | Captura de sites (grabber) | ✅ lista vídeos, músicas, documentos etc. de uma página (e de páginas ligadas a ela) |
@@ -108,12 +109,16 @@ No menu da extensão também pode ligar/desligar a captura de downloads (quando 
 1. O Flow Downloads pergunta ao servidor o tamanho do arquivo e se ele aceita downloads em partes (`Range`).
 2. O arquivo é dividido em partes (um arquivo de 1 GB com 8 conexões = 8 partes de 125 MB), cada uma
    baixada por uma conexão e gravada direto na posição certa — no fim não há nada para juntar.
-3. **Teste de velocidade:** começa com 2 conexões e vai dobrando (2 → 4 → 8...) enquanto a velocidade
-   total subir pelo menos 15%. Se não compensar (linha ou servidor no limite), para de abrir conexões.
-   Se o servidor recusar conexões a mais (erro 503/429), usa só as que ele aceita, sem dar erro.
-   O valor de "Conexões" passa a ser o **máximo**.
-4. Quando uma conexão termina, ela pega metade da maior parte que ainda falta — todas ficam ocupadas até o fim.
-5. O progresso é salvo em `arquivo.part.json` (gravado no disco antes de ser anotado, para aguentar faltas de luz).
+3. **Teste de velocidade:** começa com 2 conexões (4 em arquivos grandes) e vai dobrando (2 → 4 → 8...)
+   enquanto a velocidade total subir pelo menos 15%. Se não compensar (linha ou servidor no limite), para
+   de abrir conexões — e volta a testar se a velocidade cair a meio. Se o servidor recusar conexões a mais
+   (erro 503/429), usa só as que ele aceita, sem dar erro. O valor de "Conexões" é o **máximo**.
+4. **Conexões reaproveitadas:** cada conexão fica aberta e vai pedindo pedaço atrás de pedaço (de ~2 s de
+   dados cada), sem repetir o "aperto de mão" com o servidor. O primeiro pedido já traz o início do arquivo.
+5. Quando uma conexão termina, ela pega metade da maior parte que ainda falta — todas ficam ocupadas até o fim.
+6. **Sem ficar nos 99%:** uma conexão muito mais lenta que as outras é reaberta (pode cair num servidor
+   mais rápido), e no fim as conexões rápidas assumem o que a mais lenta ainda tem por receber.
+7. O progresso é salvo em `arquivo.part.json` (gravado no disco antes de ser anotado, para aguentar faltas de luz).
 
 ### Comparar com e sem o Flow Downloads
 
