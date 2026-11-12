@@ -14,6 +14,7 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
 from collections import deque
 
 from .categories import category_for
@@ -149,7 +150,7 @@ class VideoTask:
                  title: str | None = None, connections: int = 8, task_id: str | None = None,
                  headers: dict | None = None, cookiefile: str | None = None, speed_limit: int = 0,
                  quality: str = ""):
-        self.id = task_id or f"v{time.time_ns():x}"
+        self.id = task_id or "v" + uuid.uuid4().hex[:15]
         self.url = url
         self.dest_dir = dest_dir
         self.format = fmt

@@ -45,7 +45,13 @@ class Response:
         self.headers = raw.headers
 
     def read1(self, n: int) -> bytes:
+        """Whatever has arrived (at most n bytes): low latency, but small pieces."""
         return self.raw.read1(n) if hasattr(self.raw, "read1") else self.raw.read(n)
+
+    def read(self, n: int) -> bytes:
+        """Exactly n bytes (less only at the end). Waiting for bigger pieces costs far less
+        processor time than handling many small ones (the receive itself runs outside Python)."""
+        return self.raw.read(n)
 
     @property
     def finished(self) -> bool:

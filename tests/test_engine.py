@@ -445,3 +445,12 @@ class ConnectionReuseTests(unittest.TestCase):
         t0 = time.monotonic()
         self.download()
         self.assertLess(time.monotonic() - t0, 15)
+
+
+class IdTests(unittest.TestCase):
+    def test_ids_are_unique_when_added_at_once(self):
+        """Regression (found on Windows): ids taken from the clock repeated."""
+        from flowdl.video import VideoTask
+        ids = {DownloadTask("http://x/a", "/tmp").id for _ in range(2000)}
+        ids |= {VideoTask("http://x/v", "/tmp").id for _ in range(500)}
+        self.assertEqual(len(ids), 2500)

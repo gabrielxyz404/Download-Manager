@@ -22,6 +22,7 @@ import re
 import threading
 import time
 import urllib.error
+import uuid
 import urllib.parse
 import urllib.request
 from collections import deque
@@ -37,6 +38,8 @@ USER_AGENT = (
     "(KHTML, like Gecko) Chrome/120.0 Safari/537.36"
 )
 CHUNK_SIZE = 256 * 1024
+MIN_CHUNK = 64 * 1024      # each connection reads pieces of ~0.25 s of data...
+MAX_CHUNK = 1024 * 1024    # ...between 64 KB and 1 MB (few, big pieces = little processor use)
 MIN_SPLIT_SIZE = 512 * 1024  # do not split segments smaller than 2x this
 MAX_RETRIES = 8
 FIRST_REQUEST = 2 * 1024 * 1024  # the first request already fetches this much
@@ -182,6 +185,9 @@ class _Worker:
     def request_size(self) -> int:
         return int(max(MIN_REQUEST, min(MAX_REQUEST, self.speed() * REQUEST_SECONDS)))
 
+    def chunk_size(self) -> int:
+        return int(max(MIN_CHUNK, min(MAX_CHUNK, self.speed() * 0.25)))
+
 
 class DownloadTask:
     """A single download. Thread-safe to call start()/pause() from a GUI."""
@@ -189,7 +195,9 @@ class DownloadTask:
     def __init__(self, url: str, dest_dir: str, connections: int = 8,
                  filename: str | None = None, task_id: str | None = None,
                  headers: dict | None = None, speed_limit: int = 0):
-        self.id = task_id or f"{time.time_ns():x}"
+        # Random id: ids from the clock collided on Windows (coarse clock) when several
+        # downloads were added at once.
+        self.id = task_id or uuid.uuid4().hex[:16]
         self.url = url
         self.dest_dir = dest_dir
         self.connections = max(1, int(connections))
@@ -465,7 +473,7 @@ class DownloadTask:
                 resp = conn.get(self.url, _headers(self.headers))
             with open(self._part_path, "wb") as f:
                 while not self._stop.is_set():
-                    chunk = resp.read1(CHUNK_SIZE)
+                    chunk = resp.read(CHUNK_SIZE)
                     if not chunk:
                         break
                     f.write(chunk)
@@ -726,7 +734,11 @@ class DownloadTask:
                                 raise RuntimeError("O servidor parou de aceitar downloads em partes")
                             self._final_url = resp.url
                         while not self._stop.is_set():
-                            chunk = resp.read1(CHUNK_SIZE)
+                            with seg.lock:
+                                want = min(seg.end, seg.inflight_end) - seg.pos + 1
+                            if want <= 0:
+                                break
+                            chunk = resp.read(min(w.chunk_size(), want))
                             if not chunk:
                                 break
                             with seg.lock:
