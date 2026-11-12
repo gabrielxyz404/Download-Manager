@@ -1,14 +1,13 @@
 {
   "manifest_version": 3,
   "name": "PyDM - Integração com o navegador",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Envia os downloads do navegador para o PyDM (gerenciador de downloads).",
   "permissions": [
     "downloads",
     "contextMenus",
     "storage",
-    "cookies",
-    "webRequest"
+    "cookies"
   ],
   "host_permissions": [
     "<all_urls>"
@@ -17,7 +16,8 @@
     "service_worker": "background.js"
   },
   "action": {
-    "default_title": "PyDM: clique para ligar/desligar a captura de downloads",
+    "default_title": "PyDM",
+    "default_popup": "popup.html",
     "default_icon": {
       "16": "icons/icon16.png",
       "48": "icons/icon48.png"
@@ -28,17 +28,5 @@
     "48": "icons/icon48.png",
     "128": "icons/icon128.png"
   },
-  "minimum_chrome_version": "110",
-  "content_scripts": [
-    {
-      "matches": [
-        "<all_urls>"
-      ],
-      "js": [
-        "content.js"
-      ],
-      "all_frames": true,
-      "run_at": "document_idle"
-    }
-  ]
+  "minimum_chrome_version": "110"
 }

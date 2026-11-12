@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="pt">
+<head>
+<meta charset="utf-8">
+<title>PyDM</title>
+<style>
+  :root {
+    --bg: #ffffff; --fg: #1b1b1b; --muted: #666; --field: #f3f3f3; --border: #d0d0d0;
+    --accent: #1976d2; --accent-fg: #fff; --ok: #2e7d32; --err: #c62828;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #1e1f22; --fg: #e6e6e6; --muted: #a0a0a0; --field: #2b2d31; --border: #3f4147;
+            --ok: #5fd27a; --err: #ff7b72; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; width: 340px; background: var(--bg); color: var(--fg);
+         font: 13px/1.4 system-ui, "Segoe UI", sans-serif; }
+  header { display: flex; align-items: center; gap: 8px; padding: 12px 14px;
+           border-bottom: 1px solid var(--border); }
+  header img { width: 22px; height: 22px; }
+  header b { font-size: 14px; flex: 1; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
+  .dot.on { background: var(--ok); } .dot.off { background: var(--err); }
+  #appState { color: var(--muted); font-size: 12px; }
+  section { padding: 12px 14px; }
+  h2 { margin: 0 0 8px; font-size: 13px; }
+  input[type=url] { width: 100%; padding: 8px 10px; border: 1px solid var(--border); border-radius: 6px;
+                    background: var(--field); color: var(--fg); font: inherit; }
+  input[type=url]:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+  button { margin-top: 8px; width: 100%; padding: 8px; border: 0; border-radius: 6px; cursor: pointer;
+           background: var(--accent); color: var(--accent-fg); font: 600 13px system-ui, sans-serif; }
+  button:disabled { opacity: .5; cursor: default; }
+  #msg { min-height: 18px; margin-top: 6px; font-size: 12px; }
+  #msg.ok { color: var(--ok); } #msg.err { color: var(--err); }
+  label.row { display: flex; align-items: center; gap: 8px; cursor: pointer;
+              border-top: 1px solid var(--border); padding: 10px 14px; }
+</style>
+</head>
+<body>
+  <header>
+    <img src="icons/icon48.png" alt="">
+    <b>PyDM</b>
+    <span class="dot" id="dot"></span>
+    <span id="appState">verificando...</span>
+  </header>
+
+  <section>
+    <h2>Baixar vídeo</h2>
+    <form id="videoForm">
+      <input type="url" id="url" placeholder="Cole aqui o link do vídeo (Ctrl+V)" required autofocus>
+      <button type="submit" id="go">⬇ Baixar vídeo</button>
+    </form>
+    <div id="msg"></div>
+  </section>
+
+  <label class="row">
+    <input type="checkbox" id="capture">
+    Capturar downloads do navegador
+  </label>
+
+  <script src="popup.js"></script>
+</body>
+</html>

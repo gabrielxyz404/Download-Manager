@@ -374,6 +374,8 @@ class VideoDialog(tk.Toplevel):
             self._add_media_row(m)
         self._lookup()
         self.lift()
+        self.attributes("-topmost", True)  # appear in front of the browser
+        self.after(400, lambda: self.winfo_exists() and self.attributes("-topmost", False))
         self.focus_force()
 
     def _add_media_row(self, m: dict) -> None:
@@ -936,8 +938,9 @@ class App(tk.Tk):
             "2. Ative o 'Modo de desenvolvedor' (canto superior direito)\n"
             "3. Clique em 'Carregar sem compactação' e escolha a pasta:\n"
             f"   {folder}\n\n"
-            "Com o PyDM aberto, os downloads do navegador passam a ser feitos por ele. "
-            "Clique no ícone da extensão para ligar/desligar.")
+            "Com o PyDM aberto, os downloads do navegador passam a ser feitos por ele.\n\n"
+            "Para baixar um vídeo: copie o link, clique no ícone do PyDM na barra do navegador, "
+            "cole o link em 'Baixar vídeo' e escolha a qualidade.")
 
     # ---------------------------------------------------------------- refresh
     def _check_clipboard(self) -> None:
