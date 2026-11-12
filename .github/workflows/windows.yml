@@ -1,0 +1,67 @@
+name: Windows (testes + instalador)
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 40
+    env:
+      APP_VERSION: "0.5.0"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Instalar ferramentas
+        run: python -m pip install pyinstaller yt-dlp psutil
+
+      - name: Testes em Windows (motor, serviço, navegador, arranque, interface)
+        run: python -m unittest -v tests.test_engine tests.test_features tests.test_service tests.test_mirror tests.test_video tests.test_autostart tests.test_gui
+
+      - name: Gerar Flow Downloads.exe
+        run: >
+          pyinstaller --noconfirm --clean --windowed --name "Flow Downloads"
+          --icon flowdl/icon.ico
+          --add-data "flowdl/*.png;flowdl" --add-data "flowdl/icon.ico;flowdl"
+          --hidden-import flowdl.gui --collect-submodules yt_dlp
+          packaging/launcher.py
+
+      - name: Testar o .exe
+        run: python tests/e2e/windows_smoke.py "dist/Flow Downloads/Flow Downloads.exe"
+
+      - name: Gerar o instalador
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "C:\Program Files (x86)\Inno Setup 6\ISCC.exe")) { choco install innosetup -y --no-progress }
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" "/DAppVersion=$env:APP_VERSION" packaging\installer.iss
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+
+      - name: Testar o instalador (instalar, usar, desinstalar)
+        shell: pwsh
+        run: |
+          $setup = "packaging\Output\FlowDownloads-Setup.exe"
+          Start-Process $setup -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/TASKS=autostart" -Wait
+          $exe = "$env:LOCALAPPDATA\Programs\Flow Downloads\Flow Downloads.exe"
+          if (-not (Test-Path $exe)) { Write-Error "não instalou em $exe"; exit 1 }
+          if (-not (Test-Path "$env:LOCALAPPDATA\Programs\Flow Downloads\browser-extension\manifest.json")) { Write-Error "extensão em falta"; exit 1 }
+          $run = Get-ItemProperty "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run" -Name FlowDownloads -ErrorAction SilentlyContinue
+          if (-not $run) { Write-Error "arranque com o Windows não ficou configurado"; exit 1 }
+          Write-Host "Arranque com o Windows: $($run.FlowDownloads)"
+          python tests/e2e/windows_smoke.py $exe
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          Start-Process "$env:LOCALAPPDATA\Programs\Flow Downloads\unins000.exe" -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES" -Wait
+          Start-Sleep -Seconds 3
+          if (Test-Path $exe) { Write-Error "não desinstalou"; exit 1 }
+          $left = Get-ItemProperty "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run" -Name FlowDownloads -ErrorAction SilentlyContinue
+          if ($left) { Write-Error "o arranque com o Windows ficou depois de desinstalar"; exit 1 }
+          Write-Host "Instalar, usar e desinstalar: OK"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: FlowDownloads-Setup
+          path: packaging/Output/FlowDownloads-Setup.exe

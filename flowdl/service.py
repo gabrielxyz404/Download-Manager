@@ -350,9 +350,13 @@ class Service:
             return False
         log("restart to free memory")
         self.shutdown()
-        code = (f"import sys; sys.path.insert(0, {str(ROOT)!r}); "
-                "from flowdl.service import run; run(background=True)")
-        args = [sys.executable, "-c", code]
+        from .paths import FROZEN
+        if FROZEN:
+            args = [sys.executable, "--background"]  # the installed .exe
+        else:
+            code = (f"import sys; sys.path.insert(0, {str(ROOT)!r}); "
+                    "from flowdl.service import run; run(background=True)")
+            args = [sys.executable, "-c", code]
         sys.stdout.flush()
         sys.stderr.flush()
         if sys.platform.startswith("win"):
@@ -363,13 +367,16 @@ class Service:
 
 
 # --------------------------------------------------------------- entry point
-def _existing_instance(port: int = DEFAULT_PORT) -> bool:
-    """If Flow Downloads is already running, ask it to show its window and return True."""
+def _existing_instance(port: int = DEFAULT_PORT, show: bool = True) -> bool:
+    """If Flow Downloads is already running, return True (and ask it to show its window
+    when the user opened the program; not when it was started in the background)."""
+    request = (b"POST /show HTTP/1.1\r\nHost: 127.0.0.1\r\nX-FlowDL: 1\r\n"
+               b"Content-Type: application/json\r\nContent-Length: 2\r\n\r\n{}") if show else \
+        b"GET /ping HTTP/1.1\r\nHost: 127.0.0.1\r\nX-FlowDL: 1\r\n\r\n"
     try:
         with socket.create_connection(("127.0.0.1", port), timeout=2) as s:
             s.settimeout(3)
-            s.sendall(b"POST /show HTTP/1.1\r\nHost: 127.0.0.1\r\nX-FlowDL: 1\r\n"
-                      b"Content-Type: application/json\r\nContent-Length: 2\r\n\r\n{}")
+            s.sendall(request)
             reply = s.recv(4096)
         return reply.startswith(b"HTTP/1.1 200")
     except OSError:
@@ -377,7 +384,7 @@ def _existing_instance(port: int = DEFAULT_PORT) -> bool:
 
 
 def run(background: bool = False) -> None:
-    if _existing_instance():
+    if _existing_instance(show=not background):
         return
     svc = Service()
     svc.slim_enabled = True
@@ -394,7 +401,15 @@ def run(background: bool = False) -> None:
                 break
             continue
         if mode:
-            from .gui import App  # Tkinter is only loaded when a window is needed
+            try:
+                from .gui import App  # Tkinter is only loaded when a window is needed
+            except ImportError as exc:  # no window support: keep working in the background
+                log("no window support:", exc)
+                svc.pending.clear()
+                mode = svc.wait()
+                if mode is None:
+                    break
+                continue
             App(svc, mode).mainloop()
             # Free the window objects now, in this (the Tk) thread. Otherwise the garbage
             # collector may do it later from a download thread, which Tkinter does not allow.

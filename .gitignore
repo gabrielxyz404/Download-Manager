@@ -2,3 +2,7 @@ __pycache__/
 *.pyc
 *.part
 *.part.json
+build/
+dist/
+packaging/Output/
+*.spec

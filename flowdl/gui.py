@@ -20,6 +20,7 @@ from .categories import CATEGORIES, OTHER
 from .engine import Status, format_size, format_time
 from .limiter import GLOBAL_LIMITER
 from .manager import config_dir
+from .paths import FROZEN, install_dir
 from .scheduler import ACTIONS, shutdown_computer
 from .settings import DEFAULT_COLUMNS, Settings  # noqa: F401 (re-exported)
 from .video import VideoTask
@@ -467,6 +468,12 @@ class VideoDialog(tk.Toplevel):
 
     @staticmethod
     def install(app: "App", on_done=None) -> None:
+        if FROZEN:  # the installed app already includes it; updates come with new versions
+            messagebox.showinfo("Suporte a vídeos", "O suporte a vídeos já vem incluído no Flow Downloads.\n"
+                                "Para o atualizar, instale a versão mais recente do Flow Downloads.")
+            if on_done:
+                on_done(video.available())
+            return
         q: queue.Queue = queue.Queue()
         app.status_var.set("Instalando/atualizando o yt-dlp...")
         threading.Thread(target=lambda: q.put(video.install_yt_dlp()), daemon=True).start()
@@ -1087,7 +1094,7 @@ class App(tk.Tk):
                       rid=item.get("rid"))
 
     def _extension_help(self) -> None:
-        folder = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "browser-extension")
+        folder = str(install_dir() / "browser-extension")
         messagebox.showinfo(
             "Extensão do navegador",
             "Brave (ou Chrome / Edge / Opera):\n"

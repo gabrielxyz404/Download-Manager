@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import os
 import sys
+import subprocess
 from pathlib import Path
 
+from .paths import background_command
+
 APP_NAME = "FlowDownloads"
-LAUNCHER = Path(__file__).resolve().parent.parent / "Flow Downloads.pyw"
 
 
 def supported() -> bool:
@@ -15,10 +17,8 @@ def supported() -> bool:
 
 
 def _command() -> str:
-    exe = sys.executable
-    if sys.platform.startswith("win") and exe.lower().endswith("python.exe"):
-        exe = exe[:-10] + "pythonw.exe"  # no console window
-    return f'"{exe}" "{LAUNCHER}" --background'
+    return subprocess.list2cmdline(background_command()) if sys.platform.startswith("win") \
+        else " ".join(f'"{part}"' for part in background_command())
 
 
 def _desktop_file() -> Path:
