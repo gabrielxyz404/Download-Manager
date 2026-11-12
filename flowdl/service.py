@@ -40,7 +40,8 @@ def log(*args) -> None:
     import time
     line = f"[flowdl {os.getpid()} {time.strftime('%H:%M:%S')}] " + " ".join(str(a) for a in args)
     try:
-        if sys.stderr is not None:
+        from .paths import FROZEN
+        if sys.stderr is not None and not FROZEN:
             print(line, file=sys.stderr, flush=True)
         else:
             with open(config_dir() / "debug.log", "a", encoding="utf-8") as f:

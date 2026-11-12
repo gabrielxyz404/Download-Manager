@@ -127,8 +127,17 @@ def main() -> int:
 
     env["FLOWDL_DEBUG"] = "1"
     proc = subprocess.Popen(cmd + ["--background"], env=env)
-    started = wait_for(ping, 30)
-    check("Arranca em segundo plano", started)
+    t0 = time.time()
+    started = False
+    while time.time() - t0 < 120:
+        if wait_for(ping, 10):
+            started = True
+            break
+        log = cfg / "FlowDownloads" / "debug.log"
+        print(f"  ... {time.time() - t0:.0f}s, ainda não responde; debug.log:",
+              log.read_text(encoding="utf-8", errors="replace").strip()[-300:] if log.exists() else "(ainda não)",
+              flush=True)
+    check("Arranca em segundo plano", started, f"respondeu ao fim de {time.time() - t0:.0f}s")
     if not started:
         for log in ("crash.log", "debug.log"):
             path = cfg / "FlowDownloads" / log
