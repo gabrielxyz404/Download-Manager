@@ -133,6 +133,8 @@ def main() -> int:
         if wait_for(ping, 10):
             started = True
             break
+        if proc.poll() is not None:  # it stopped: crash.log below says why
+            break
         log = cfg / "FlowDownloads" / "debug.log"
         print(f"  ... {time.time() - t0:.0f}s, ainda não responde; debug.log:",
               log.read_text(encoding="utf-8", errors="replace").strip()[-300:] if log.exists() else "(ainda não)",

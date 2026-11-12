@@ -28,7 +28,7 @@ jobs:
           pyinstaller --noconfirm --clean --windowed --name "Flow Downloads"
           --icon flowdl/icon.ico
           --add-data "flowdl/*.png;flowdl" --add-data "flowdl/icon.ico;flowdl"
-          --hidden-import flowdl.gui --collect-submodules yt_dlp
+          --paths . --collect-submodules flowdl --collect-submodules yt_dlp
           packaging/launcher.py
 
       - name: Testar o .exe
