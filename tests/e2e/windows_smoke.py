@@ -139,7 +139,7 @@ def main() -> int:
               flush=True)
     check("Arranca em segundo plano", started, f"respondeu ao fim de {time.time() - t0:.0f}s")
     if not started:
-        for log in ("crash.log", "debug.log"):
+        for log in ("crash.log", "debug.log", "stacks.log"):
             path = cfg / "FlowDownloads" / log
             print(f"--- {log}:", path.read_text(encoding="utf-8", errors="replace") if path.exists() else "(não existe)")
         print("--- processo ainda vivo:", proc.poll() is None)
