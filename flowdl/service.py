@@ -368,8 +368,9 @@ class Service:
             code = (f"import sys; sys.path.insert(0, {str(ROOT)!r}); "
                     "from flowdl.service import run; run(background=True)")
             args = [sys.executable, "-c", code]
-        sys.stdout.flush()
-        sys.stderr.flush()
+        for stream in (sys.stdout, sys.stderr):  # None in a program without a console
+            if stream is not None:
+                stream.flush()
         if sys.platform.startswith("win"):
             flags = getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(subprocess, "CREATE_NO_WINDOW", 0)
             env = dict(os.environ)

@@ -1,4 +1,5 @@
 import json
+import sys
 import os
 import tempfile
 import threading
@@ -153,3 +154,19 @@ class BrowserListTests(unittest.TestCase):
             self.assertEqual(svc.requests[rid]["state"], "waiting")
         finally:
             svc.stop_bridge()
+
+
+class NoConsoleTests(unittest.TestCase):
+    def test_restart_works_without_console(self):
+        """Regression (Windows .exe): sys.stdout is None without a console, and the restart
+        to free memory crashed on sys.stdout.flush() before starting the new process."""
+        from unittest import mock
+        svc = Service(Settings(), DownloadManager(db_path=os.path.join(tempfile.mkdtemp(), "db.json")), port=0)
+        svc.slim_enabled = True
+        with mock.patch.object(sys, "stdout", None), mock.patch.object(sys, "stderr", None), \
+                mock.patch.object(service_mod.os, "execv") as execv, \
+                mock.patch.object(service_mod.subprocess, "Popen") as popen, \
+                mock.patch.object(service_mod.os, "_exit") as _exit, \
+                mock.patch.object(svc, "can_slim_down", return_value=True):
+            svc.restart_slim()
+        self.assertTrue(execv.called or popen.called)
