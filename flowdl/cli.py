@@ -1,4 +1,4 @@
-"""Command line usage: python -m pydm.cli URL [URL ...] [-o DIR] [-c CONNECTIONS]"""
+"""Command line usage: python -m flowdl.cli URL [URL ...] [-o DIR] [-c CONNECTIONS]"""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ from .manager import default_download_dir
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="PyDM - baixa arquivos usando várias conexões")
+    parser = argparse.ArgumentParser(description="Flow Downloads - baixa arquivos usando várias conexões")
     parser.add_argument("urls", nargs="+", help="link(s) para baixar")
     parser.add_argument("-o", "--output", default=default_download_dir(), help="pasta de destino")
     parser.add_argument("-c", "--connections", type=int, default=8, help="conexões por arquivo (padrão 8)")

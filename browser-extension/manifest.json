@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "PyDM - Integração com o navegador",
-  "version": "0.3.0",
-  "description": "Envia os downloads do navegador para o PyDM (gerenciador de downloads).",
+  "name": "Flow Downloads - Integração com o navegador",
+  "version": "0.4.0",
+  "description": "Envia os downloads do navegador para o Flow Downloads (gerenciador de downloads).",
   "permissions": [
     "downloads",
     "contextMenus",
@@ -16,15 +16,17 @@
     "service_worker": "background.js"
   },
   "action": {
-    "default_title": "PyDM",
+    "default_title": "Flow Downloads",
     "default_popup": "popup.html",
     "default_icon": {
       "16": "icons/icon16.png",
+      "32": "icons/icon32.png",
       "48": "icons/icon48.png"
     }
   },
   "icons": {
     "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
     "48": "icons/icon48.png",
     "128": "icons/icon128.png"
   },

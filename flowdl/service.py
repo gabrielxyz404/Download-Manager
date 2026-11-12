@@ -1,4 +1,4 @@
-"""Background service: the part of PyDM that stays running when no window is open.
+"""Background service: the part of Flow Downloads that stays running when no window is open.
 
 Design rules (the app must be very light in the background):
   * No CPU while idle: the browser bridge sleeps in accept() and the main thread
@@ -175,7 +175,7 @@ class Service:
         """Replace this process with a fresh background one (frees all window memory)."""
         self.shutdown()
         code = (f"import sys; sys.path.insert(0, {str(ROOT)!r}); "
-                "from pydm.service import run; run(background=True)")
+                "from flowdl.service import run; run(background=True)")
         args = [sys.executable, "-c", code]
         sys.stdout.flush()
         sys.stderr.flush()
@@ -188,11 +188,11 @@ class Service:
 
 # --------------------------------------------------------------- entry point
 def _existing_instance(port: int = DEFAULT_PORT) -> bool:
-    """If PyDM is already running, ask it to show its window and return True."""
+    """If Flow Downloads is already running, ask it to show its window and return True."""
     try:
         with socket.create_connection(("127.0.0.1", port), timeout=2) as s:
             s.settimeout(3)
-            s.sendall(b"POST /show HTTP/1.1\r\nHost: 127.0.0.1\r\nX-PyDM: 1\r\n"
+            s.sendall(b"POST /show HTTP/1.1\r\nHost: 127.0.0.1\r\nX-FlowDL: 1\r\n"
                       b"Content-Type: application/json\r\nContent-Length: 2\r\n\r\n{}")
             reply = s.recv(4096)
         return reply.startswith(b"HTTP/1.1 200")

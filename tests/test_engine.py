@@ -7,9 +7,9 @@ import time
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from pydm import engine
-from pydm.engine import DownloadTask, Status
-from pydm.manager import DownloadManager
+from flowdl import engine
+from flowdl.engine import DownloadTask, Status
+from flowdl.manager import DownloadManager
 
 DATA = os.urandom(5 * 1024 * 1024 + 123)
 

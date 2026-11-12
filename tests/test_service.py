@@ -7,16 +7,16 @@ import unittest
 import urllib.request
 from http.server import ThreadingHTTPServer
 
-from pydm import service as service_mod
-from pydm.manager import DownloadManager
-from pydm.service import Service
-from pydm.settings import Settings
+from flowdl import service as service_mod
+from flowdl.manager import DownloadManager
+from flowdl.service import Service
+from flowdl.settings import Settings
 from tests.test_engine import Handler
 
 
 def post(port, path, payload):
     req = urllib.request.Request(f"http://127.0.0.1:{port}{path}", data=json.dumps(payload).encode(),
-                                 headers={"X-PyDM": "1", "Content-Type": "application/json"}, method="POST")
+                                 headers={"X-FlowDL": "1", "Content-Type": "application/json"}, method="POST")
     with urllib.request.urlopen(req, timeout=5) as r:
         return r.status
 

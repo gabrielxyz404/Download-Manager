@@ -14,7 +14,7 @@ async function refresh() {
   $("capture").checked = !!st.enabled;
   $("dot").className = "dot " + (st.app ? "on" : "off");
   $("appState").textContent = st.app ? "aberto" : "fechado";
-  if (!st.app) show("Abra o PyDM no computador para baixar.", "err");
+  if (!st.app) show("Abra o Flow Downloads no computador para baixar.", "err");
 }
 
 $("videoForm").addEventListener("submit", async (e) => {
@@ -29,11 +29,17 @@ $("videoForm").addEventListener("submit", async (e) => {
   const res = await send({ type: "video", url });
   $("go").disabled = false;
   if (res.ok) {
-    show("✔ Enviado! Escolha a qualidade na janela do PyDM.", "ok");
+    show("✔ Enviado! Escolha a qualidade na janela do Flow Downloads.", "ok");
     $("url").value = "";
   } else {
-    show("Não consegui falar com o PyDM. Ele está aberto?", "err");
+    show("Não consegui falar com o Flow Downloads. Ele está aberto?", "err");
   }
+});
+
+$("open").addEventListener("click", async () => {
+  const res = await send({ type: "show" });
+  if (res.ok) window.close();
+  else show("O Flow Downloads não está a correr. Abra-o no computador.", "err");
 });
 
 $("capture").addEventListener("change", (e) => send({ type: "toggle", enabled: e.target.checked }));

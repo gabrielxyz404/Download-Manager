@@ -1,4 +1,4 @@
-"""Where PyDM keeps its files. Kept dependency-free so the background service stays tiny."""
+"""Where Flow Downloads keeps its files. Kept dependency-free so the background service stays tiny."""
 
 from __future__ import annotations
 
@@ -12,6 +12,6 @@ def default_download_dir() -> str:
 
 def config_dir() -> Path:
     base = os.environ.get("APPDATA") or os.environ.get("XDG_CONFIG_HOME") or str(Path.home() / ".config")
-    path = Path(base) / "pydm"
+    path = Path(base) / "FlowDownloads"
     path.mkdir(parents=True, exist_ok=True)
     return path

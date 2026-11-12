@@ -8,7 +8,7 @@ import sys
 
 ACTIONS = {
     "nothing": "Não fazer nada",
-    "close": "Fechar o PyDM",
+    "close": "Fechar o Flow Downloads",
     "shutdown": "Desligar o computador",
 }
 

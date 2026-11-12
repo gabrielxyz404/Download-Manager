@@ -1,4 +1,4 @@
-"""Start PyDM in the background when the user logs in (Windows / Linux)."""
+"""Start Flow Downloads in the background when the user logs in (Windows / Linux)."""
 
 from __future__ import annotations
 
@@ -6,8 +6,8 @@ import os
 import sys
 from pathlib import Path
 
-APP_NAME = "PyDM"
-LAUNCHER = Path(__file__).resolve().parent.parent / "PyDM.pyw"
+APP_NAME = "FlowDownloads"
+LAUNCHER = Path(__file__).resolve().parent.parent / "Flow Downloads.pyw"
 
 
 def supported() -> bool:
@@ -23,7 +23,7 @@ def _command() -> str:
 
 def _desktop_file() -> Path:
     base = os.environ.get("XDG_CONFIG_HOME") or str(Path.home() / ".config")
-    return Path(base) / "autostart" / "pydm.desktop"
+    return Path(base) / "autostart" / "flow-downloads.desktop"
 
 
 def is_enabled() -> bool:
@@ -55,7 +55,7 @@ def set_enabled(enabled: bool) -> None:
     path = _desktop_file()
     if enabled:
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text("[Desktop Entry]\nType=Application\nName=PyDM\n"
+        path.write_text("[Desktop Entry]\nType=Application\nName=Flow Downloads\n"
                         f"Exec={_command()}\nX-GNOME-Autostart-enabled=true\n", encoding="utf-8")
     elif path.exists():
         path.unlink()

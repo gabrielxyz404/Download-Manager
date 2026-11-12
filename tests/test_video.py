@@ -11,10 +11,10 @@ import urllib.request
 from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 
-from pydm import video
-from pydm.bridge import BrowserBridge
-from pydm.engine import DownloadTask, Status
-from pydm.manager import DownloadManager
+from flowdl import video
+from flowdl.bridge import BrowserBridge
+from flowdl.engine import DownloadTask, Status
+from flowdl.manager import DownloadManager
 
 HAVE_TOOLS = video.available() and shutil.which("ffmpeg") is not None
 
@@ -167,7 +167,7 @@ class CookieAndResumeTests(unittest.TestCase):
         try:
             req = urllib.request.Request(
                 f"http://127.0.0.1:{bridge.port}/video", method="POST",
-                headers={"X-PyDM": "1", "Content-Type": "application/json"},
+                headers={"X-FlowDL": "1", "Content-Type": "application/json"},
                 data=json.dumps({"page": "https://www.youtube.com/watch?v=x", "title": "T",
                                  "media": [{"url": "https://cdn/a.mp4", "size": 5}, {"url": "blob:x"}],
                                  "cookie_jar": [{"name": "a", "value": "b", "domain": ".youtube.com"}]}).encode())

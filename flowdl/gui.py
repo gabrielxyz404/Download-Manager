@@ -1,4 +1,4 @@
-"""Tkinter desktop interface for PyDM."""
+"""Tkinter desktop interface for Flow Downloads."""
 
 from __future__ import annotations
 
@@ -512,7 +512,7 @@ class App(tk.Tk):
         "countdown" only shows the shutdown countdown."""
         super().__init__()
         self.withdraw()
-        self.title("PyDM - Gerenciador de Downloads")
+        self.title("Flow Downloads")
         self.geometry("1100x580")
         self.minsize(820, 400)
 
@@ -526,8 +526,12 @@ class App(tk.Tk):
         self._filter = "all"
         self._last_save = time.monotonic()
 
+        here = os.path.dirname(__file__)
         try:
-            self.iconphoto(True, tk.PhotoImage(file=os.path.join(os.path.dirname(__file__), "icon.png")))
+            if sys.platform.startswith("win"):
+                self.iconbitmap(default=os.path.join(here, "icon.ico"))  # crisp taskbar/title icon
+            self._icons = [tk.PhotoImage(file=os.path.join(here, f"icon{s}.png")) for s in (256, 48, 32, 16)]
+            self.iconphoto(True, *self._icons)
         except tk.TclError:
             pass
 
@@ -570,10 +574,10 @@ class App(tk.Tk):
             self.settings.background_hint_shown = True
             messagebox.showinfo(
                 "Continua em segundo plano",
-                "O PyDM continua a funcionar em segundo plano (quase sem gastar memória ou CPU), "
+                "O Flow Downloads continua a funcionar em segundo plano (quase sem gastar memória ou CPU), "
                 "pronto para receber downloads do navegador.\n\n"
                 "Para fechar de vez: menu Tarefas → Sair.\n"
-                "Para voltar a abrir: abra o PyDM de novo ou use o botão da extensão.", parent=self)
+                "Para voltar a abrir: abra o Flow Downloads de novo ou use o botão da extensão.", parent=self)
         self._save_ui_settings()
         self.destroy()
 
@@ -639,7 +643,7 @@ class App(tk.Tk):
         opts.add_checkbutton(label="Confirmar downloads vindos do navegador", variable=self.confirm_var)
         opts.add_checkbutton(label="Capturar links copiados", variable=self.clip_var)
         self.resume_var = tk.BooleanVar(value=self.settings.auto_resume)
-        opts.add_checkbutton(label="Retomar downloads ao abrir o PyDM", variable=self.resume_var)
+        opts.add_checkbutton(label="Retomar downloads ao abrir o Flow Downloads", variable=self.resume_var)
         self.bg_var = tk.BooleanVar(value=self.settings.run_in_background)
         opts.add_checkbutton(label="Continuar em segundo plano ao fechar a janela", variable=self.bg_var,
                              command=lambda: setattr(self.settings, "run_in_background", self.bg_var.get()))
@@ -656,7 +660,7 @@ class App(tk.Tk):
         helpm = tk.Menu(menubar, tearoff=False)
         helpm.add_command(label="Como instalar a extensão do navegador", command=self._extension_help)
         helpm.add_command(label="Sobre", command=lambda: messagebox.showinfo(
-            "Sobre", "PyDM — gerenciador de downloads gratuito\n"
+            "Sobre", "Flow Downloads — gerenciador de downloads gratuito\n"
                      "Downloads com várias conexões, retomada, agendador e integração com o navegador."))
         menubar.add_cascade(label="Ajuda", menu=helpm)
 
@@ -980,8 +984,8 @@ class App(tk.Tk):
             "2. Ative o 'Modo de desenvolvedor' (canto superior direito)\n"
             "3. Clique em 'Carregar sem compactação' e escolha a pasta:\n"
             f"   {folder}\n\n"
-            "Com o PyDM aberto, os downloads do navegador passam a ser feitos por ele.\n\n"
-            "Para baixar um vídeo: copie o link, clique no ícone do PyDM na barra do navegador, "
+            "Com o Flow Downloads aberto, os downloads do navegador passam a ser feitos por ele.\n\n"
+            "Para baixar um vídeo: copie o link, clique no ícone do Flow Downloads na barra do navegador, "
             "cole o link em 'Baixar vídeo' e escolha a qualidade.")
 
     # ---------------------------------------------------------------- refresh

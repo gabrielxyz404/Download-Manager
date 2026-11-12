@@ -3,7 +3,7 @@
 Written directly on sockets (instead of http.server) so the background process
 stays small: it sleeps in accept() and uses no CPU until the browser calls.
 
-Listens only on 127.0.0.1. Requests must carry the ``X-PyDM`` header and must
+Listens only on 127.0.0.1. Requests must carry the ``X-FlowDL`` header and must
 not come from a regular web page origin, so websites cannot push downloads.
 """
 
@@ -46,10 +46,10 @@ def _download_item(data: dict) -> dict:
 def handle_request(method: str, path: str, headers: dict, body: bytes,
                    on_add: Callable[[dict], None]) -> tuple[int, dict]:
     origin = headers.get("origin", "")
-    if origin.startswith(("http://", "https://")) or headers.get("x-pydm") != "1":
+    if origin.startswith(("http://", "https://")) or headers.get("x-flowdl") != "1":
         return 403, {"ok": False}
     if method == "GET" and path == "/ping":
-        return 200, {"app": "pydm", "ok": True}
+        return 200, {"app": "flowdl", "ok": True}
     if method != "POST" or path not in ("/add", "/video", "/show"):
         return 403, {"ok": False}
     try:

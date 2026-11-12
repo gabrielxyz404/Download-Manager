@@ -2,15 +2,15 @@
 <html lang="pt">
 <head>
 <meta charset="utf-8">
-<title>PyDM</title>
+<title>Flow Downloads</title>
 <style>
   :root {
     --bg: #ffffff; --fg: #1b1b1b; --muted: #666; --field: #f3f3f3; --border: #d0d0d0;
-    --accent: #1976d2; --accent-fg: #fff; --ok: #2e7d32; --err: #c62828;
+    --accent: #2b5c99; --accent-fg: #fff; --ok: #2e7d32; --err: #c62828;
   }
   @media (prefers-color-scheme: dark) {
     :root { --bg: #1e1f22; --fg: #e6e6e6; --muted: #a0a0a0; --field: #2b2d31; --border: #3f4147;
-            --ok: #5fd27a; --err: #ff7b72; }
+            --accent: #3f78bf; --ok: #5fd27a; --err: #ff7b72; }
   }
   * { box-sizing: border-box; }
   body { margin: 0; width: 340px; background: var(--bg); color: var(--fg);
@@ -32,6 +32,9 @@
   button:disabled { opacity: .5; cursor: default; }
   #msg { min-height: 18px; margin-top: 6px; font-size: 12px; }
   #msg.ok { color: var(--ok); } #msg.err { color: var(--err); }
+  button.secondary { background: transparent; color: var(--accent); border: 1px solid var(--border);
+                     font-weight: 500; margin-top: 0; }
+  #openBox { padding: 0 14px 12px; }
   label.row { display: flex; align-items: center; gap: 8px; cursor: pointer;
               border-top: 1px solid var(--border); padding: 10px 14px; }
 </style>
@@ -39,7 +42,7 @@
 <body>
   <header>
     <img src="icons/icon48.png" alt="">
-    <b>PyDM</b>
+    <b>Flow Downloads</b>
     <span class="dot" id="dot"></span>
     <span id="appState">verificando...</span>
   </header>
@@ -52,6 +55,8 @@
     </form>
     <div id="msg"></div>
   </section>
+
+  <div id="openBox"><button class="secondary" id="open">Abrir Flow Downloads</button></div>
 
   <label class="row">
     <input type="checkbox" id="capture">

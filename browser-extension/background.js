@@ -1,7 +1,7 @@
-// PyDM browser integration: hands browser downloads over to the PyDM app,
+// Flow Downloads browser integration: hands browser downloads over to the Flow Downloads app,
 // which must be running (it listens on 127.0.0.1:17890).
 const APP = "http://127.0.0.1:17890";
-const HEADERS = { "X-PyDM": "1" };
+const HEADERS = { "X-FlowDL": "1" };
 const passThrough = new Set(); // URLs we let the browser download itself
 
 async function isEnabled() {
@@ -60,8 +60,8 @@ async function sendToApp(url, filename, referrer) {
 
 chrome.runtime.onInstalled.addListener(() => {
   chrome.contextMenus.create({
-    id: "pydm-download",
-    title: "Baixar com PyDM",
+    id: "flowdl-download",
+    title: "Baixar com Flow Downloads",
     contexts: ["link", "image", "video", "audio"],
   });
   updateBadge();
@@ -77,6 +77,8 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       await chrome.storage.local.set({ enabled: !!msg.enabled });
       await updateBadge();
       sendResponse({ ok: true });
+    } else if (msg.type === "show") {
+      sendResponse({ ok: await postApp("/show", {}) });
     } else if (msg.type === "video") {
       let cookie_jar = [];
       try {
@@ -92,7 +94,7 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
   const url = info.linkUrl || info.srcUrl;
   if (!url) return;
   if (!(await sendToApp(url, "", info.pageUrl || (tab && tab.url) || ""))) {
-    console.warn("PyDM não está aberto.");
+    console.warn("Flow Downloads não está aberto.");
   }
 });
 

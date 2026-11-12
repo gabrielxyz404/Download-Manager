@@ -8,12 +8,12 @@ import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from pydm import grabber
-from pydm.bridge import BrowserBridge
-from pydm.categories import category_for
-from pydm.engine import DownloadTask, Status
-from pydm.limiter import RateLimiter
-from pydm.scheduler import Scheduler
+from flowdl import grabber
+from flowdl.bridge import BrowserBridge
+from flowdl.categories import category_for
+from flowdl.engine import DownloadTask, Status
+from flowdl.limiter import RateLimiter
+from flowdl.scheduler import Scheduler
 
 PAGE = """<html><body>
 <a href="/files/setup.exe">setup</a>
@@ -115,7 +115,7 @@ class FeatureTests(unittest.TestCase):
                 except urllib.error.HTTPError as e:
                     return e.code
 
-            ok = {"X-PyDM": "1", "Content-Type": "application/json", "Origin": "chrome-extension://abc"}
+            ok = {"X-FlowDL": "1", "Content-Type": "application/json", "Origin": "chrome-extension://abc"}
             self.assertEqual(post(ok, {"url": "https://a/b.zip", "cookies": "k=v"}), 200)
             self.assertEqual(post({"Content-Type": "application/json"}, {"url": "https://a/c"}), 403)
             self.assertEqual(post({**ok, "Origin": "https://evil.example"}, {"url": "https://a/d"}), 403)
