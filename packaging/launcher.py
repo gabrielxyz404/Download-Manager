@@ -33,6 +33,8 @@ if os.environ.get("FLOWDL_DEBUG"):  # very first sign of life, before loading th
 
 
 def main() -> int:
+    if not getattr(sys, "frozen", False):  # run from the source folder (not the .exe)
+        sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     from flowdl.service import run
 
     args = [a for a in sys.argv[1:] if a != "--background"]
