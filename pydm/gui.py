@@ -720,14 +720,11 @@ class App(tk.Tk):
         folder = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "browser-extension")
         messagebox.showinfo(
             "Extensão do navegador",
-            "Chrome / Edge / Brave / Opera:\n"
-            "1. Abra chrome://extensions (ou edge://extensions)\n"
-            "2. Ative o 'Modo do desenvolvedor'\n"
+            "Brave (ou Chrome / Edge / Opera):\n"
+            "1. Abra brave://extensions\n"
+            "2. Ative o 'Modo de desenvolvedor' (canto superior direito)\n"
             "3. Clique em 'Carregar sem compactação' e escolha a pasta:\n"
             f"   {folder}\n\n"
-            "Firefox:\n"
-            "1. Abra about:debugging#/runtime/this-firefox\n"
-            "2. 'Carregar extensão temporária' e escolha o manifest.json dessa pasta\n\n"
             "Com o PyDM aberto, os downloads do navegador passam a ser feitos por ele. "
             "Clique no ícone da extensão para ligar/desligar.")
 

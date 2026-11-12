@@ -10,7 +10,7 @@ Um gerenciador de downloads no estilo do IDM (Internet Download Manager), feito 
 | Aceleração de download (várias conexões) | ✅ até 32 conexões por arquivo |
 | Segmentação dinâmica | ✅ quando uma conexão termina, ela divide ao meio o maior pedaço restante |
 | Retomar downloads | ✅ pausa/retoma, e continua de onde parou mesmo depois de fechar o app ou cair a internet (reconecta sozinho) |
-| Integração com o navegador | ✅ extensão para Chrome, Edge, Brave, Opera e Firefox; também clique-direito → "Baixar com PyDM" |
+| Integração com o navegador | ✅ extensão para navegadores Chromium (Brave, Chrome, Edge, Opera); também clique-direito → "Baixar com PyDM" |
 | Download com um clique | ✅ ao clicar num link de download no navegador, o PyDM assume |
 | Limitador de velocidade | ✅ limite total e por download |
 | Agendador | ✅ iniciar/parar em horários e dias definidos; ao terminar, fechar o app ou desligar o PC |
@@ -45,14 +45,15 @@ Se interromper com `Ctrl+C`, rode o mesmo comando de novo para continuar de onde
 Com a extensão, os downloads que você inicia no navegador vão direto para o PyDM
 (incluindo cookies, então funciona em sites com login).
 
-**Chrome / Edge / Brave / Opera**
-1. Abra `chrome://extensions` (ou `edge://extensions`).
-2. Ative o **Modo do desenvolvedor**.
-3. Clique em **Carregar sem compactação** e escolha a pasta `browser-extension`.
+Funciona em navegadores baseados em Chromium: **Brave**, Chrome, Edge, Opera, Vivaldi.
 
-**Firefox**
-1. Abra `about:debugging#/runtime/this-firefox`.
-2. **Carregar extensão temporária** → escolha `browser-extension/manifest.json`.
+**Instalar no Brave**
+1. Abra `brave://extensions` na barra de endereços.
+2. Ative o **Modo de desenvolvedor** (canto superior direito).
+3. Clique em **Carregar sem compactação** (*Load unpacked*) e escolha a pasta `browser-extension` deste projeto.
+4. (Opcional) Clique no ícone de peça 🧩 da barra e fixe o PyDM para ver o botão liga/desliga.
+
+Nos outros navegadores é igual, mudando o endereço: `chrome://extensions`, `edge://extensions`, `opera://extensions`.
 
 O PyDM precisa estar aberto. Se estiver fechado, o navegador baixa normalmente.
 Clique no ícone da extensão para ligar/desligar a captura (aparece "OFF").
