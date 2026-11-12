@@ -33,10 +33,20 @@ DEBUG = bool(os.environ.get("FLOWDL_DEBUG"))
 
 
 def log(*args) -> None:
-    """Diagnostics, only when the FLOWDL_DEBUG environment variable is set."""
-    if DEBUG:
-        import time
-        print(f"[flowdl {os.getpid()} {time.strftime('%H:%M:%S')}]", *args, file=sys.stderr, flush=True)
+    """Diagnostics, only when the FLOWDL_DEBUG environment variable is set. Goes to the
+    console, or to debug.log in the settings folder when there is no console (the .exe)."""
+    if not DEBUG:
+        return
+    import time
+    line = f"[flowdl {os.getpid()} {time.strftime('%H:%M:%S')}] " + " ".join(str(a) for a in args)
+    try:
+        if sys.stderr is not None:
+            print(line, file=sys.stderr, flush=True)
+        else:
+            with open(config_dir() / "debug.log", "a", encoding="utf-8") as f:
+                f.write(line + "\n")
+    except OSError:
+        pass
 REQUEST_WAIT_S = 20        # the extension asks "has it started?" and we answer within 20 s
 NO_BROWSER_AFTER_S = 30    # finished but the browser never came for the file: keep it here
 BROWSER_GONE_AFTER_S = 120  # the browser stopped receiving and did not come back
@@ -384,12 +394,30 @@ def _existing_instance(port: int = DEFAULT_PORT, show: bool = True) -> bool:
 
 
 def run(background: bool = False) -> None:
+    try:
+        _run(background)
+    except BaseException as exc:  # record why the program stopped (there may be no console)
+        if isinstance(exc, (SystemExit, KeyboardInterrupt)):
+            raise
+        import time
+        import traceback
+        try:
+            with open(config_dir() / "crash.log", "a", encoding="utf-8") as f:
+                f.write(f"--- {time.strftime('%Y-%m-%d %H:%M:%S')}\n{traceback.format_exc()}\n")
+        except OSError:
+            pass
+        raise
+
+
+def _run(background: bool) -> None:
+    log("start", sys.executable, sys.argv)
     if _existing_instance(show=not background):
+        log("already running")
         return
     svc = Service()
     svc.slim_enabled = True
     if svc.settings.browser_integration:
-        svc.start_bridge(retries=20)
+        log("bridge", "listening" if svc.start_bridge(retries=20) else "FAILED to listen")
     if svc.settings.auto_resume and svc.has_saved_active_downloads():
         svc.manager.tick()  # interrupted downloads continue right away
     mode = None if background else "main"

@@ -125,8 +125,17 @@ def main() -> int:
         "show_progress_window": False}))
     env = {**os.environ, "APPDATA": str(cfg), "XDG_CONFIG_HOME": str(cfg)}
 
+    env["FLOWDL_DEBUG"] = "1"
     proc = subprocess.Popen(cmd + ["--background"], env=env)
-    check("Arranca em segundo plano", wait_for(ping, 30))
+    started = wait_for(ping, 30)
+    check("Arranca em segundo plano", started)
+    if not started:
+        for log in ("crash.log", "debug.log"):
+            path = cfg / "FlowDownloads" / log
+            print(f"--- {log}:", path.read_text(encoding="utf-8", errors="replace") if path.exists() else "(não existe)")
+        print("--- processo ainda vivo:", proc.poll() is None)
+        proc.kill()
+        return 1
     pids = app_pids(name)
     procs = app_procs(name)
 
