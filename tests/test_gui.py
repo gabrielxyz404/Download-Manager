@@ -307,8 +307,11 @@ class GuiTests(unittest.TestCase):
         self.assertEqual(len(dlg), 1)
         self.assertEqual(dlg[0].url.get(), self.base + "/doNavegador.zip")
         dlg[0]._ok(True)
-        pump(app, 2)
-        self.assertFalse(app.winfo_exists() if self._alive(app) else False)  # app closed itself
+        pump(app, 0.3)
+        # after "Baixar agora": only the small progress window, which closes when it is done,
+        # and then the hidden app window closes itself too
+        self.assertEqual(len(dialogs(app, self.gui.ProgressWindow)), 1)
+        self.assertTrue(pump(app, 60, lambda: not self._alive(app)), "the app should close itself")
         task = self.svc.manager.tasks[0]
         task.wait(30)
         self.assertEqual(task.status, "Concluído", task.error)
