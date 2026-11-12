@@ -99,7 +99,7 @@ class AddDialog(tk.Toplevel):
         ttk.Label(frm, text="Salvar em:").grid(row=3, column=0, sticky="w", pady=3)
         ttk.Entry(frm, textvariable=self.folder).grid(row=3, column=1, sticky="ew")
         ttk.Button(frm, text="...", width=3, command=self._browse).grid(row=3, column=2, padx=(4, 0))
-        ttk.Label(frm, text="Conexões:").grid(row=4, column=0, sticky="w", pady=3)
+        ttk.Label(frm, text="Conexões (máx.):").grid(row=4, column=0, sticky="w", pady=3)
         ttk.Spinbox(frm, from_=1, to=32, width=5, textvariable=self.conns).grid(row=4, column=1, sticky="w")
 
         btns = ttk.Frame(frm)
@@ -1034,6 +1034,8 @@ class App(tk.Tk):
             status = f"Erro: {t.error}"
         elif status == Status.DOWNLOADING and t.speed_limit:
             status = f"Baixando (limite {format_size(t.speed_limit)}/s)"
+        elif status == Status.DOWNLOADING and getattr(t, "connection_note", ""):
+            status = f"Baixando ({t.connection_note})"
         running = t.is_running()
         return (
             t.filename or t.url,

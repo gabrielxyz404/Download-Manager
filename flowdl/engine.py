@@ -37,6 +37,10 @@ USER_AGENT = (
 CHUNK_SIZE = 64 * 1024
 MIN_SPLIT_SIZE = 512 * 1024  # do not split segments smaller than 2x this
 MAX_RETRIES = 8
+START_CONNECTIONS = 2     # adaptive mode starts small...
+RAMP_INTERVAL = 2.0       # ...measures the speed every 2 s...
+RAMP_MIN_GAIN = 1.15      # ...and doubles the connections while that gives 15%+ more speed
+LIMIT_CODES = (429, 503)  # "too many requests / busy": the server limits connections per user
 TIMEOUT = 30
 
 
@@ -153,6 +157,11 @@ class DownloadTask:
         self._samples: deque[tuple[float, int]] = deque()
         self._active_workers = 0
         self._worker_error: str | None = None
+        self._limit_hit = 0  # >0: the server refused a connection; value = connections it accepts
+        self._streaming = 0  # connections currently receiving data
+        self._wake = threading.Event()  # set when a connection finishes: react at once
+        self.server_limit: int | None = None  # connections the server accepts, when it refuses more
+        self.connection_note = ""  # shown in the list: speed test / limit found
         self.on_done = None  # called (from the download thread) when it stops for any reason
 
     # ------------------------------------------------------------------ public
@@ -379,19 +388,49 @@ class DownloadTask:
             workers.append(t)
             t.start()
 
+        # Server speed test: start with a few connections and double them while the
+        # total speed keeps growing. Stop when more connections stop helping (the line
+        # or the server is saturated) or when the server refuses them (its limit).
+        cap = self.connections
+        target = min(START_CONNECTIONS, cap)
+        ramping = target < cap
+        ramp_at = time.monotonic() + RAMP_INTERVAL
+        ramp_speed: float | None = None
+        self.connection_note = "a testar velocidade" if ramping else ""
+        self.server_limit = None
+
         for seg in self.segments:
-            if seg.remaining > 0:
+            if seg.remaining > 0 and self._active_workers < target:
                 spawn(seg)
 
         while True:
-            time.sleep(0.5)
+            self._wake.wait(0.5)
+            self._wake.clear()
             self.downloaded = sum(s.pos - s.start for s in self.segments)
             self._update_speed()
             if self._worker_error:
                 self._stop.set()
-            # Dynamic segmentation: keep `connections` workers busy.
+            now = time.monotonic()
+            if self._limit_hit:
+                self.server_limit = max(1, self._limit_hit)
+                self._limit_hit = 0
+                target, ramping = self.server_limit, False
+                self.connection_note = f"servidor aceita {self.server_limit}"
+            elif ramping and now >= ramp_at:
+                current = self._recent_speed(1.5)
+                if ramp_speed is None or current > ramp_speed * RAMP_MIN_GAIN:
+                    ramp_speed = current
+                    target = min(cap, target * 2)
+                    ramp_at = now + RAMP_INTERVAL
+                    ramping = target < cap
+                    if not ramping:
+                        self.connection_note = ""
+                else:
+                    ramping = False  # more connections did not make it faster
+                    self.connection_note = f"{self._active_workers} ligações chegam"
+            # Dynamic segmentation: keep `target` workers busy.
             if not self._stop.is_set():
-                while self._active_workers < self.connections:
+                while self._active_workers < target:
                     new_seg = self._split_largest()
                     if new_seg is None:
                         break
@@ -443,6 +482,8 @@ class DownloadTask:
 
     def _worker(self, seg: Segment) -> None:
         retries = 0
+        got_data = False
+        refusals = 0
         try:
             # Unbuffered: every chunk goes straight to the operating system, so nothing
             # sits in a Python buffer that would be lost if the app is killed.
@@ -465,9 +506,26 @@ class DownloadTask:
                                     if seg.remaining == 0:
                                         break
                                 retries = 0
+                                if not got_data:
+                                    got_data = True
+                                    with self._lock:
+                                        self._streaming += 1
                                 self._throttle(len(chunk))
                     except (urllib.error.URLError, OSError, TimeoutError) as exc:
-                        if isinstance(exc, urllib.error.HTTPError) and exc.code in (401, 403, 404, 410):
+                        code = exc.code if isinstance(exc, urllib.error.HTTPError) else None
+                        refused = isinstance(getattr(exc, "reason", exc), ConnectionRefusedError)
+                        if (code in LIMIT_CODES or refused) and not got_data and self._active_workers > 1:
+                            # The server does not want one more connection from us. It may still
+                            # be counting one we just closed, so try once more after a second;
+                            # if refused again, that is its limit: hand the piece back (another
+                            # connection will take it) instead of failing.
+                            refusals += 1
+                            if refusals == 1:
+                                self._stop.wait(1.0)
+                                continue
+                            self._limit_hit = max(self._limit_hit, self._streaming)
+                            return
+                        if code in (401, 403, 404, 410):
                             raise RuntimeError(f"HTTP {exc.code}: {exc.reason}") from exc
                         retries += 1
                         if retries > MAX_RETRIES:
@@ -479,11 +537,22 @@ class DownloadTask:
             seg.active = False
             with self._lock:
                 self._active_workers -= 1
+                if got_data:
+                    self._streaming -= 1
+            self._wake.set()
 
     def _throttle(self, nbytes: int) -> None:
         delay = max(GLOBAL_LIMITER.reserve(nbytes), self.limiter.reserve(nbytes))
         if delay > 0:
             self._stop.wait(delay)
+
+    def _recent_speed(self, window: float) -> float:
+        """Average speed over the last ``window`` seconds."""
+        now = time.monotonic()
+        recent = [(t, b) for t, b in self._samples if now - t <= window]
+        if len(recent) < 2 or recent[-1][0] <= recent[0][0]:
+            return self.speed
+        return (recent[-1][1] - recent[0][1]) / (recent[-1][0] - recent[0][0])
 
     def _update_speed(self) -> None:
         now = time.monotonic()

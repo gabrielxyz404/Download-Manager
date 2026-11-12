@@ -23,7 +23,7 @@ def main(argv: list[str] | None = None) -> int:
         task.start()
         try:
             while task.is_running():
-                time.sleep(0.5)
+                task.wait(0.5)  # returns as soon as the download ends
                 name = task.filename or url
                 sys.stdout.write(
                     f"\r{name[:40]:40} {task.progress * 100:5.1f}% "

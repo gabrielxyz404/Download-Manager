@@ -30,7 +30,7 @@ Como consegue isto:
 
 | Recurso do IDM | Flow Downloads |
 |---|---|
-| Aceleração de download (várias conexões) | ✅ até 32 conexões por arquivo |
+| Aceleração de download (várias conexões) | ✅ até 32 conexões por arquivo, com teste de velocidade do servidor |
 | Segmentação dinâmica | ✅ quando uma conexão termina, ela divide ao meio o maior pedaço restante |
 | Retomar downloads | ✅ pausa/retoma e continua de onde parou; se a internet cair reconecta sozinho; ao reabrir o Flow Downloads (depois de fechar, reiniciar o PC ou faltar luz) os downloads que estavam a correr recomeçam sozinhos |
 | Captura de vídeos e áudios | ✅ cole o link no botão do Flow Downloads na barra do navegador e escolha a resolução (1080p, 720p...) ou só o áudio em MP3 — sem botões por cima dos vídeos |
@@ -106,9 +106,25 @@ No menu da extensão também pode ligar/desligar a captura de downloads (quando 
 ## Como funciona a aceleração
 
 1. O Flow Downloads pergunta ao servidor o tamanho do arquivo e se ele aceita downloads em partes (`Range`).
-2. O arquivo é dividido em N partes, cada uma baixada por uma conexão, gravando direto na posição certa.
-3. Quando uma conexão termina, ela pega metade da maior parte que ainda falta — todas ficam ocupadas até o fim.
-4. O progresso é salvo em `arquivo.part.json`, por isso dá para retomar depois.
+2. O arquivo é dividido em partes (um arquivo de 1 GB com 8 conexões = 8 partes de 125 MB), cada uma
+   baixada por uma conexão e gravada direto na posição certa — no fim não há nada para juntar.
+3. **Teste de velocidade:** começa com 2 conexões e vai dobrando (2 → 4 → 8...) enquanto a velocidade
+   total subir pelo menos 15%. Se não compensar (linha ou servidor no limite), para de abrir conexões.
+   Se o servidor recusar conexões a mais (erro 503/429), usa só as que ele aceita, sem dar erro.
+   O valor de "Conexões" passa a ser o **máximo**.
+4. Quando uma conexão termina, ela pega metade da maior parte que ainda falta — todas ficam ocupadas até o fim.
+5. O progresso é salvo em `arquivo.part.json` (gravado no disco antes de ser anotado, para aguentar faltas de luz).
+
+### Comparar com e sem o Flow Downloads
+
+```bash
+python tools/benchmark.py https://exemplo.com/instalador.exe
+```
+
+Baixa o mesmo arquivo com 1 conexão (como o navegador) e com o Flow Downloads, mostra a velocidade de
+cada um e confirma que os arquivos são idênticos. O ganho depende da internet e do servidor: é maior
+quando cada conexão é limitada pelo servidor ou pela distância, e pequeno quando uma só conexão já
+enche a sua internet.
 
 Se o servidor não aceita partes, o download é feito com uma conexão só (e não pode ser retomado).
 

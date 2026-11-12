@@ -213,3 +213,117 @@ class EngineTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+BIG = DATA * 3  # ~15 MB
+
+
+class AdaptiveServer(BaseHTTPRequestHandler):
+    """Configurable server for the connection speed test.
+
+    mode "per_connection": each connection is limited (a CDN): more connections = faster.
+    mode "shared": the total is limited (slow line): more connections do not help.
+    mode "max2": the server refuses (503) more than 2 connections at once.
+    """
+    mode = "per_connection"
+    size = 0
+    active = 0
+    peak = 0
+    refused = 0
+    lock = threading.Lock()
+    shared = None  # RateLimiter for "shared"
+
+    def log_message(self, *a):
+        pass
+
+    def do_GET(self):
+        cls = type(self)
+        m = re.match(r"bytes=(\d+)-(\d*)", self.headers.get("Range", ""))
+        start = int(m.group(1)) if m else 0
+        end = int(m.group(2)) if m and m.group(2) else cls.size - 1
+        with cls.lock:
+            if cls.mode == "max2" and cls.active >= 2 and end > start:
+                cls.refused += 1
+                self.send_error(503)
+                return
+            cls.active += 1
+            cls.peak = max(cls.peak, cls.active)
+        try:
+            body = BIG[start:end + 1]
+            self.send_response(206 if m else 200)
+            if m:
+                self.send_header("Content-Range", f"bytes {start}-{end}/{cls.size}")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            for i in range(0, len(body), 16 * 1024):
+                piece = body[i:i + 16 * 1024]
+                self.wfile.write(piece)
+                if cls.mode == "shared":
+                    time.sleep(cls.shared.reserve(len(piece)))
+                else:
+                    time.sleep(len(piece) / 250_000)  # 250 KB/s per connection
+        except OSError:
+            pass
+        finally:
+            with cls.lock:
+                cls.active -= 1
+
+
+class AdaptiveConnectionTests(unittest.TestCase):
+    """The server speed test: how many connections are worth opening."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.server = ThreadingHTTPServer(("127.0.0.1", 0), AdaptiveServer)
+        cls.server.daemon_threads = True
+        threading.Thread(target=cls.server.serve_forever, daemon=True).start()
+        cls.base = f"http://127.0.0.1:{cls.server.server_address[1]}"
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.shutdown()
+
+    def setUp(self):
+        from flowdl.limiter import RateLimiter
+        self.tmp = tempfile.TemporaryDirectory()
+        AdaptiveServer.active = AdaptiveServer.peak = AdaptiveServer.refused = 0
+        AdaptiveServer.shared = RateLimiter(1_000_000)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def run_download(self, mode, size, connections=8):
+        AdaptiveServer.mode, AdaptiveServer.size = mode, size
+        task = DownloadTask(f"{self.base}/{mode}.bin", self.tmp.name, connections)
+        notes = set()
+        self.peak = self.streaming_peak = 0
+        task.start()
+        while task.is_running():
+            notes.add(task.connection_note)
+            self.peak = max(self.peak, task.active_connections)
+            self.streaming_peak = max(self.streaming_peak, task._streaming)
+            time.sleep(0.05)
+        self.assertEqual(task.status, Status.COMPLETED, task.error)
+        with open(task.path, "rb") as f:
+            self.assertEqual(f.read(), BIG[:size])
+        return task, notes
+
+    def test_fast_server_ramps_up_to_the_maximum(self):
+        task, notes = self.run_download("per_connection", 12 * 1024 * 1024)
+        self.assertIn("a testar velocidade", notes)
+        self.assertEqual(self.peak, 8)  # 2 -> 4 -> 8: every step was faster, never more than 8
+
+    def test_saturated_line_stops_adding_connections(self):
+        task, notes = self.run_download("shared", 5 * 1024 * 1024)
+        self.assertLess(self.peak, 8)  # no point in 8 connections on a 1 MB/s line
+        self.assertTrue(any("chegam" in n for n in notes), notes)
+
+    def test_server_connection_limit_is_respected_without_failing(self):
+        # The server refuses (503) every connection beyond 2. The download must still finish,
+        # intact and without error, by giving the refused pieces to the accepted connections.
+        task, notes = self.run_download("max2", 3 * 1024 * 1024)
+        self.assertGreater(AdaptiveServer.refused, 0)
+        self.assertIsNone(task.error)
+        if task.server_limit is not None:  # shown to the user as "servidor aceita N"
+            self.assertIn(f"servidor aceita {task.server_limit}", notes)
+            self.assertLess(task.server_limit, 8)
