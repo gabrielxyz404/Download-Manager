@@ -9,7 +9,8 @@ Um gerenciador de downloads no estilo do IDM (Internet Download Manager), feito 
 |---|---|
 | Aceleração de download (várias conexões) | ✅ até 32 conexões por arquivo |
 | Segmentação dinâmica | ✅ quando uma conexão termina, ela divide ao meio o maior pedaço restante |
-| Retomar downloads | ✅ pausa/retoma, e continua de onde parou mesmo depois de fechar o app ou cair a internet (reconecta sozinho) |
+| Retomar downloads | ✅ pausa/retoma e continua de onde parou; se a internet cair reconecta sozinho; ao reabrir o PyDM (depois de fechar, reiniciar o PC ou faltar luz) os downloads que estavam a correr recomeçam sozinhos |
+| Captura de vídeos e áudios | ✅ botão flutuante **"⬇ Baixar este vídeo"** por cima dos vídeos no navegador; escolhe a resolução (1080p, 720p...) ou só o áudio em MP3 |
 | Integração com o navegador | ✅ extensão para navegadores Chromium (Brave, Chrome, Edge, Opera); também clique-direito → "Baixar com PyDM" |
 | Download com um clique | ✅ ao clicar num link de download no navegador, o PyDM assume |
 | Limitador de velocidade | ✅ limite total e por download |
@@ -21,6 +22,24 @@ Um gerenciador de downloads no estilo do IDM (Internet Download Manager), feito 
 | Fila de downloads | ✅ número de downloads simultâneos configurável |
 | Capturar links copiados | ✅ link copiado aparece automaticamente na barra de URL |
 | HTTP / HTTPS / FTP | ✅ HTTP e HTTPS com várias conexões; FTP básico (1 conexão) |
+
+## Vídeos (YouTube, Instagram, TikTok, etc.)
+
+Passe o rato por cima de um vídeo no Brave e clique em **⬇ Baixar este vídeo**. O PyDM abre uma
+janela para escolher a qualidade. Também pode colar o link do vídeo na barra de URL do PyDM.
+
+Para isto o PyDM usa duas ferramentas gratuitas:
+
+- **yt-dlp** — encontra o vídeo nos sites. O PyDM instala-o sozinho: na janela do vídeo, clique em
+  *Instalar suporte a vídeos* (ou `pip install yt-dlp`). Os sites mudam com frequência; se um vídeo
+  deixar de funcionar, use **Opções → Instalar/atualizar suporte a vídeos**.
+- **ffmpeg** — junta o vídeo e o áudio. Sem ele, o YouTube só dá até 360p e não há conversão para MP3.
+  No Windows: abra o terminal e rode `winget install ffmpeg`, depois reabra o PyDM.
+
+Em sites sem suporte do yt-dlp, a janela mostra os ficheiros de vídeo que o navegador carregou
+("Arquivo direto"), que são baixados com várias conexões.
+
+> Baixe só vídeos que tem direito a guardar — alguns sites, como o YouTube, não permitem isso nos termos de uso.
 
 ## Como usar
 
@@ -55,6 +74,8 @@ Funciona em navegadores baseados em Chromium: **Brave**, Chrome, Edge, Opera, Vi
 
 Nos outros navegadores é igual, mudando o endereço: `chrome://extensions`, `edge://extensions`, `opera://extensions`.
 
+Depois de atualizar o PyDM, clique em **↻ (recarregar)** na extensão em `brave://extensions`.
+
 O PyDM precisa estar aberto. Se estiver fechado, o navegador baixa normalmente.
 Clique no ícone da extensão para ligar/desligar a captura (aparece "OFF").
 
@@ -76,6 +97,7 @@ pydm/gui.py         interface gráfica (Tkinter)
 pydm/cli.py         linha de comando
 pydm/bridge.py      servidor local (127.0.0.1:17890) que recebe links da extensão
 pydm/grabber.py     captura de arquivos de sites
+pydm/video.py       downloads de vídeo/áudio (yt-dlp)
 pydm/scheduler.py   agendador
 pydm/limiter.py     limitador de velocidade
 browser-extension/  extensão do navegador

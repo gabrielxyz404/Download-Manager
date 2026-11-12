@@ -41,12 +41,17 @@ class _Handler(BaseHTTPRequestHandler):
             self._reply(403, {"ok": False})
 
     def do_POST(self):
-        if self.path != "/add" or not self._allowed():
+        if self.path not in ("/add", "/video") or not self._allowed():
             self._reply(403, {"ok": False})
             return
         try:
-            length = min(int(self.headers.get("Content-Length", 0)), 1_000_000)
+            length = min(int(self.headers.get("Content-Length", 0)), 2_000_000)
             data = json.loads(self.rfile.read(length) or b"{}")
+            if self.path == "/video":
+                item = self._video_item(data)
+                type(self).on_add(item)
+                self._reply(200, {"ok": True})
+                return
             url = str(data.get("url", ""))
             if not url.startswith(("http://", "https://", "ftp://")):
                 raise ValueError("url inválida")
@@ -56,11 +61,26 @@ class _Handler(BaseHTTPRequestHandler):
                 "referrer": data.get("referrer") or None,
                 "cookies": data.get("cookies") or None,
             }
-        except (ValueError, TypeError) as exc:
+        except (ValueError, TypeError, AttributeError) as exc:
             self._reply(400, {"ok": False, "error": str(exc)})
             return
         type(self).on_add(item)
         self._reply(200, {"ok": True})
+
+    @staticmethod
+    def _video_item(data: dict) -> dict:
+        page = str(data.get("page", ""))
+        if not page.startswith(("http://", "https://")):
+            raise ValueError("página inválida")
+        media = []
+        for m in data.get("media") or []:
+            url = str(m.get("url", ""))
+            if url.startswith(("http://", "https://")):
+                media.append({"url": url, "mime": str(m.get("mime", "")),
+                              "size": int(m.get("size") or 0), "hls": bool(m.get("hls"))})
+        jar = [c for c in data.get("cookie_jar") or [] if isinstance(c, dict)]
+        return {"kind": "video", "page": page, "title": str(data.get("title", ""))[:300],
+                "media": media[:30], "cookie_jar": jar[:300]}
 
 
 class BrowserBridge:

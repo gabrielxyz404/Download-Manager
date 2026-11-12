@@ -27,6 +27,19 @@ async function appAlive() {
   }
 }
 
+async function postApp(path, payload) {
+  try {
+    const r = await fetch(APP + path, {
+      method: "POST",
+      headers: { ...HEADERS, "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    return r.ok;
+  } catch {
+    return false;
+  }
+}
+
 async function sendToApp(url, filename, referrer) {
   let cookies = "";
   try {
@@ -85,4 +98,69 @@ chrome.downloads.onCreated.addListener(async (item) => {
     passThrough.add(url);
     chrome.downloads.download({ url }); // fall back to the browser
   }
+});
+
+// ---------------------------------------------------------------- video capture
+// Remember video/audio files each tab loads, so the floating button can offer them.
+const MEDIA_EXT = /\.(mp4|webm|mkv|mov|m4v|flv|mp3|m4a|ogg|opus|wav)(\?|$)/i;
+const SEGMENT = /\.(ts|m4s)(\?|$)|googlevideo\.com|[?&](range|bytestart)=/i;
+
+chrome.webRequest.onHeadersReceived.addListener(
+  (d) => {
+    if (d.tabId < 0) return;
+    const h = {};
+    for (const x of d.responseHeaders || []) h[x.name.toLowerCase()] = x.value || "";
+    const type = (h["content-type"] || "").split(";")[0].trim().toLowerCase();
+    const hls = /mpegurl/.test(type) || /\.m3u8(\?|$)/i.test(d.url);
+    const media = /^(video|audio)\//.test(type) || MEDIA_EXT.test(d.url);
+    if ((!hls && !media) || SEGMENT.test(d.url)) return;
+    let size = 0;
+    const m = /\/(\d+)\s*$/.exec(h["content-range"] || "");
+    size = m ? +m[1] : +(h["content-length"] || 0);
+    if (!hls && size && size < 300 * 1024) return; // ignore tiny clips / sounds
+    rememberMedia(d.tabId, { url: d.url, mime: hls ? "application/x-mpegurl" : type, size, hls });
+  },
+  { urls: ["<all_urls>"], types: ["media", "xmlhttprequest", "other"] },
+  ["responseHeaders"]
+);
+
+let mediaQueue = Promise.resolve(); // serialize read-modify-write of session storage
+function rememberMedia(tabId, item) {
+  mediaQueue = mediaQueue.then(() => storeMedia(tabId, item)).catch(() => {});
+}
+
+async function storeMedia(tabId, item) {
+  const key = "m:" + tabId;
+  const list = (await chrome.storage.session.get(key))[key] || [];
+  if (list.some((x) => x.url === item.url)) return;
+  list.push(item);
+  await chrome.storage.session.set({ [key]: list.slice(-20) });
+}
+
+chrome.tabs.onRemoved.addListener((tabId) => chrome.storage.session.remove("m:" + tabId));
+chrome.tabs.onUpdated.addListener((tabId, info) => {
+  if (info.url) chrome.storage.session.remove("m:" + tabId); // navigated to another page
+});
+
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (!msg || msg.type !== "pydm-video") return;
+  (async () => {
+    const key = "m:" + (sender.tab ? sender.tab.id : -1);
+    const media = [...((await chrome.storage.session.get(key))[key] || [])];
+    if (/^https?:/i.test(msg.src || "") && !media.some((x) => x.url === msg.src)) {
+      media.unshift({ url: msg.src, mime: "", size: 0, hls: /\.m3u8/i.test(msg.src) });
+    }
+    let cookie_jar = [];
+    try {
+      cookie_jar = await chrome.cookies.getAll({ url: msg.page });
+    } catch {}
+    const ok = await postApp("/video", {
+      page: msg.page,
+      title: (sender.tab && sender.tab.title) || msg.title || "",
+      media,
+      cookie_jar,
+    });
+    sendResponse({ ok });
+  })();
+  return true; // async response
 });

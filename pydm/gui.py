@@ -12,15 +12,27 @@ import time
 import tkinter as tk
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
-from . import grabber
+import importlib
+import urllib.parse
+
+from . import grabber, video
 from .bridge import DEFAULT_PORT, BrowserBridge
 from .categories import CATEGORIES, OTHER
 from .engine import Status, format_size, format_time
 from .limiter import GLOBAL_LIMITER
 from .manager import DownloadManager, config_dir, default_download_dir
 from .scheduler import ACTIONS, Scheduler, shutdown_computer
+from .video import VideoTask
 
 REFRESH_MS = 500
+VIDEO_SITES = ("youtube.com", "youtu.be", "vimeo.com", "tiktok.com", "instagram.com", "facebook.com",
+               "fb.watch", "x.com", "twitter.com", "twitch.tv", "dailymotion.com", "reddit.com",
+               "soundcloud.com", "bilibili.com", "kwai.com")
+
+
+def is_video_site(url: str) -> bool:
+    host = urllib.parse.urlparse(url).netloc.lower().split(":")[0]
+    return any(host == d or host.endswith("." + d) for d in VIDEO_SITES)
 COLUMNS = {
     "name": ("Arquivo", 220),
     "size": ("Tamanho", 85),
@@ -70,6 +82,7 @@ class Settings:
         self.columns = list(DEFAULT_COLUMNS)
         self.global_limit_kb = 0
         self.browser_integration = True
+        self.auto_resume = True
         self.confirm_browser = True
         self.scheduler: dict = {}
         try:
@@ -316,6 +329,184 @@ class GrabberDialog(tk.Toplevel):
             self.destroy()
 
 
+class VideoDialog(tk.Toplevel):
+    """Choose quality for a video page (yt-dlp) or a media file captured by the browser."""
+
+    def __init__(self, app: "App", page: str, title: str | None = None, media: list | None = None,
+                 cookie_jar: list | None = None):
+        super().__init__(app)
+        self.app, self.page, self.media = app, page, media or []
+        self.browser_title = (title or "").strip()
+        self.title("Baixar vídeo")
+        self.transient(app)
+        self.geometry("620x400")
+        self.results: queue.Queue = queue.Queue()
+        self.choices: dict[str, dict] = {}
+        host = urllib.parse.urlparse(page).netloc or "site"
+        self.cookiefile = video.write_cookiefile(
+            cookie_jar or [], str(config_dir() / "cookies" / f"{re_safe(host)}.txt"))
+        self.headers = {"Referer": page}
+
+        frm = ttk.Frame(self, padding=14)
+        frm.pack(fill="both", expand=True)
+        self.name_var = tk.StringVar(value=title or page)
+        ttk.Label(frm, textvariable=self.name_var, font=("", 11, "bold"), wraplength=580).pack(anchor="w")
+        ttk.Label(frm, text=page, foreground=app.colors["muted"], wraplength=580).pack(anchor="w", pady=(2, 8))
+
+        self.tree = ttk.Treeview(frm, columns=("q", "info"), show="headings", selectmode="browse", height=8)
+        self.tree.heading("q", text="Qualidade")
+        self.tree.heading("info", text="Detalhes")
+        self.tree.column("q", width=200)
+        self.tree.column("info", width=360)
+        self.tree.pack(fill="both", expand=True)
+        self.tree.bind("<Double-1>", lambda _e: self._download())
+
+        self.info = tk.StringVar()
+        ttk.Label(frm, textvariable=self.info, foreground=app.colors["muted"], wraplength=580
+                  ).pack(anchor="w", pady=6)
+        btns = ttk.Frame(frm)
+        btns.pack(fill="x")
+        self.install_btn = ttk.Button(btns, text="Instalar suporte a vídeos", command=self._install)
+        ttk.Button(btns, text="Cancelar", command=self.destroy).pack(side="right")
+        ttk.Button(btns, text="⬇ Baixar", command=self._download).pack(side="right", padx=6)
+
+        for m in self.media:
+            self._add_media_row(m)
+        self._lookup()
+        self.lift()
+        self.focus_force()
+
+    def _add_media_row(self, m: dict) -> None:
+        iid = f"m{len(self.choices)}"
+        name = urllib.parse.unquote(urllib.parse.urlparse(m["url"]).path.rsplit("/", 1)[-1]) or "arquivo"
+        if m.get("hls"):
+            self.choices[iid] = {"type": "hls", "url": m["url"]}
+            self.tree.insert("", "end", iid=iid, values=("Transmissão (HLS)", name))
+        else:
+            self.choices[iid] = {"type": "file", "url": m["url"]}
+            size = format_size(m["size"]) if m.get("size") else "tamanho ?"
+            self.tree.insert("", "end", iid=iid, values=("Arquivo direto", f"{name} — {size}"))
+
+    def _lookup(self) -> None:
+        if not video.available():
+            self.info.set("Para vídeos do YouTube, Instagram, TikTok etc. é preciso o yt-dlp (gratuito). "
+                          "Clique em 'Instalar suporte a vídeos'.")
+            self.install_btn.pack(side="left")
+            self._select_first()
+            return
+        self.info.set("Procurando qualidades disponíveis...")
+
+        def work():
+            try:
+                self.results.put(("ok", video.get_options(self.page, self.cookiefile, self.headers)))
+            except Exception as exc:  # noqa: BLE001
+                self.results.put(("err", str(exc).replace("ERROR: ", "")))
+
+        threading.Thread(target=work, daemon=True).start()
+        self.after(200, self._poll)
+
+    def _poll(self) -> None:
+        if not self.winfo_exists():
+            return
+        try:
+            kind, data = self.results.get_nowait()
+        except queue.Empty:
+            self.after(200, self._poll)
+            return
+        if kind == "err":
+            self.info.set("Não encontrei vídeos nesta página pelo yt-dlp." +
+                          (" Use um dos arquivos capturados acima." if self.media else f"\n{data[:200]}"))
+            self._select_first()
+            return
+        if not self.browser_title:
+            self.name_var.set(data["title"])
+        for i, opt in enumerate(data["options"]):
+            iid = f"q{i}"
+            self.choices[iid] = {"type": "ytdlp", "url": data["url"], **opt}
+            detail = "convertido para MP3" if opt["audio_only"] and video.has_ffmpeg() else \
+                "melhor vídeo + áudio" if not opt["audio_only"] else "faixa de áudio"
+            self.tree.insert("", i, iid=iid, values=(opt["label"], detail))
+        notes = []
+        if data.get("limited"):
+            notes.append("Instale o ffmpeg para ter 1080p ou mais e conversão para MP3 "
+                         "(Windows: winget install ffmpeg).")
+        self.info.set(" ".join(notes) or "Escolha a qualidade e clique em Baixar.")
+        self._select_first()
+
+    def _select_first(self) -> None:
+        kids = self.tree.get_children()
+        if kids and not self.tree.selection():
+            self.tree.selection_set(kids[0])
+
+    def _download(self) -> None:
+        sel = self.tree.selection()
+        if not sel:
+            return
+        c = self.choices[sel[0]]
+        s = self.app.settings
+        if c["type"] == "file":
+            self.app.add_download(c["url"], s.dest_dir, s.connections, True, None, self.headers)
+        else:
+            if not video.available():
+                messagebox.showinfo("yt-dlp necessário", "Instale o suporte a vídeos primeiro.", parent=self)
+                return
+            fmt, audio = (c.get("format", "b"), c.get("audio_only", False)) if c["type"] == "ytdlp" \
+                else ("b", False)
+            task = VideoTask(c["url"], s.dest_dir, fmt, audio, self.name_var.get(), s.connections,
+                             headers=self.headers, cookiefile=self.cookiefile,
+                             quality=c.get("label", "HLS"))
+            self.app.manager.add_task(task)
+            self.app.status_var.set(f"Vídeo adicionado: {self.name_var.get()}")
+        self.destroy()
+
+    def _install(self) -> None:
+        self.install_btn.state(["disabled"])
+        self.info.set("Instalando o yt-dlp... (pode levar um minuto)")
+
+        def done(ok: bool) -> None:
+            if not self.winfo_exists():
+                return
+            if ok:
+                self.install_btn.pack_forget()
+                self._lookup()
+            else:
+                self.install_btn.state(["!disabled"])
+                self.info.set("A instalação falhou. Veja a mensagem de erro.")
+
+        VideoDialog.install(self.app, on_done=done)
+
+    @staticmethod
+    def install(app: "App", on_done=None) -> None:
+        q: queue.Queue = queue.Queue()
+        app.status_var.set("Instalando/atualizando o yt-dlp...")
+        threading.Thread(target=lambda: q.put(video.install_yt_dlp()), daemon=True).start()
+
+        def poll():
+            try:
+                ok, out = q.get_nowait()
+            except queue.Empty:
+                app.after(300, poll)
+                return
+            if ok:
+                importlib.invalidate_caches()
+                try:
+                    video.yt_dlp = importlib.import_module("yt_dlp")
+                except ImportError:
+                    ok = False
+            if ok:
+                app.status_var.set("Suporte a vídeos instalado ✔")
+            else:
+                messagebox.showerror("Erro ao instalar", "Não consegui instalar o yt-dlp:\n\n" + out[-800:])
+            if on_done:
+                on_done(ok)
+
+        app.after(300, poll)
+
+
+def re_safe(text: str) -> str:
+    return "".join(ch if ch.isalnum() or ch in ".-" else "_" for ch in text)[:80]
+
+
 class ShutdownCountdown(tk.Toplevel):
     def __init__(self, app: "App", seconds: int = 30):
         super().__init__(app)
@@ -350,7 +541,8 @@ class App(tk.Tk):
         self.minsize(820, 400)
 
         self.settings = Settings()
-        self.manager = DownloadManager(max_active=self.settings.max_active)
+        self.manager = DownloadManager(max_active=self.settings.max_active,
+                                       auto_resume=self.settings.auto_resume)
         self.scheduler = Scheduler(self.settings.scheduler)
         GLOBAL_LIMITER.rate = self.settings.global_limit_kb * 1024
         self.colors = THEMES["dark" if self.settings.dark else "light"]
@@ -382,6 +574,7 @@ class App(tk.Tk):
 
         tasks = tk.Menu(menubar, tearoff=False)
         tasks.add_command(label="Adicionar URL...", accelerator="Ctrl+N", command=self.open_add_dialog)
+        tasks.add_command(label="Baixar vídeo (YouTube, Instagram...)...", command=self.open_video_dialog)
         tasks.add_command(label="Capturar arquivos de um site...", command=lambda: GrabberDialog(self))
         tasks.add_separator()
         tasks.add_command(label="Sair", command=self.close_app)
@@ -420,6 +613,10 @@ class App(tk.Tk):
                              command=self._toggle_bridge)
         opts.add_checkbutton(label="Confirmar downloads vindos do navegador", variable=self.confirm_var)
         opts.add_checkbutton(label="Capturar links copiados", variable=self.clip_var)
+        self.resume_var = tk.BooleanVar(value=self.settings.auto_resume)
+        opts.add_checkbutton(label="Retomar downloads ao abrir o PyDM", variable=self.resume_var)
+        opts.add_command(label="Instalar/atualizar suporte a vídeos (yt-dlp)",
+                         command=lambda: VideoDialog.install(self))
         opts.add_command(label="Downloads simultâneos...", command=self._max_active)
         opts.add_command(label="Pasta padrão...", command=self._choose_dir)
         menubar.add_cascade(label="Opções", menu=opts)
@@ -563,8 +760,18 @@ class App(tk.Tk):
         if not url.lower().startswith(("http://", "https://", "ftp://")):
             messagebox.showwarning("URL inválida", "Informe um link que comece com http://, https:// ou ftp://")
             return
-        self.add_download(url, self.settings.dest_dir, self.settings.connections)
         self.url_var.set("")
+        if is_video_site(url):
+            self.open_video_dialog(url)
+        else:
+            self.add_download(url, self.settings.dest_dir, self.settings.connections)
+
+    def open_video_dialog(self, url: str = "") -> None:
+        url = url or self.url_var.get().strip()
+        if not url:
+            url = simpledialog.askstring("Baixar vídeo", "Endereço da página do vídeo:", parent=self) or ""
+        if url.strip():
+            VideoDialog(self, url.strip())
 
     def _selected(self):
         ids = set(self.tree.selection())
@@ -704,6 +911,10 @@ class App(tk.Tk):
                 item = self._incoming.get_nowait()
             except queue.Empty:
                 return
+            if item.get("kind") == "video":
+                self.deiconify()
+                VideoDialog(self, item["page"], item.get("title"), item.get("media"), item.get("cookie_jar"))
+                continue
             headers = {}
             if item.get("referrer"):
                 headers["Referer"] = item["referrer"]
@@ -837,7 +1048,9 @@ class App(tk.Tk):
         self.settings.save()
         if self.bridge:
             self.bridge.stop()
-        self.manager.pause_all()
+        self.settings.auto_resume = bool(self.resume_var.get())
+        self.settings.save()
+        self.manager.shutdown()
         self.destroy()
 
 

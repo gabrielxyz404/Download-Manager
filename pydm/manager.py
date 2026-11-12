@@ -21,26 +21,50 @@ def config_dir() -> Path:
     return path
 
 
+def task_from_dict(d: dict):
+    if d.get("kind") == "video":
+        from .video import VideoTask
+        return VideoTask.from_dict(d)
+    return DownloadTask.from_dict(d)
+
+
 class DownloadManager:
-    def __init__(self, max_active: int = 3, db_path: str | Path | None = None):
+    def __init__(self, max_active: int = 3, db_path: str | Path | None = None,
+                 auto_resume: bool = False):
         self.max_active = max_active
         self.db_path = Path(db_path) if db_path else config_dir() / "downloads.json"
         self.tasks: list[DownloadTask] = []
         self._lock = threading.RLock()
         self._last_saved: str | None = None
-        self.load()
+        self._resume_ids: set[str] = set()
+        self.load(auto_resume)
 
     # ------------------------------------------------------------- persistence
-    def load(self) -> None:
+    def load(self, auto_resume: bool = False) -> None:
+        """Load the saved list. With ``auto_resume``, downloads that were running when the
+        app closed (or the computer crashed / lost power) are queued again."""
         try:
             data = json.loads(self.db_path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             return
-        self.tasks = [DownloadTask.from_dict(d) for d in data.get("tasks", [])]
+        active = (Status.QUEUED, Status.CONNECTING, Status.DOWNLOADING)
+        self.tasks = []
+        for d in data.get("tasks", []):
+            try:
+                task = task_from_dict(d)
+            except (KeyError, TypeError, ValueError):
+                continue
+            if auto_resume and d.get("status") in active:
+                task.status = Status.QUEUED
+            self.tasks.append(task)
 
     def save(self) -> None:
         with self._lock:
-            payload = json.dumps({"tasks": [t.to_dict() for t in self.tasks]}, indent=1)
+            items = [t.to_dict() for t in self.tasks]
+            for d in items:
+                if d["id"] in self._resume_ids:
+                    d["status"] = Status.QUEUED  # was running when the app was closed
+            payload = json.dumps({"tasks": items}, indent=1)
         if payload == self._last_saved:
             return
         try:
@@ -59,6 +83,15 @@ class DownloadManager:
         task = DownloadTask(url.strip(), dest_dir or default_download_dir(), connections,
                             filename=sanitize_filename(filename) if filename else None,
                             headers=headers)
+        if not start:
+            task.status = Status.PAUSED
+        with self._lock:
+            self.tasks.append(task)
+        self.tick()
+        return task
+
+    def add_task(self, task, start: bool = True):
+        """Add any task object (DownloadTask or video.VideoTask)."""
         if not start:
             task.status = Status.PAUSED
         with self._lock:
@@ -110,6 +143,12 @@ class DownloadManager:
         for t in list(self.tasks):
             t.wait(5)
         self.save()
+
+    def shutdown(self) -> None:
+        """Pause everything for app exit, remembering what was active for next start."""
+        self._resume_ids = {t.id for t in self.tasks
+                            if t.is_running() or t.status in (Status.QUEUED, Status.CONNECTING)}
+        self.pause_all()
 
     def tick(self) -> None:
         """Start queued downloads while there are free slots. Call periodically."""
