@@ -70,6 +70,7 @@ CERT_ERROR = ("O certificado de segurança (HTTPS) deste site não é válido ou
 TRANSIENT_CODES = (408, 425, 429, 500, 502, 503, 504)  # worth asking again
 MAX_RETRY_AFTER = 120  # never wait longer than this for a server's "try again in N s"
 FIRST_TRIES = 4
+MAX_SAME_REFUSALS = 5  # the same, still valid address refused again and again with no progress
 MAX_FRUITLESS_REFRESHES = 3  # fresh addresses in a row with no progress at all: give up
 
 
@@ -220,6 +221,7 @@ class _Worker:
 
     def __init__(self, seg: "Segment", conn=None, resp=None):
         self.seg, self.conn, self.resp = seg, conn, resp
+        self.accepted = resp is not None  # the server accepted a request on this connection
         self.started = self.last_swap = self.last_data = time.monotonic()
         self.quiet_swaps = 0  # replaced for silence with no data in between (backs off)
         self.answering = False  # the server has started answering the current request
@@ -289,6 +291,9 @@ class DownloadTask:
         self._active_workers = 0
         self._worker_error: str | None = None
         self._answer_time = 0.0  # how long the server takes to start answering a request
+        self._refreshes = 0  # fresh addresses obtained for an expired link
+        self._same_refusals = 0  # refusals of an address that the original link still leads to
+        self._progress_at_same = -1
         self._limit_hit = 0  # >0: the server refused a connection; value = connections it accepts
         self._streaming = 0  # connections currently receiving data
         self._wake = threading.Event()  # set when a connection finishes: react at once
@@ -590,14 +595,32 @@ class DownloadTask:
             headers = {k: v for k, v in headers.items() if k.lower() not in net.SENSITIVE}
         return headers
 
-    def _refresh_url(self, failed_url: str) -> None:
+    def _refresh_url(self, failed_url: str) -> bool:
         """Signed download links (GitHub, cloud storage...) expire after a while. Ask the
         original link again for a fresh one. Only once per expired address: connections that
-        hit the same expired address meanwhile just use the new one."""
+        hit the same expired address meanwhile just use the new one.
+
+        Returns True when the original link leads to the very same address and it answers:
+        then the address had not expired (the server refused that one request, e.g. too many
+        connections for a moment) and the caller just tries again a little later."""
         with self._refresh_lock:
             if self._current_url() != failed_url:
-                return  # another connection already got a fresh address
+                return False  # another connection already got a fresh address
             done = sum(s.pos - s.start for s in self.segments)
+            info = probe(self.url, self.headers, self.cookies)
+            if info["size"] != self.size or (self.validator and info["validator"]
+                                             and info["validator"] != self.validator):
+                self._file_changed = True
+                raise FileChanged()
+            if info["url"] == failed_url:
+                if done > self._progress_at_same:
+                    self._same_refusals = 0
+                else:
+                    self._same_refusals += 1
+                    if self._same_refusals > MAX_SAME_REFUSALS:
+                        raise RuntimeError("O site recusa a ligação da app (HTTP 403)")
+                self._progress_at_same = done
+                return True
             if done > self._progress_at_refresh:
                 self._fruitless_refreshes = 0  # the last fresh address was useful
             else:
@@ -605,12 +628,9 @@ class DownloadTask:
                 if self._fruitless_refreshes > MAX_FRUITLESS_REFRESHES:
                     raise RuntimeError("O link deixou de funcionar (o site recusa novos endereços)")
             self._progress_at_refresh = done
-            info = probe(self.url, self.headers, self.cookies)
-            if info["size"] != self.size or (self.validator and info["validator"]
-                                             and info["validator"] != self.validator):
-                self._file_changed = True
-                raise FileChanged()
             self._final_url = info["url"]
+            self._refreshes += 1
+            return False
 
     # -- single connection (server does not support ranges / unknown size)
     def _download_single(self) -> None:
@@ -684,6 +704,7 @@ class DownloadTask:
         recheck_at = 0.0
         self.connection_note = "testando velocidade" if ramping else ""
         self.server_limit = None
+        limit_refreshes = self._refreshes
 
         if first is not None:
             seg0 = self.segments[0]
@@ -707,8 +728,16 @@ class DownloadTask:
             if self._limit_hit:
                 self.server_limit = max(1, self._limit_hit)
                 self._limit_hit = 0
+                limit_refreshes = self._refreshes
                 target, ramping = self.server_limit, False
                 self.connection_note = f"servidor aceita {self.server_limit}"
+            elif self.server_limit is not None and self._refreshes != limit_refreshes:
+                # The "limit" was the link expiring (refusals just before a fresh address):
+                # forget it and test more connections again with the new address.
+                self.server_limit = None
+                ramping, ramp_speed = target < cap, None
+                ramp_at = now + RAMP_INTERVAL
+                self.connection_note = "testando velocidade" if ramping else ""
             elif ramping and now >= ramp_at:
                 current = self._recent_speed(1.5)
                 if ramp_speed is None or current > ramp_speed * RAMP_MIN_GAIN:
@@ -949,6 +978,7 @@ class DownloadTask:
                             # How long this server takes to start answering (slow ones exist):
                             # a connection waiting for an answer is not cut before ~3x that.
                             self._answer_time = max(now_ - sent, self._answer_time * 0.9)
+                            w.accepted = True
                             if resp.status != 206:
                                 if self.validator:
                                     # If-Range said no: the file on the server is a new version
@@ -1026,13 +1056,27 @@ class DownloadTask:
                                 continue
                             self._limit_hit = max(self._limit_hit, self._streaming)
                             return
+                        with self._lock:
+                            others = sum(1 for x in self._workers if x is not w and x.alive and x.accepted)
+                        if code == 403 and others >= 1 and req_url == self._current_url():
+                            # Other connections are receiving from this very address: it has
+                            # not expired. Some hosts answer 403 (not 429/503) to connections
+                            # beyond their limit: treat it as that limit.
+                            refusals += 1
+                            if refusals == 1:
+                                self._stop.wait(1.0)
+                                continue
+                            self._limit_hit = max(self._limit_hit, self._streaming)
+                            return
                         if code in (401, 403, 410) and req_url != self._current_url():
                             continue  # another connection already replaced the expired address
                         if code in (401, 403, 410):
                             # The address probably expired: get a fresh one (the whole download
                             # gives up only after several fresh addresses brought no progress).
                             try:
-                                self._refresh_url(req_url)
+                                if self._refresh_url(req_url):  # same address, still good
+                                    refusals += 1
+                                    self._stop.wait(min(3.0, 0.5 * refusals))
                                 continue
                             except FileChanged:
                                 raise

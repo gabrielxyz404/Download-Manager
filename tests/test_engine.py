@@ -298,7 +298,8 @@ class StallTests(unittest.TestCase):
             self.assertEqual(task.status, Status.COMPLETED, task.error)
             with open(task.data_path(), "rb") as f:
                 self.assertEqual(hashlib.sha256(f.read()).digest(), hashlib.sha256(BIG * 4).digest())
-            self.assertGreater(sum(ratios) / len(ratios), 0.7, [round(r, 2) for r in ratios])
+            # (before: 0.43 on average; 0.8+ here, ~0.7 on slower machines)
+            self.assertGreater(sum(ratios) / len(ratios), 0.6, [round(r, 2) for r in ratios])
         finally:
             StalledServer.hang_every, StalledServer.rate, StalledServer.data = 3, 3_000_000, None
             server.shutdown()
@@ -336,9 +337,9 @@ class AdaptiveServer(BaseHTTPRequestHandler):
         start = int(m.group(1)) if m else 0
         end = int(m.group(2)) if m and m.group(2) else cls.size - 1
         with cls.lock:
-            if cls.mode == "max2" and cls.active >= 2 and end > start:
+            if cls.mode in ("max2", "max2_403") and cls.active >= 2 and end > start:
                 cls.refused += 1
-                self.send_error(503)
+                self.send_error(503 if cls.mode == "max2" else 403)
                 return
             cls.active += 1
             cls.peak = max(cls.peak, cls.active)
@@ -415,6 +416,13 @@ class AdaptiveConnectionTests(unittest.TestCase):
         enough = [int(m.group(1)) for n in notes if (m := re.search(r"(\d+) conex\w+ bastam", n or ""))]
         self.assertTrue(enough, notes)
         self.assertLess(min(enough), 8, notes)
+
+    def test_server_that_refuses_extra_connections_with_403(self):
+        """Some file hosts answer 403 (not 429/503) to connections beyond their limit. That is
+        not an expired link: the download must finish with the connections it accepts."""
+        task, notes = self.run_download("max2_403", 3 * 1024 * 1024)
+        self.assertGreater(AdaptiveServer.refused, 0)
+        self.assertIsNone(task.error)
 
     def test_server_connection_limit_is_respected_without_failing(self):
         # The server refuses (503) every connection beyond 2. The download must still finish,

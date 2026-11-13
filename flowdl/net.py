@@ -121,11 +121,14 @@ class Connection:
             except OSError:
                 pass
             if os.name == "nt":
-                # On Windows shutting the socket down may leave the other thread's read
-                # waiting; closing it does wake it (on POSIX we must not: the number could be
-                # reused by another connection while that thread still reads from it).
+                # On Windows shutting the socket down leaves the other thread's read waiting;
+                # really closing it (closesocket) wakes it. socket.close() would only mark it,
+                # since the HTTP response still holds it open: close the handle itself, which
+                # also marks the socket object invalid so it is never closed twice. (Not on
+                # POSIX: shutdown already wakes the read there.)
                 try:
-                    sock.close()
+                    real_close = getattr(sock, "_real_close", None)
+                    (real_close or sock.close)()
                 except OSError:
                     pass
 
