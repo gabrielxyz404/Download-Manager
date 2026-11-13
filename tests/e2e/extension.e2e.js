@@ -90,6 +90,28 @@ const site = http.createServer((req, res) => {
     res.writeHead(m ? 206 : 200, h);
     return sendPaced(res, BIG.subarray(start, end + 1));
   }
+  if (req.url === "/media.html") { // a page that plays a video file and loads an HLS stream
+    res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+    return res.end('<html><head><meta charset="utf-8"><title>Página com vídeo</title></head><body>' +
+                   '<video src="/media/filme.mp4" preload="auto" muted autoplay></video>' +
+                   '<script>fetch("/hls/lista.m3u8"); fetch("/hls/parte1.ts");</script></body></html>');
+  }
+  if (req.url.startsWith("/media/filme.mp4")) {
+    const m = /bytes=(\d+)-(\d*)/.exec(req.headers.range || "");
+    const start = m ? +m[1] : 0, end = m && m[2] ? +m[2] : BIG.length - 1;
+    const h = { "Content-Type": "video/mp4", "Accept-Ranges": "bytes", "Content-Length": end - start + 1 };
+    if (m) h["Content-Range"] = `bytes ${start}-${end}/${BIG.length}`;
+    res.writeHead(m ? 206 : 200, h);
+    return sendPaced(res, BIG.subarray(start, end + 1));
+  }
+  if (req.url === "/hls/lista.m3u8") {
+    res.writeHead(200, { "Content-Type": "application/vnd.apple.mpegurl" });
+    return res.end("#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXTINF:4,\nparte1.ts\n#EXT-X-ENDLIST\n");
+  }
+  if (req.url === "/hls/parte1.ts") {
+    res.writeHead(200, { "Content-Type": "video/mp2t", "Content-Length": 300000 });
+    return res.end(Buffer.alloc(300000));
+  }
   if (req.url === "/video.html") {
     res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
     return res.end('<html><head><meta charset="utf-8"><title>Clip de teste</title></head>' +
@@ -521,6 +543,38 @@ const sameAsBig = (file) => fs.existsSync(file) && fs.readFileSync(file).equals(
     check("Vídeo descarregado (na pasta Vídeos)", await waitFor(() => fs.existsSync(videoDir) &&
       fs.readdirSync(videoDir).some((f) => f.endsWith(".mp4") && fs.statSync(path.join(videoDir, f)).size > 10000), 40000));
   }
+
+  // 5b. "Nesta página": the popup lists the video file and the stream this page loaded (not the
+  // stream's pieces); "Baixar" on the file downloads it with the app.
+  await page.goto(SITE + "/media.html");
+  const [mtab] = await sw.evaluate((u) => new Promise((r) => chrome.tabs.query({ url: u }, r)), SITE + "/media.html");
+  let found = [];
+  await waitFor(async () => {
+    found = (await p.evaluate((id) => new Promise((r) => chrome.runtime.sendMessage({ type: "pageMedia", tabId: id }, r)),
+                              mtab.id)).media || [];
+    return found.some((m) => m.url.includes("filme.mp4")) && found.some((m) => m.kind === "hls");
+  }, 15000);
+  const filme = found.find((m) => m.url.includes("filme.mp4"));
+  check("Nesta página: lista o vídeo e a transmissão, sem os pedaços", !!filme && filme.kind === "video" &&
+        filme.size === BIG.length && found.some((m) => m.kind === "hls" && m.url.endsWith("lista.m3u8")) &&
+        !found.some((m) => m.url.includes("parte1.ts")), found.map((m) => `${m.kind}:${m.url.split("/").pop()}:${m.size}`).join(" "));
+  if (filme) {
+    const ok = await p.evaluate(([m, page]) => new Promise((r) => chrome.runtime.sendMessage(
+      { type: "getMedia", media: m, page, title: "Página com vídeo" }, r)), [filme, SITE + "/media.html"]);
+    const videoDir = path.join(DL, "Vídeos");
+    check("…e \"Baixar\" num ficheiro baixa-o com a app", ok.ok && await waitFor(() =>
+      appTasks().some((t) => (t.url || "").endsWith("/media/filme.mp4") && t.status === "Concluído") &&
+      fs.existsSync(videoDir) && fs.readdirSync(videoDir).some((f) => f.startsWith("filme") && sameAsBig(path.join(videoDir, f))), 30000));
+    const hls = found.find((m) => m.kind === "hls");
+    await p.evaluate(([m, page]) => new Promise((r) => chrome.runtime.sendMessage(
+      { type: "getMedia", media: m, page, title: "Página com vídeo" }, r)), [hls, SITE + "/media.html"]);
+    check("…e numa transmissão abre a janela de qualidade da app", await waitFor(() => windows("^Baixar v").length > 0, 15000));
+    await pressIn("^Baixar v", "Escape");
+  }
+  await page.goto(SITE + "/");
+  const after5b = (await p.evaluate((id) => new Promise((r) => chrome.runtime.sendMessage({ type: "pageMedia", tabId: id }, r)),
+                                    mtab.id)).media || [];
+  check("…e a lista recomeça quando se muda de página", after5b.length === 0, String(after5b.length));
 
   // 6. "Abrir Flow Downloads" and Ctrl+W.
   await p.click("#open");

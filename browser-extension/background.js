@@ -156,6 +156,60 @@ const shortName = (url, name) => (name || safeDecode(url.split("?")[0].split("/"
 const seen = new Map(); // url -> { method, cookie, time }
 const SEEN_MS = 60000;
 
+// ------------------------------------------------------------------ media on the page
+// Videos and audio the open pages play or load, listed in the popup ("Nesta página"). Only
+// whole files and stream playlists: the small pieces a stream is made of are left out, and
+// sites like YouTube (whose videos come in pieces) are handled by "Escolher qualidade".
+const MEDIA_MAX = 20;
+const STREAM_PIECES = /\.(ts|m4s|aac|m4a\.part)(\?|$)/i;
+const PIECE_HOSTS = /(^|\.)(googlevideo\.com|fbcdn\.net|cdninstagram\.com)$/i;
+
+function mediaKind(url, mime) {
+  const path = url.split("?")[0].toLowerCase();
+  if (/mpegurl/.test(mime) || path.endsWith(".m3u8")) return "hls";
+  if (/dash\+xml/.test(mime) || path.endsWith(".mpd")) return "dash";
+  if (STREAM_PIECES.test(url) || /mp2t|iso.segment/.test(mime)) return null;
+  if (mime.startsWith("video/") || /\.(mp4|webm|mkv|mov|m4v|ogv|flv)$/.test(path)) return "video";
+  if (mime.startsWith("audio/") || /\.(mp3|ogg|opus|wav|flac|m4a)$/.test(path)) return "audio";
+  return null;
+}
+
+async function rememberMedia(details) {
+  if (details.tabId < 0 || details.statusCode >= 400) return;
+  let host = "";
+  try { host = new URL(details.url).hostname; } catch { return; }
+  if (PIECE_HOSTS.test(host) || details.url.startsWith(APP)) return;
+  const header = (n) => (details.responseHeaders || []).find((h) => h.name.toLowerCase() === n);
+  const mime = ((header("content-type") || {}).value || "").split(";")[0].trim().toLowerCase();
+  const kind = mediaKind(details.url, mime);
+  if (!kind) return;
+  let size = 0;
+  const range = (header("content-range") || {}).value || "";
+  const m = /\/(\d+)\s*$/.exec(range);
+  if (m) size = +m[1];
+  else size = +((header("content-length") || {}).value || 0);
+  if ((kind === "video" || kind === "audio") && size && size < 200 * 1024) return; // previews, sounds, ads
+  const key = "media_" + details.tabId;
+  const { [key]: list = [] } = await chrome.storage.session.get(key);
+  const base = details.url.replace(/([?&])(range|bytestart|byteend|rn|rbuf)=[^&]*/g, "$1");
+  const item = { url: details.url, base, kind, mime, size, time: Date.now() };
+  const kept = list.filter((x) => x.base !== base);
+  kept.unshift(item);
+  await chrome.storage.session.set({ [key]: kept.slice(0, MEDIA_MAX) });
+}
+
+chrome.webRequest.onHeadersReceived.addListener(
+  (d) => { rememberMedia(d).catch(() => {}); },
+  { urls: ["<all_urls>"], types: ["media", "xmlhttprequest", "other", "object"] },
+  ["responseHeaders"]
+);
+
+// A new page in the tab: its list starts empty.
+chrome.tabs.onUpdated.addListener((tabId, info) => {
+  if (info.url) chrome.storage.session.remove("media_" + tabId);
+});
+chrome.tabs.onRemoved.addListener((tabId) => chrome.storage.session.remove("media_" + tabId));
+
 // Headers the app repeats exactly as the browser sent them (protected sites compare them).
 const BROWSER_HEADERS = ["accept", "sec-ch-ua", "sec-ch-ua-mobile", "sec-ch-ua-platform", "sec-fetch-dest",
                          "sec-fetch-mode", "sec-fetch-site", "sec-fetch-user", "upgrade-insecure-requests", "dnt"];
@@ -396,6 +450,24 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     } else if (msg.type === "show") {
       if (!(await appAlive(1))) await startApp(); // closed: start it first
       sendResponse({ ok: await postApp("/show", {}) });
+    } else if (msg.type === "pageMedia") { // popup: what this page played / loaded
+      const { ["media_" + msg.tabId]: list = [] } = await chrome.storage.session.get("media_" + msg.tabId);
+      sendResponse({ media: list });
+    } else if (msg.type === "getMedia") { // popup: download one of them
+      await appAliveOrStart();
+      const m = msg.media;
+      let ok;
+      if (m.kind === "video" || m.kind === "audio") { // a whole file: straight to the app
+        const cookies_by_host = await cookiesByHost([m.url, msg.page]);
+        ok = !!(await postJson("/add", { url: m.url, filename: "", referrer: msg.page, cookies_by_host,
+                                          user_agent: navigator.userAgent }));
+      } else { // a stream (HLS / DASH): the app's video window takes it (yt-dlp joins the pieces)
+        let cookie_jar = [];
+        try { cookie_jar = await chrome.cookies.getAll({ url: msg.page }); } catch {}
+        ok = await postApp("/video", { page: msg.page, title: msg.title || "",
+                                       media: [{ url: m.url, mime: m.mime, size: m.size, hls: true }], cookie_jar });
+      }
+      sendResponse({ ok });
     } else if (msg.type === "video") {
       let cookie_jar = [];
       try {

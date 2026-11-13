@@ -38,6 +38,14 @@
   #last { padding: 0 14px 10px; font-size: 11px; color: var(--muted); word-break: break-word; }
   .row.small { border-top: 1px solid var(--border); padding: 8px 14px; }
   .row.small button { margin: 0; }
+  #mediaList .item { display: flex; align-items: center; gap: 8px; padding: 6px 0;
+                     border-bottom: 1px solid var(--border); }
+  #mediaList .item:last-child { border-bottom: 0; }
+  #mediaList .what { flex: 1; min-width: 0; }
+  #mediaList .name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #mediaList .meta { font-size: 11px; color: var(--muted); }
+  #mediaList button { width: auto; margin: 0; padding: 5px 10px; }
+  #pageQuality { margin-top: 8px; }
   .hint { padding: 0 14px 10px; font-size: 11px; color: var(--muted); }
   label.row { display: flex; align-items: center; gap: 8px; cursor: pointer;
               border-top: 1px solid var(--border); padding: 10px 14px; }
@@ -58,6 +66,12 @@
       <button type="submit" id="go">⬇ Baixar vídeo</button>
     </form>
     <div id="msg"></div>
+  </section>
+
+  <section id="pageMedia" hidden>
+    <h2>Nesta página</h2>
+    <div id="mediaList"></div>
+    <button class="secondary" id="pageQuality">🎬 Escolher qualidade (esta página)</button>
   </section>
 
   <div id="last"></div>

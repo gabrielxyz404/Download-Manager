@@ -83,6 +83,65 @@ $("next").addEventListener("click", async () => {
   show("✔ O próximo download (nos próximos 2 minutos) fica com o navegador.", "ok");
 });
 
+// "Nesta página": videos and audio the open page played or loaded.
+function sizeText(n) {
+  if (!n) return "";
+  const u = ["B", "KB", "MB", "GB"];
+  let i = 0;
+  while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
+  return (i ? n.toFixed(1) : n) + " " + u[i];
+}
+
+async function pageMedia() {
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  if (!tab || !/^https?:/.test(tab.url || "")) return;
+  const { media = [] } = await send({ type: "pageMedia", tabId: tab.id });
+  const list = $("mediaList");
+  list.textContent = "";
+  const label = { video: "Vídeo", audio: "Áudio", hls: "Transmissão (HLS)", dash: "Transmissão (DASH)" };
+  for (const m of media) {
+    const row = document.createElement("div");
+    row.className = "item";
+    const what = document.createElement("div");
+    what.className = "what";
+    const name = document.createElement("div");
+    name.className = "name";
+    let file = "";
+    try { file = decodeURIComponent(new URL(m.url).pathname.split("/").pop()); } catch {}
+    name.textContent = file || m.url;
+    name.title = m.url;
+    const meta = document.createElement("div");
+    meta.className = "meta";
+    meta.textContent = [label[m.kind] || m.kind, sizeText(m.size)].filter(Boolean).join(" · ");
+    what.append(name, meta);
+    const go = document.createElement("button");
+    go.textContent = "⬇ Baixar";
+    go.addEventListener("click", async () => {
+      go.disabled = true;
+      const res = await send({ type: "getMedia", media: m, page: tab.url, title: tab.title });
+      show(res.ok ? (m.kind === "video" || m.kind === "audio" ? "✔ A baixar no Flow Downloads." :
+                     "✔ Escolha a qualidade na janela do Flow Downloads.") :
+           "Não consegui falar com o Flow Downloads.", res.ok ? "ok" : "err");
+      go.disabled = false;
+    });
+    row.append(what, go);
+    list.append(row);
+  }
+  if (!media.length) {
+    const none = document.createElement("div");
+    none.className = "meta";
+    none.textContent = "Nenhum vídeo ou áudio carregado nesta página (ainda). Dê play ao vídeo, ou escolha a qualidade:";
+    list.append(none);
+  }
+  $("pageQuality").onclick = async () => {
+    const res = await send({ type: "video", url: tab.url });
+    show(res.ok ? "✔ Escolha a qualidade na janela do Flow Downloads." : "Não consegui falar com o Flow Downloads.",
+         res.ok ? "ok" : "err");
+  };
+  $("pageMedia").hidden = false;
+}
+
 refresh();
 lastDownload();
 siteSwitch();
+pageMedia();
