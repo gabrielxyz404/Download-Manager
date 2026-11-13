@@ -90,5 +90,33 @@ class AutoFolderTests(unittest.TestCase):
         self.assertEqual(os.path.dirname(path), self.tmp)
 
 
+
+
+class AccentedNameTests(unittest.TestCase):
+    """Brazilian / Portuguese sites: names with accents in every encoding seen in the wild."""
+
+    def test_names_from_addresses(self):
+        from flowdl.categories import name_from_url
+        self.assertEqual(name_from_url("http://x/Atualiza%E7%E3o_FC27.zip"), "Atualização_FC27.zip")  # Latin-1
+        self.assertEqual(name_from_url("http://x/Atualiza%C3%A7%C3%A3o.zip"), "Atualização.zip")    # UTF-8
+        self.assertEqual(name_from_url("http://x/a%20b.zip"), "a b.zip")
+
+    def test_names_from_the_server(self):
+        from email.message import Message
+        from flowdl.engine import _filename_from_headers
+
+        def name(value):
+            m = Message()
+            m["Content-Disposition"] = value
+            return _filename_from_headers(m, "http://x/Atualiza%E7%E3o_FC27.zip")
+        self.assertEqual(name('attachment; filename="AtualizaÃ§Ã£o.zip"'), "Atualização.zip")
+        self.assertEqual(name('attachment; filename="Atualização.zip"'), "Atualização.zip")
+        self.assertEqual(name("attachment; filename*=UTF-8''Atualiza%C3%A7%C3%A3o.zip"), "Atualização.zip")
+        self.assertEqual(name("attachment; filename*=iso-8859-1''Atualiza%E7%E3o.zip"), "Atualização.zip")
+        self.assertEqual(name('attachment; filename="Squad_Add-ons_FCM27_V1.0(11.11.2026)UP1.2.0EA.zip"'),
+                         "Squad_Add-ons_FCM27_V1.0(11.11.2026)UP1.2.0EA.zip")
+        self.assertEqual(name(""), "Atualização_FC27.zip")
+
+
 if __name__ == "__main__":
     unittest.main()

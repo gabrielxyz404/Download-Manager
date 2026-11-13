@@ -83,7 +83,14 @@ async function note(name, text) {
     await chrome.storage.local.set({ lastEvent: { at: Date.now(), name: name || "", text } });
   } catch {}
 }
-const shortName = (url, name) => name || decodeURIComponent((url.split("?")[0].split("/").pop() || url)).slice(0, 80);
+// Addresses may carry old-style (Latin-1) accents such as %E7, which decodeURIComponent
+// rejects: never let a name for the popup stop a download from being taken.
+function safeDecode(text) {
+  try { return decodeURIComponent(text); } catch {}
+  try { return unescape(text); } catch {}
+  return text;
+}
+const shortName = (url, name) => (name || safeDecode(url.split("?")[0].split("/").pop() || url)).slice(0, 80);
 
 // ------------------------------------------------------------------ watched requests
 // What the browser really sent: its method (a form's POST cannot be repeated by the app) and
@@ -257,6 +264,14 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
 });
 
 chrome.downloads.onCreated.addListener(async (item) => {
+  try {
+    await handleDownload(item);
+  } catch (e) { // never fail silently: say what went wrong (the browser keeps the download)
+    await note(shortName(item.finalUrl || item.url || "", ""), "erro na extensão: " + (e && e.message ? e.message : e));
+  }
+});
+
+async function handleDownload(item) {
   const url = item.url; // the link the download started from
   const finalUrl = item.finalUrl || item.url; // where it led after redirects
   if (finalUrl.startsWith(APP) || url.startsWith(APP)) return; // the browser's copy of an app download
@@ -295,4 +310,4 @@ chrome.downloads.onCreated.addListener(async (item) => {
                 (lastFailure || checkProblem || "sem resposta"));
   }
   await note(label, "enviado à app ✔");
-});
+}

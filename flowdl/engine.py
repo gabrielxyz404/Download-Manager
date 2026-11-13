@@ -115,18 +115,27 @@ class Segment:
 
 
 def _filename_from_headers(headers: Message, url: str) -> str:
+    from .categories import name_from_url
     cd = headers.get("Content-Disposition", "")
     name = None
-    m = re.search(r"filename\*\s*=\s*[^']*'[^']*'([^;]+)", cd, re.I)
+    m = re.search(r"filename\*\s*=\s*([^']*)'[^']*'([^;]+)", cd, re.I)
     if m:
-        name = urllib.parse.unquote(m.group(1).strip().strip('"'))
+        charset = (m.group(1).strip() or "utf-8").lower()
+        raw = m.group(2).strip().strip('"')
+        try:
+            name = urllib.parse.unquote(raw, encoding=charset, errors="strict")
+        except (LookupError, UnicodeDecodeError):
+            name = urllib.parse.unquote(raw, encoding="latin-1")
     else:
         m = re.search(r'filename\s*=\s*"?([^";]+)"?', cd, re.I)
         if m:
             name = m.group(1).strip()
+            try:  # headers are read as Latin-1: a name sent in UTF-8 ("ç" as 2 bytes) is fixed here
+                name = name.encode("latin-1").decode("utf-8")
+            except (UnicodeEncodeError, UnicodeDecodeError):
+                pass  # it really was Latin-1 (or plain ASCII): keep it
     if not name:
-        path = urllib.parse.urlparse(url).path
-        name = urllib.parse.unquote(os.path.basename(path)) or "download"
+        name = name_from_url(url) or "download"
     return sanitize_filename(name)
 
 
@@ -501,8 +510,8 @@ class DownloadTask:
         if not self.path:
             # An interrupted download of this same link in this folder? Resume it without
             # asking the server anything (the name usually comes from the link).
-            guess = os.path.join(self.dest_dir, self.filename or sanitize_filename(
-                urllib.parse.unquote(os.path.basename(urllib.parse.urlparse(self.url).path))))
+            from .categories import name_from_url
+            guess = os.path.join(self.dest_dir, self.filename or sanitize_filename(name_from_url(self.url)))
             if self._state_matches(guess):
                 self.path = guess
                 self.filename = os.path.basename(guess)

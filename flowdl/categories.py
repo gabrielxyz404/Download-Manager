@@ -80,4 +80,8 @@ def folder_for(base: str, name: str | None, url: str = "", page: str = "", rules
 
 
 def name_from_url(url: str) -> str:
-    return urllib.parse.unquote(os.path.basename(urllib.parse.urlparse(url).path))
+    raw = os.path.basename(urllib.parse.urlparse(url).path)
+    try:
+        return urllib.parse.unquote(raw, errors="strict")
+    except UnicodeDecodeError:  # old-style accents (Latin-1, e.g. %E7 = "ç"), common on older sites
+        return urllib.parse.unquote(raw, encoding="latin-1")

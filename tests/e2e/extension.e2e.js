@@ -44,7 +44,7 @@ const links = ["relatorio", "lento", "cancelar", "confirmado", "naoquero", "menu
 const site = http.createServer((req, res) => {
   if (req.url === "/") {
     res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Set-Cookie": "sessao=abc123; Path=/" });
-    return res.end(links + ' <a id="cdn" href="/redir/cdn.zip">cdn</a> <a id="notas" href="/files/notas.txt">notas</a> <a id="semnome" href="/get?id=7">semnome</a>' +
+    return res.end(links + ' <a id="cdn" href="/redir/cdn.zip">cdn</a> <a id="notas" href="/files/notas.txt">notas</a> <a id="semnome" href="/get?id=7">semnome</a> <a id="acento" href="/files/Atualiza%E7%E3o_FC27.zip">acento</a>' +
                    '<form id="formpost" method="post" action="/files/formulario.zip"><button id="postbtn">post</button></form>');
   }
   if (req.url === "/setcdn") { // the file server's own login cookie (a different site: localhost)
@@ -278,6 +278,15 @@ const sameAsBig = (file) => fs.existsSync(file) && fs.readFileSync(file).equals(
   pacote = pacote && await finished(pacote.id);
   check("Link sem nome no endereço (o servidor diz que é .zip): a app apanha", !!pacote && sameAsBig(pacote.filename) &&
         appTasks().some((t) => (t.url || "").endsWith("/get?id=7")), pacote ? pacote.filename : "não apanhou");
+  await page.goto(SITE + "/");
+
+  // 3e. Old-style accents in the address (Latin-1 %E7 = "c cedilla"), common on Brazilian sites.
+  ids = (await byUrl()).map((d) => d.id);
+  await page.click("#acento");
+  let acento = await newest(ids);
+  acento = acento && await finished(acento.id);
+  check("Link com acentos à antiga (%E7): a app apanha", !!acento && sameAsBig(acento.filename) &&
+        appTasks().some((t) => (t.url || "").includes("Atualiza%E7%E3o")), acento ? acento.filename : "não apanhou");
   await page.goto(SITE + "/");
 
   // 3c. A link that redirects to a signed address on another site with its own login cookie.
