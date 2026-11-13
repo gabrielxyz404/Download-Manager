@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import base64
 import http.client
+import socket
 import ssl
 import urllib.parse
 import urllib.request
@@ -103,7 +104,21 @@ class Connection:
         self.via_proxy_http = False
         self.response: Response | None = None
         self.requests = 0  # requests sent on the current connection (for tests/stats)
+        self.aborted = False  # cut on purpose by abort(): never re-send on its own
         self.opened = 0    # connections opened (TCP/TLS set-ups)
+
+    def abort(self) -> None:
+        """Wake a read blocked on this connection (called from another thread): the reading
+        thread gets an error or the end of the data right away instead of waiting for the
+        timeout. Used when the server stops sending without closing the connection."""
+        self.aborted = True
+        conn = self.conn
+        sock = getattr(conn, "sock", None) if conn is not None else None
+        if sock is not None:
+            try:
+                sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
 
     def close(self) -> None:
         if self.conn is not None:
@@ -146,6 +161,9 @@ class Connection:
         in ``headers`` are not passed on when a redirect leads to another host."""
         if self.response is not None and not self.response.finished:
             self.close()
+        if self.aborted:  # cut on purpose while idle or before this request: start clean
+            self.close()
+            self.aborted = False
         first_host = (urllib.parse.urlsplit(url).hostname or "").lower()
         for _ in range(MAX_REDIRECTS + 1):
             parts = urllib.parse.urlsplit(url)
@@ -195,8 +213,9 @@ class Connection:
                 return self.conn.getresponse()
             except (http.client.RemoteDisconnected, BrokenPipeError, ConnectionResetError,
                     http.client.CannotSendRequest, http.client.BadStatusLine):
-                # The server closed an idle keep-alive connection: reconnect once.
-                if attempt == 2 or self.requests == 0:
+                # The server closed an idle keep-alive connection: reconnect once (not when
+                # we cut it ourselves because it had stopped answering).
+                if attempt == 2 or self.requests == 0 or self.aborted:
                     raise
                 scheme, host, port = self.key
                 self._connect(scheme, host, port)

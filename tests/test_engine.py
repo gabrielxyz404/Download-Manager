@@ -211,6 +211,100 @@ class EngineTests(unittest.TestCase):
             self.assertFileOk(t.path)
 
 
+class StalledServer(BaseHTTPRequestHandler):
+    """Every 3rd answer stops sending half-way and keeps the connection open (a throttling
+    server or a flaky line), like the downloads that froze at 0 B/s on a user's computer."""
+    protocol_version = "HTTP/1.1"
+    answers = 0
+    hang_every = 3  # 0: never goes silent (just a line of `rate` per connection)
+    rate = 3_000_000
+    data = None  # None: BIG (defined further down)
+    lock = threading.Lock()
+
+    def log_message(self, *a):
+        pass
+
+    def do_GET(self):
+        data = StalledServer.data or BIG
+        m = re.match(r"bytes=(\d+)-(\d*)", self.headers.get("Range", ""))
+        start = int(m.group(1)) if m else 0
+        end = int(m.group(2)) if m and m.group(2) else len(data) - 1
+        with StalledServer.lock:
+            StalledServer.answers += 1
+            hang = bool(StalledServer.hang_every) and StalledServer.answers % StalledServer.hang_every == 0
+        self.send_response(206 if m else 200)
+        if m:
+            self.send_header("Content-Range", f"bytes {start}-{end}/{len(data)}")
+        self.send_header("Content-Length", str(end - start + 1))
+        self.send_header("Accept-Ranges", "bytes")
+        self.end_headers()
+        sent = 0
+        try:
+            for i in range(start, end + 1, 64 * 1024):
+                piece = data[i:min(i + 64 * 1024, end + 1)]
+                self.wfile.write(piece)
+                sent += len(piece)
+                time.sleep(len(piece) / StalledServer.rate)
+                if hang and sent > 512 * 1024:
+                    time.sleep(120)  # silent, connection left open
+                    return
+        except OSError:
+            pass
+
+
+class StallTests(unittest.TestCase):
+    def test_connections_that_go_silent_are_replaced_quickly(self):
+        ThreadingHTTPServer.request_queue_size = 64
+        server = ThreadingHTTPServer(("127.0.0.1", 0), StalledServer)
+        server.daemon_threads = True
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        tmp = tempfile.TemporaryDirectory()
+        try:
+            task = DownloadTask(f"http://127.0.0.1:{server.server_address[1]}/f.bin", tmp.name, 8)
+            t0 = time.monotonic()
+            task.start()
+            task.wait(90)
+            took = time.monotonic() - t0
+            self.assertEqual(task.status, Status.COMPLETED, task.error)
+            with open(task.path, "rb") as f:
+                self.assertEqual(hashlib.sha256(f.read()).digest(), hashlib.sha256(BIG).digest())
+            # Before: each silent connection blocked for the 30 s timeout (and the end waited
+            # for a connection whose piece another one had finished).
+            self.assertLess(took, 30, f"{took:.0f}s")
+            self.assertGreater(task.reconnections, 0)
+        finally:
+            server.shutdown()
+            tmp.cleanup()
+
+    def test_browser_list_download_keeps_up_from_the_start(self):
+        """Downloads shown in the browser's list: the browser can only receive the file from
+        its start. Before, connections spread over the whole file and the browser showed a
+        fraction of the app's progress ("4 days left") while the app was far ahead."""
+        StalledServer.hang_every, StalledServer.rate, StalledServer.data = 0, 1_000_000, BIG * 4
+        ThreadingHTTPServer.request_queue_size = 64
+        server = ThreadingHTTPServer(("127.0.0.1", 0), StalledServer)
+        server.daemon_threads = True
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        tmp = tempfile.TemporaryDirectory()
+        try:
+            task = DownloadTask(f"http://127.0.0.1:{server.server_address[1]}/f.bin", tmp.name, 8)
+            task.mirror = True
+            task.start()
+            ratios = []
+            while task.is_running():
+                time.sleep(0.25)
+                if task.downloaded > 1024 * 1024 and task.is_running():
+                    ratios.append(task.available_prefix() / task.downloaded)
+            self.assertEqual(task.status, Status.COMPLETED, task.error)
+            with open(task.data_path(), "rb") as f:
+                self.assertEqual(hashlib.sha256(f.read()).digest(), hashlib.sha256(BIG * 4).digest())
+            self.assertGreater(sum(ratios) / len(ratios), 0.7, [round(r, 2) for r in ratios])
+        finally:
+            StalledServer.hang_every, StalledServer.rate, StalledServer.data = 3, 3_000_000, None
+            server.shutdown()
+            tmp.cleanup()
+
+
 if __name__ == "__main__":
     unittest.main()
 

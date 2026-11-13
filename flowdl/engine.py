@@ -58,6 +58,8 @@ RECHECK_DROP = 0.7        # ...and test more connections if the speed fell below
 SLOW_FACTOR = 0.3         # a connection at <30% of the median speed...
 SLOW_MIN_AGE = 5.0        # ...for 5 s or more is reconnected (at most MAX_SWAPS times)
 MAX_SWAPS = 2
+STALL_SECONDS = 6.0       # a connection that receives nothing for this long is replaced at once
+STALL_ALONE_SECONDS = 4.0 # ...or for this long while the other connections are receiving
 ENDGAME_MIN_PIECE = 32 * 1024   # near the end, help connections that still need...
 ENDGAME_MIN_ETA = 1.5           # ...more than 1.5 s to finish their piece
 TIMEOUT = 30
@@ -218,7 +220,9 @@ class _Worker:
 
     def __init__(self, seg: "Segment", conn=None, resp=None):
         self.seg, self.conn, self.resp = seg, conn, resp
-        self.started = self.last_swap = time.monotonic()
+        self.started = self.last_swap = self.last_data = time.monotonic()
+        self.quiet_swaps = 0  # replaced for silence with no data in between (backs off)
+        self.answering = False  # the server has started answering the current request
         self.alive = True
         self.got_data = False
         self.reconnect = False
@@ -229,6 +233,9 @@ class _Worker:
     def count(self, n: int) -> None:
         self.total += n
         now = time.monotonic()
+        if n:
+            self.last_data = now
+            self.quiet_swaps = 0
         self._samples.append((now, self.total))
         while len(self._samples) > 2 and now - self._samples[0][0] > 3.0:
             self._samples.popleft()
@@ -281,6 +288,7 @@ class DownloadTask:
         self._samples: deque[tuple[float, int]] = deque()
         self._active_workers = 0
         self._worker_error: str | None = None
+        self._answer_time = 0.0  # how long the server takes to start answering a request
         self._limit_hit = 0  # >0: the server refused a connection; value = connections it accepts
         self._streaming = 0  # connections currently receiving data
         self._wake = threading.Event()  # set when a connection finishes: react at once
@@ -754,6 +762,11 @@ class DownloadTask:
 
     def _create_segments(self, first_len: int = 0) -> None:
         n = max(1, min(self.connections, self.size // MIN_SPLIT_SIZE or 1))
+        if self.mirror:
+            # Shown in the browser's list, which can only receive the file from its start:
+            # one piece, and new connections take the work right after the others
+            # (_split_largest), so the browser's progress keeps up with the app's.
+            n = 1
         step = self.size // n
         self.segments = []
         for i in range(n):
@@ -782,6 +795,10 @@ class DownloadTask:
             if idle:
                 idle[0].active = True
                 return idle[0]
+            if self.mirror:
+                head = self._split_near_start()
+                if head is not None:
+                    return head
             best, best_free = None, 0
             for s in self.segments:
                 with s.lock:
@@ -799,6 +816,24 @@ class DownloadTask:
                         best.end = mid - 1
                         return self._add_segment(new)
             return self._endgame_split()
+
+    def _split_near_start(self) -> Segment | None:
+        """Browser-list downloads: give a free connection the work closest to the start of the
+        file. The connection ahead keeps a few seconds of work and the new one takes what
+        follows, so all connections work side by side near the start and the part the browser
+        can already receive grows at the full speed. Called with self._lock held."""
+        per_conn = self.speed / max(1, self._active_workers)
+        keep = int(min(32 * 1024 * 1024, max(MIN_SPLIT_SIZE, per_conn * 2)))
+        for s in sorted(self.segments, key=lambda x: x.start):
+            with s.lock:
+                free_from = max(s.pos, s.inflight_end + 1) if s.active else s.pos
+                free = s.end - free_from + 1
+                if free < keep + 2 * MIN_SPLIT_SIZE:
+                    continue
+                new = Segment(free_from + keep, s.end)
+                s.end = free_from + keep - 1
+            return self._add_segment(new)
+        return None
 
     def _endgame_split(self) -> Segment | None:
         """Near the end, help the slowest connection by taking over most of what it still has
@@ -840,6 +875,35 @@ class DownloadTask:
         Ask it to reconnect (a new connection may land on a faster one)."""
         with self._lock:
             live = [w for w in self._workers if w.alive and w.got_data and now - w.started > SLOW_MIN_AGE]
+        # Stalled: nothing received for a while (the server or the line stopped sending
+        # without closing). Cut it at once, even if every connection is stalled: waiting for
+        # the 30 s timeout froze the whole download.
+        with self._lock:
+            # (worker, its piece) read once: a worker may drop its piece at any moment
+            busy = [(w, w.seg) for w in self._workers if w.alive and w.seg is not None and w.seg.active]
+        receiving = sum(1 for w, _ in busy if now - w.last_data < 1.0)
+        for w, seg in busy:
+            if seg.remaining == 0 and not w.reconnect and now - w.last_data > 1.0:
+                # Its piece was finished by another connection (end-game help) while it waits
+                # for an answer it no longer needs: free it now instead of after the timeout.
+                w.reconnect = True
+                if w.conn is not None:
+                    w.conn.abort()
+                continue
+            # Silent while the others receive: abnormal, act fast. Everyone silent (e.g. the
+            # line dropped for a moment): give it longer. A connection replaced again and again
+            # without receiving anything (a server slow to answer) waits twice as long each time.
+            base = STALL_ALONE_SECONDS if receiving >= 2 else STALL_SECONDS
+            if not w.answering:
+                base = max(base, 3 * self._answer_time)
+            limit = min(base * 2 ** w.quiet_swaps, TIMEOUT)
+            if now - w.last_data > limit and now - w.last_swap > limit and not w.reconnect:
+                w.reconnect = True
+                w.last_data = now
+                w.quiet_swaps += 1
+                self.reconnections += 1
+                if w.conn is not None:
+                    w.conn.abort()
         if len(live) < 3:
             return
         speeds = sorted(w.speed() for w in live)
@@ -854,7 +918,7 @@ class DownloadTask:
         retries = 0
         refusals = 0
         req_url = self.url
-        conn = w.conn or net.Connection(TIMEOUT)
+        conn = w.conn = w.conn or net.Connection(TIMEOUT)
         resp = w.resp
         seg = w.seg
         try:
@@ -877,7 +941,14 @@ class DownloadTask:
                             hdrs = self._headers_for(req_url)
                             if self.validator:
                                 hdrs["If-Range"] = self.validator  # only bytes of the same version
+                            w.answering = False
+                            sent = w.last_data = time.monotonic()  # waiting for the answer starts now
                             resp = conn.get(req_url, hdrs, seg.pos, req_end, cookies=self.cookies)
+                            w.answering = True
+                            w.last_data = now_ = time.monotonic()
+                            # How long this server takes to start answering (slow ones exist):
+                            # a connection waiting for an answer is not cut before ~3x that.
+                            self._answer_time = max(now_ - sent, self._answer_time * 0.9)
                             if resp.status != 206:
                                 if self.validator:
                                     # If-Range said no: the file on the server is a new version
@@ -926,6 +997,14 @@ class DownloadTask:
                             seg.inflight_end = -1
                         resp = None
                         conn.close()
+                        if w.reconnect and not isinstance(exc, net.HTTPError):
+                            # We cut this connection ourselves (it had stopped receiving): just
+                            # open a new one now, no waiting and no failed try counted.
+                            w.reconnect = False
+                            w.swaps += 1
+                            w.last_swap = w.last_data = time.monotonic()
+                            w.reset_speed()
+                            continue
                         code = exc.code if isinstance(exc, net.HTTPError) else None
                         refused = isinstance(exc, ConnectionRefusedError)
                         if is_cert_error(exc):
