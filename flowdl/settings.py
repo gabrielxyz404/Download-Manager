@@ -26,11 +26,17 @@ class Settings:
         self.run_in_background = True
         self.background_hint_shown = False
         self.scheduler: dict = {}
+        self.category_folders = True   # save each category in its own folder (Downloads/Vídeos...)
+        self.categories: list = []     # rules + folders; empty = the defaults (categories.default_rules)
         try:
             data = json.loads(self.path.read_text(encoding="utf-8"))
             self.__dict__.update({k: v for k, v in data.items() if k != "path"})
         except (OSError, ValueError):
             pass
+
+    def category_rules(self) -> list:
+        from .categories import default_rules
+        return self.categories or default_rules()
 
     def save(self) -> None:
         data = {k: v for k, v in self.__dict__.items() if k != "path"}

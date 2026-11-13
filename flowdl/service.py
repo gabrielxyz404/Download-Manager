@@ -99,6 +99,13 @@ class Service:
     def _attach(self, manager) -> None:
         self._manager = manager
         manager.on_change = lambda task: self.events.put(("tick", task))
+        self.apply_category_settings()
+
+    def apply_category_settings(self) -> None:
+        """Category folders on/off and their rules, from the settings."""
+        if self._manager is not None:
+            s = self.settings
+            self._manager.folder_rules = s.category_rules() if s.category_folders else None
 
     def has_saved_active_downloads(self) -> bool:
         """Cheap check (no engine import) for downloads to resume at start-up."""
@@ -301,7 +308,8 @@ class Service:
         headers, cookies = browser_request(item)
         task = self.manager.add(item["url"], self.settings.dest_dir, self.settings.connections,
                                 filename=item.get("filename"), headers=headers, cookies=cookies,
-                                final_url=item.get("final_url"))
+                                final_url=item.get("final_url"), auto_folder=True,
+                                page=item.get("referrer") or "")
         self.bind_request(item.get("rid"), task)
         if self.settings.show_progress_window:
             self.pending.append({"kind": "progress", "task": task.id})

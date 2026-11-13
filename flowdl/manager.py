@@ -28,6 +28,7 @@ class DownloadManager:
         self._last_saved: str | None = None
         self._resume_ids: set[str] = set()
         self._signature: tuple = ()
+        self.folder_rules = None  # (base folder, category rules) -> category folders, or None
         self.on_change = None  # set by the service: called when a download stops/finishes
         self.load(auto_resume)
 
@@ -76,10 +77,17 @@ class DownloadManager:
     def add(self, url: str, dest_dir: str | None = None, connections: int = 8,
             start: bool = True, filename: str | None = None,
             headers: dict | None = None, cookies: dict | None = None,
-            final_url: str | None = None) -> DownloadTask:
+            final_url: str | None = None, auto_folder: bool = False,
+            page: str = "") -> DownloadTask:
+        """``auto_folder``: ``dest_dir`` is only the base; the category folder inside it is
+        chosen once the real file name is known."""
         task = DownloadTask(url.strip(), dest_dir or default_download_dir(), connections,
                             filename=sanitize_filename(filename) if filename else None,
                             headers=headers, cookies=cookies, final_url=final_url)
+        if auto_folder and self.folder_rules is not None:
+            from .categories import folder_for
+            base, rules = task.dest_dir, self.folder_rules
+            task.choose_folder = lambda name, url: folder_for(base, name, url, page, rules)
         return self.add_task(task, start)
 
     def _task_changed(self, task) -> None:

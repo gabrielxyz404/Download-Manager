@@ -16,7 +16,7 @@ import urllib.parse
 
 from . import grabber, video
 from . import autostart
-from .categories import CATEGORIES, OTHER
+from .categories import CATEGORIES, OTHER, default_rules, folder_for, name_from_url, pick_category
 from .engine import Status, format_size, format_time
 from .limiter import GLOBAL_LIMITER
 from .manager import config_dir
@@ -108,9 +108,12 @@ class AddDialog(tk.Toplevel):
         ttk.Button(frm, text="...", width=3, command=self._browse).grid(row=3, column=2, padx=(4, 0))
         ttk.Label(frm, text="Conexões (máx.):").grid(row=4, column=0, sticky="w", pady=3)
         ttk.Spinbox(frm, from_=1, to=32, width=5, textvariable=self.conns).grid(row=4, column=1, sticky="w")
+        self.auto = tk.BooleanVar(value=app.settings.category_folders)
+        ttk.Checkbutton(frm, text="Guardar na pasta da categoria (Vídeos, Compactados...) dentro desta pasta",
+                        variable=self.auto).grid(row=5, column=1, columnspan=2, sticky="w", pady=(4, 0))
 
         btns = ttk.Frame(frm)
-        btns.grid(row=5, column=0, columnspan=3, sticky="e", pady=(12, 0))
+        btns.grid(row=6, column=0, columnspan=3, sticky="e", pady=(12, 0))
         ttk.Button(btns, text="Baixar agora", command=lambda: self._ok(True)).pack(side="left", padx=4)
         ttk.Button(btns, text="Baixar depois", command=lambda: self._ok(False)).pack(side="left", padx=4)
         ttk.Button(btns, text="Cancelar", command=self.destroy).pack(side="left", padx=4)
@@ -139,7 +142,9 @@ class AddDialog(tk.Toplevel):
         same_link = url == self.url_original
         task = self.app.add_download(url, self.folder.get(), conns, start,
                                      self.name.get().strip() or None, self.headers,
-                                     cookies=self.cookies, final_url=self.final_url if same_link else None)
+                                     cookies=self.cookies, final_url=self.final_url if same_link else None,
+                                     auto_folder=bool(self.auto.get()),
+                                     page=(self.headers or {}).get("Referer", ""))
         self._decided = True
         svc = self.app.service
         if start:
@@ -315,7 +320,8 @@ class GrabberDialog(tk.Toplevel):
         for iid in sel:
             item = self.items[iid]
             self.app.add_download(item["url"], self.app.settings.dest_dir, self.app.settings.connections, True,
-                                  None, {"Referer": self.url.get().strip()})
+                                  None, {"Referer": self.url.get().strip()},
+                                  auto_folder=self.app.settings.category_folders, page=self.url.get().strip())
         if sel:
             self.app.status_var.set(f"{len(sel)} download(s) adicionados pelo capturador")
             self.destroy()
@@ -446,7 +452,10 @@ class VideoDialog(tk.Toplevel):
                 return
             fmt, audio = (c.get("format", "b"), c.get("audio_only", False)) if c["type"] == "ytdlp" \
                 else ("b", False)
-            task = VideoTask(c["url"], s.dest_dir, fmt, audio, self.name_var.get(), s.connections,
+            folder = s.dest_dir
+            if s.category_folders:  # videos in the Vídeos folder, audio in Músicas
+                folder = folder_for(s.dest_dir, "x.mp3" if audio else "x.mp4", rules=s.category_rules())
+            task = VideoTask(c["url"], folder, fmt, audio, self.name_var.get(), s.connections,
                              headers=self.headers, cookie_jar=self.cookie_jar,
                              quality=c.get("label", "HLS"))
             self.app.manager.add_task(task)
@@ -579,6 +588,149 @@ class ProgressWindow(tk.Toplevel):
             self.destroy()
             return
         self.after(500, self._update)
+
+
+class CategoriesDialog(tk.Toplevel):
+    """Categories: their rules and the folder new downloads of each one go to."""
+
+    def __init__(self, app: "App"):
+        super().__init__(app)
+        self.app = app
+        app.attach_dialog(self)
+        self.title("Categorias e pastas")
+        self.geometry("720x420")
+        self.rules = [dict(r) for r in app.settings.category_rules()]
+        frm = ttk.Frame(self, padding=12)
+        frm.pack(fill="both", expand=True)
+        self.on = tk.BooleanVar(value=app.settings.category_folders)
+        ttk.Checkbutton(frm, text="Guardar cada categoria na sua pasta (ex.: Downloads\\Vídeos)",
+                        variable=self.on).pack(anchor="w")
+        ttk.Label(frm, text="Os downloads vindos do navegador ficam na pasta do navegador.",
+                  foreground=app.colors["muted"]).pack(anchor="w", pady=(0, 8))
+        self.tree = ttk.Treeview(frm, columns=("name", "folder", "types"), show="headings", height=9)
+        for key, title, w in (("name", "Categoria", 120), ("folder", "Pasta", 260), ("types", "Tipos", 300)):
+            self.tree.heading(key, text=title)
+            self.tree.column(key, width=w, stretch=key == "types")
+        self.tree.pack(fill="both", expand=True)
+        self.tree.bind("<Double-1>", lambda _e: self._edit())
+        btns = ttk.Frame(frm)
+        btns.pack(fill="x", pady=(10, 0))
+        ttk.Button(btns, text="Adicionar", command=self._add).pack(side="left")
+        ttk.Button(btns, text="Editar", command=self._edit).pack(side="left", padx=4)
+        ttk.Button(btns, text="Apagar", command=self._delete).pack(side="left")
+        ttk.Button(btns, text="Repor as de origem", command=self._reset).pack(side="left", padx=4)
+        ttk.Button(btns, text="Cancelar", command=self.destroy).pack(side="right")
+        ttk.Button(btns, text="Guardar", command=self._save).pack(side="right", padx=4)
+        self._fill()
+
+    def _folder_text(self, rule: dict) -> str:
+        return rule.get("folder") or os.path.join(self.app.settings.dest_dir, rule["name"])
+
+    def _fill(self) -> None:
+        self.tree.delete(*self.tree.get_children())
+        for i, r in enumerate(self.rules):
+            extra = len(r.get("url_patterns", [])) + len(r.get("name_patterns", []))
+            types = ", ".join(r.get("exts", [])) + (f"  (+{extra} regras)" if extra else "")
+            self.tree.insert("", "end", iid=str(i), values=(r["name"], self._folder_text(r), types))
+
+    def _selected(self) -> int | None:
+        sel = self.tree.selection()
+        return int(sel[0]) if sel else None
+
+    def _add(self) -> None:
+        CategoryEditor(self, {"name": "", "exts": [], "folder": None, "url_patterns": [], "name_patterns": []},
+                       None)
+
+    def _edit(self) -> None:
+        i = self._selected()
+        if i is not None:
+            CategoryEditor(self, self.rules[i], i)
+
+    def _delete(self) -> None:
+        i = self._selected()
+        if i is not None:
+            del self.rules[i]
+            self._fill()
+
+    def _reset(self) -> None:
+        self.rules = default_rules()
+        self._fill()
+
+    def store(self, rule: dict, index: int | None) -> None:
+        if index is None:
+            self.rules.append(rule)
+        else:
+            self.rules[index] = rule
+        self._fill()
+
+    def _save(self) -> None:
+        s = self.app.settings
+        s.category_folders = bool(self.on.get())
+        s.categories = self.rules
+        s.save()
+        self.app.service.apply_category_settings()
+        self.app._build_category_sidebar()
+        self.app._refresh(schedule=False)
+        self.destroy()
+
+
+class CategoryEditor(tk.Toplevel):
+    def __init__(self, parent: CategoriesDialog, rule: dict, index: int | None):
+        super().__init__(parent)
+        self.parent, self.index = parent, index
+        self.transient(parent)
+        self.title("Categoria")
+        frm = ttk.Frame(self, padding=12)
+        frm.pack(fill="both", expand=True)
+        frm.columnconfigure(1, weight=1)
+        self.name = tk.StringVar(value=rule.get("name", ""))
+        self.exts = tk.StringVar(value=", ".join(rule.get("exts", [])))
+        self.folder = tk.StringVar(value=rule.get("folder") or "")
+        ttk.Label(frm, text="Nome:").grid(row=0, column=0, sticky="w", pady=2)
+        ttk.Entry(frm, textvariable=self.name, width=50).grid(row=0, column=1, columnspan=2, sticky="ew")
+        ttk.Label(frm, text="Tipos de ficheiro:").grid(row=1, column=0, sticky="w", pady=2)
+        ttk.Entry(frm, textvariable=self.exts).grid(row=1, column=1, columnspan=2, sticky="ew")
+        ttk.Label(frm, text="separados por vírgulas, ex.: mp4, mkv, webm", foreground=parent.app.colors["muted"]
+                  ).grid(row=2, column=1, sticky="w")
+        ttk.Label(frm, text="Pasta:").grid(row=3, column=0, sticky="w", pady=2)
+        ttk.Entry(frm, textvariable=self.folder).grid(row=3, column=1, sticky="ew")
+        ttk.Button(frm, text="...", width=3, command=self._browse).grid(row=3, column=2, padx=(4, 0))
+        ttk.Label(frm, text="vazio = subpasta com o nome da categoria", foreground=parent.app.colors["muted"]
+                  ).grid(row=4, column=1, sticky="w")
+        ttk.Label(frm, text="Endereços:").grid(row=5, column=0, sticky="nw", pady=2)
+        self.urls = tk.Text(frm, height=3, width=40)
+        self.urls.grid(row=5, column=1, columnspan=2, sticky="ew")
+        self.urls.insert("1.0", "\n".join(rule.get("url_patterns", [])))
+        ttk.Label(frm, text="um por linha, ex.: github.com/ ou *.exemplo.com/*",
+                  foreground=parent.app.colors["muted"]).grid(row=6, column=1, sticky="w")
+        ttk.Label(frm, text="Nomes:").grid(row=7, column=0, sticky="nw", pady=2)
+        self.names = tk.Text(frm, height=3, width=40)
+        self.names.grid(row=7, column=1, columnspan=2, sticky="ew")
+        self.names.insert("1.0", "\n".join(rule.get("name_patterns", [])))
+        ttk.Label(frm, text="um por linha, ex.: fatura_* (sem * procura em qualquer parte do nome)",
+                  foreground=parent.app.colors["muted"]).grid(row=8, column=1, sticky="w")
+        btns = ttk.Frame(frm)
+        btns.grid(row=9, column=0, columnspan=3, sticky="e", pady=(10, 0))
+        ttk.Button(btns, text="OK", command=self._ok).pack(side="left", padx=4)
+        ttk.Button(btns, text="Cancelar", command=self.destroy).pack(side="left")
+
+    def _browse(self) -> None:
+        path = filedialog.askdirectory(parent=self, initialdir=self.folder.get() or self.parent.app.settings.dest_dir)
+        if path:
+            self.folder.set(path)
+
+    def _ok(self) -> None:
+        name = self.name.get().strip()
+        if not name or name == OTHER:
+            messagebox.showwarning("Categoria", "Escolha um nome para a categoria.", parent=self)
+            return
+        lines = lambda w: [x.strip() for x in w.get("1.0", "end").splitlines() if x.strip()]  # noqa: E731
+        rule = {"name": name,
+                "exts": [e.strip().lower().lstrip(".") for e in self.exts.get().split(",") if e.strip()],
+                "folder": self.folder.get().strip() or None,
+                "url_patterns": lines(self.urls), "name_patterns": lines(self.names)}
+        self.parent.store(rule, self.index)
+        self.destroy()
 
 
 class ShutdownCountdown(tk.Toplevel):
@@ -770,6 +922,7 @@ class App(tk.Tk):
                          command=lambda: VideoDialog.install(self))
         opts.add_command(label="Downloads simultâneos...", command=self._max_active)
         opts.add_command(label="Pasta padrão...", command=self._choose_dir)
+        opts.add_command(label="Categorias e pastas...", command=lambda: CategoriesDialog(self))
         menubar.add_cascade(label="Opções", menu=opts)
 
         helpm = tk.Menu(menubar, tearoff=False)
@@ -821,8 +974,7 @@ class App(tk.Tk):
         self.side.column("#0", width=210)
         for key, label in self.SIDEBAR:
             self.side.insert("", "end", iid=key, text=label, open=True)
-        for cat in list(CATEGORIES) + [OTHER]:
-            self.side.insert("all", "end", iid=f"cat:{cat}", text=cat)
+        self._build_category_sidebar()
         self.side.selection_set("all")
         self.side.bind("<<TreeviewSelect>>", self._on_filter)
         paned.add(side, weight=0)
@@ -898,11 +1050,11 @@ class App(tk.Tk):
 
     # ---------------------------------------------------------------- actions
     def add_download(self, url, folder, conns, start=True, filename=None, headers=None,
-                     cookies=None, final_url=None):
+                     cookies=None, final_url=None, auto_folder=False, page=""):
         self.settings.dest_dir = folder or self.settings.dest_dir
         self.settings.connections = conns
         task = self.manager.add(url, folder, conns, start=start, filename=filename, headers=headers,
-                                cookies=cookies, final_url=final_url)
+                                cookies=cookies, final_url=final_url, auto_folder=auto_folder, page=page)
         self._last_clip = url
         self.status_var.set(f"Adicionado: {filename or url}")
         self._refresh(schedule=False)
@@ -920,7 +1072,8 @@ class App(tk.Tk):
         if is_video_site(url):
             self.open_video_dialog(url)
         else:
-            self.add_download(url, self.settings.dest_dir, self.settings.connections)
+            self.add_download(url, self.settings.dest_dir, self.settings.connections,
+                              auto_folder=self.settings.category_folders)
 
     def open_video_dialog(self, url: str = "") -> None:
         url = url or self.url_var.get().strip()
@@ -1131,6 +1284,18 @@ class App(tk.Tk):
                 self.url_var.set(text)
                 self.status_var.set("Link copiado detectado — clique em Baixar para iniciar")
 
+    def _build_category_sidebar(self) -> None:
+        for iid in self.side.get_children("all"):
+            self.side.delete(iid)
+        for rule in self.settings.category_rules():
+            self.side.insert("all", "end", iid=f"cat:{rule['name']}", text=rule["name"])
+        self.side.insert("all", "end", iid=f"cat:{OTHER}", text=OTHER)
+
+    def _category(self, t) -> str:
+        if getattr(t, "kind", "") == "video":
+            return t.category
+        return pick_category(t.filename or name_from_url(t.url), t.url, rules=self.settings.category_rules())
+
     def _visible(self, t) -> bool:
         f = self._filter
         if f == "unfinished":
@@ -1138,7 +1303,7 @@ class App(tk.Tk):
         if f == "finished":
             return t.status == Status.COMPLETED
         if f.startswith("cat:"):
-            return t.category == f[4:]
+            return self._category(t) == f[4:]
         return True
 
     def _row(self, t) -> tuple:
@@ -1158,7 +1323,7 @@ class App(tk.Tk):
             format_time(t.eta) if running else "",
             t.active_connections or "",
             status,
-            t.category,
+            self._category(t),
             time.strftime("%d/%m/%Y %H:%M", time.localtime(t.added_at)),
             t.url,
         )

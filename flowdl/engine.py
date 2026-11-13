@@ -294,6 +294,9 @@ class DownloadTask:
         self.awaiting_browser = False  # finished here, waiting for the browser to take it
         self.on_done = None  # called (from the download thread) when it stops for any reason
         self.on_change = None  # called when the file name / place is known (to save the list)
+        # Picks the folder from the real file name (category folders); set by the manager for
+        # downloads without a folder chosen by hand. Not saved: used only before the file exists.
+        self.choose_folder = None
 
     # ------------------------------------------------------------------ public
     @property
@@ -539,6 +542,9 @@ class DownloadTask:
         self.resumable = info["resumable"]
         if not self.filename:
             self.filename = info["filename"]
+        if not self.path and self.choose_folder:
+            self.dest_dir = self.choose_folder(self.filename, self.url)
+            os.makedirs(self.dest_dir, exist_ok=True)
         if not self.path:
             candidate = os.path.join(self.dest_dir, self.filename)
             if self._state_matches(candidate):

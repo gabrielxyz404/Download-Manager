@@ -414,6 +414,48 @@ class GuiTests(unittest.TestCase):
         self.assertFalse(self._alive(app))
         self.assertTrue(self.svc.exit_requested)
 
+    # ------------------------------------------------------------ categories
+    def test_categories_window_creates_category_with_own_folder(self):
+        app = self.open_app()
+        dlg = self.gui.CategoriesDialog(app)
+        own = os.path.join(self.tmp, "Trabalho")
+        dlg.store({"name": "Trabalho", "exts": ["xyz"], "folder": own, "url_patterns": [], "name_patterns": []}, None)
+        dlg.on.set(True)
+        dlg._save()
+        self.assertTrue(app.side.exists("cat:Trabalho"))
+        self.assertIn("Trabalho", [r["name"] for r in self.svc.settings.categories])
+        self.assertIn('"Trabalho"', read_text(self.svc.settings.path))
+        task = app.add_download(self.base + "/relatorio.xyz", self.dl, 2, auto_folder=True)
+        self.wait_status(task, "Concluído")
+        self.assertEqual(os.path.dirname(task.path), own)
+        app.side.selection_set("cat:Trabalho")
+        pump(app, 0.4)
+        self.assertEqual([app.tree.item(i)["values"][0] for i in app.tree.get_children()], ["relatorio.xyz"])
+
+    def test_category_editor_validates_and_reset(self):
+        app = self.open_app()
+        dlg = self.gui.CategoriesDialog(app)
+        ed = self.gui.CategoryEditor(dlg, {"name": "", "exts": []}, None)
+        with mock.patch.object(self.gui.messagebox, "showwarning") as warn:
+            ed._ok()  # no name
+        warn.assert_called_once()
+        ed.name.set("Livros")
+        ed.exts.set(".EPUB, mobi")
+        ed._ok()
+        self.assertEqual(dlg.rules[-1]["exts"], ["epub", "mobi"])
+        dlg._reset()
+        self.assertNotIn("Livros", [r["name"] for r in dlg.rules])
+
+    def test_quick_add_uses_category_folder(self):
+        app = self.open_app()
+        self.svc.settings.category_folders = True
+        self.svc.apply_category_settings()
+        app.url_var.set(self.base + "/jogo.zip")
+        app._quick_add()
+        task = self.svc.manager.tasks[0]
+        self.wait_status(task, "Concluído")
+        self.assertEqual(os.path.dirname(task.path), os.path.join(self.dl, "Compactados"))
+
     # -------------------------------------------------------- other windows
     def test_site_grabber(self):
         app = self.open_app()
