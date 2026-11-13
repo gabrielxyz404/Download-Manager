@@ -547,13 +547,14 @@ class AdaptiveConnectionTests(unittest.TestCase):
         self.assertEqual(self.peak, 8)  # 2 -> 4 -> 8: every step was faster, never more than 8
 
     def test_saturated_line_stops_adding_connections(self):
-        task, notes = self.run_download("shared", 5 * 1024 * 1024)
-        # No point in 8 connections on a 1 MB/s line: the speed test concludes that fewer are
-        # enough. (On a slow, noisy machine the first measurement may be low and the ramp may
-        # try one more step before concluding; the conclusion is what matters.)
+        task, notes = self.run_download("shared", 10 * 1024 * 1024, connections=16)
+        # No point in 16 connections on a 1 MB/s line: the speed test concludes that fewer are
+        # enough. (On a slow, noisy machine - seen on Windows CI - the first measurement, taken
+        # while the connections are still opening, may be low, so the ramp may take one more
+        # step before concluding: the maximum leaves room for that; the conclusion is what matters.)
         enough = [int(m.group(1)) for n in notes if (m := re.search(r"(\d+) conex\w+ bastam", n or ""))]
         self.assertTrue(enough, notes)
-        self.assertLess(min(enough), 8, notes)
+        self.assertLess(min(enough), 16, notes)
 
     def test_server_that_refuses_extra_connections_with_403(self):
         """Some file hosts answer 403 (not 429/503) to connections beyond their limit. That is
