@@ -432,11 +432,13 @@ class ConnectionReuseTests(unittest.TestCase):
 
     def test_slow_connection_is_replaced(self):
         KeepAliveServer.slow_first = 1  # the very first connection lands on a slow node
-        KeepAliveServer.fast_rate = 300_000  # long enough download for the check to run
+        # A long enough download for the check (a connection slow for 5 s+) to run, with margin
+        # for slower machines (Windows CI): ~20 s here, while the slow node alone would take minutes.
+        KeepAliveServer.fast_rate = 150_000
         t0 = time.monotonic()
         task, _ = self.download()
         self.assertGreaterEqual(task.reconnections, 1)
-        self.assertLess(time.monotonic() - t0, 40)
+        self.assertLess(time.monotonic() - t0, 60)
 
     def test_endgame_does_not_wait_for_a_slow_connection(self):
         """The first piece (2 MB) lands on a 20 KB/s connection: alone it would take ~100 s.
