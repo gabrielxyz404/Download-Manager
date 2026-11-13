@@ -184,7 +184,10 @@ class RefusedLinkTests(unittest.TestCase):
             task = DownloadTask(f"http://127.0.0.1:{site.server_address[1]}/d", tempfile.mkdtemp(), 4)
             task.start()
             import time
-            time.sleep(0.5)
+            deadline = time.monotonic() + 30
+            while task.downloaded == 0 and time.monotonic() < deadline:
+                time.sleep(0.05)  # wait for real progress (slow machines start later)
+            self.assertGreater(task.downloaded, 0)
             FileHost.uses = 0  # from now on every address is refused
             FileHost.tokens = {k: 0 for k in FileHost.tokens}
             task.wait(60)
