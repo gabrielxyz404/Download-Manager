@@ -596,6 +596,7 @@ class DownloadTask:
             try:
                 resp = conn.get(self._current_url(), self._headers_for(self._current_url()), 0,
                                 FIRST_REQUEST - 1, cookies=self.cookies)
+                self._first_peer = conn.peer  # the server address that answered
                 break
             except net.HTTPError as exc:
                 conn.close()
@@ -789,6 +790,14 @@ class DownloadTask:
         parts = urllib.parse.urlsplit(url)
         port = parts.port or (443 if parts.scheme == "https" else 80)
         ips = [] if net._proxy_for(parts.scheme, parts.hostname or "") else net.addresses(parts.hostname or "", port)
+        # Only addresses of the kind (IPv4 / IPv6) that the first connection really reached:
+        # many computers list IPv6 addresses that do not work, and a connection sent there
+        # would wait for nothing. The address that worked goes first.
+        working = getattr(self, "_first_peer", None) if first is not None else None
+        if working is None:
+            ips = []  # nothing proven yet: let the system choose, as before
+        else:
+            ips = [working] + [ip for ip in ips if ip != working and (":" in ip) == (":" in working)]
         self.server_addresses = len(ips)
         turn = [1]  # the first connection (the initial request) is already on the first address
 

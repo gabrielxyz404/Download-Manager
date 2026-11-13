@@ -397,6 +397,7 @@ const sameAsBig = (file) => fs.existsSync(file) && fs.readFileSync(file).equals(
   pp = await popup();
   last = await pp.textContent("#last");
   await pp.close();
+  await waitFor(() => !appTasks().some((t) => (t.url || "").includes("/once/")), 10000); // the app tidies up
   check("Link que só serve uma vez: o Brave termina o seu próprio download, intacto",
         !!umavez && umavez.state === "complete" && sameAsBig(umavez.filename) &&
         !appTasks().some((t) => (t.url || "").includes("/once/")),
@@ -422,11 +423,13 @@ const sameAsBig = (file) => fs.existsSync(file) && fs.readFileSync(file).equals(
   pp = await popup();
   last = await pp.textContent("#last");
   await pp.close();
+  const pageLeft = () => (fs.existsSync(DL) ? fs.readdirSync(DL, { recursive: true }).filter((f) => String(f).includes("patch")) : []);
+  await waitFor(() => !appTasks().some((t) => (t.url || "").includes("/page/")) && pageLeft().length === 0, 10000);
   check("Site que dá à app uma página em vez do ficheiro: o Brave termina o seu, intacto",
         !!pag && pag.state === "complete" && sameAsBig(pag.filename) &&
         !appTasks().some((t) => (t.url || "").includes("/page/")) &&
         !(fs.existsSync(DL) && fs.readdirSync(DL, { recursive: true }).some((f) => String(f).includes("patch"))),
-        `${pag ? pag.state : "nenhum"} | ${last}`);
+        `${pag ? pag.state : "nenhum"} | ${last} | app=${appTasks().filter((t) => (t.url || "").includes("/page/")).map((t) => t.status).join(",")} | ficheiros=${fs.existsSync(DL) ? fs.readdirSync(DL, { recursive: true }).filter((f) => String(f).includes("patch")).join(",") : ""}`);
   await page.goto(SITE + "/");
 
   // 3i. Cancelled in the browser while the app is still checking: it must not come back.

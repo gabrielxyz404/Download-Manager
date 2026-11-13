@@ -647,7 +647,7 @@ class ConnectionReuseTests(unittest.TestCase):
             time.sleep(0.05)
         self.assertEqual(task.status, Status.COMPLETED, task.error)
         with open(task.path, "rb") as f:
-            self.assertEqual(hashlib.sha256(f.read()).digest(), hashlib.sha256(DATA).digest())
+            self.assertEqual(hashlib.sha256(f.read()).digest(), hashlib.sha256(BIG).digest())
         return task, peak
 
     def test_connections_are_reused_for_many_pieces(self):

@@ -229,6 +229,10 @@ async function sendToApp(url, filename, referrer, finalUrl = "", original = null
   });
   if (!res) return false;
   if (original) original.rid = res.rid;
+  if (original && original.cancelled && res.rid) { // cancelled while it was being sent
+    await postApp("/control", { rid: res.rid, action: "cancel" });
+    return true;
+  }
   if (res.rid) showInBrowser(res.rid, original); // not awaited: may wait for the user's confirmation
   return true;
 }
@@ -447,7 +451,10 @@ async function handleDownload(item) {
     await chrome.downloads.pause(item.id);
     original.paused = true;
   } catch {}
+  waitingOriginals.set(item.id, original); // a cancel in the browser from now on is noticed
   const resumeOriginal = async () => {
+    waitingOriginals.delete(item.id);
+    if (original.cancelled) return; // the user cancelled it meanwhile: leave it cancelled
     if (original.paused) {
       try { await chrome.downloads.resume(item.id); } catch {}
     }
@@ -473,9 +480,11 @@ async function handleDownload(item) {
   const checkProblem = verdict ? "" : lastFailure;
   const [now] = await chrome.downloads.search({ id: item.id });
   if (now && now.state === "complete") { // too small / too fast: the browser already has it
+    waitingOriginals.delete(item.id);
     return note(label, "o navegador já o tinha terminado");
   }
 
+  if (original.cancelled) return; // cancelled in the browser while the app was being asked
   const name = item.filename ? item.filename.split(/[\\/]/).pop() : "";
   const received = { size: item.totalBytes > 0 ? item.totalBytes : 0, type: item.mime || "" };
   if (!(await sendToApp(url, name, item.referrer || "", finalUrl, original, received))) {

@@ -107,6 +107,7 @@ class Connection:
         self.requests = 0  # requests sent on the current connection (for tests/stats)
         self.aborted = False  # cut on purpose by abort(): never re-send on its own
         self.address: tuple[str, str] | None = None  # (host, ip): use this address of the host
+        self.peer: str | None = None  # the address the last request went to
         self.opened = 0    # connections opened (TCP/TLS set-ups)
 
     def abort(self) -> None:
@@ -229,6 +230,10 @@ class Connection:
         for attempt in (1, 2):
             try:
                 self.conn.request("GET", target, headers=headers)
+                try:  # which of the server's addresses we reached (before it may be closed)
+                    self.peer = self.conn.sock.getpeername()[0] if self.conn.sock else None
+                except OSError:
+                    self.peer = None
                 return self.conn.getresponse()
             except (http.client.RemoteDisconnected, BrokenPipeError, ConnectionResetError,
                     http.client.CannotSendRequest, http.client.BadStatusLine):
