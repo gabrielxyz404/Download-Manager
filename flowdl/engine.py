@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import http.client
 import json
+import ssl
 import os
 import re
 import threading
@@ -60,6 +61,22 @@ MAX_SWAPS = 2
 ENDGAME_MIN_PIECE = 32 * 1024   # near the end, help connections that still need...
 ENDGAME_MIN_ETA = 1.5           # ...more than 1.5 s to finish their piece
 TIMEOUT = 30
+
+
+CERT_ERROR = ("O certificado de segurança (HTTPS) deste site não é válido ou não é de confiança. "
+              "Tentar de novo não resolve.")
+TRANSIENT_CODES = (408, 425, 429, 500, 502, 503, 504)  # worth asking again
+MAX_RETRY_AFTER = 120  # never wait longer than this for a server's "try again in N s"
+FIRST_TRIES = 4
+
+
+def is_cert_error(exc: BaseException) -> bool:
+    """The site's certificate / name could not be verified: retrying cannot help."""
+    while exc is not None:
+        if isinstance(exc, ssl.SSLCertVerificationError):
+            return True
+        exc = exc.__cause__ or exc.__context__
+    return False
 
 
 class FileChanged(Exception):
@@ -448,8 +465,11 @@ class DownloadTask:
                     self._discard_progress()
                     self.restarted_changed = True
         except Exception as exc:  # noqa: BLE001 - report any failure to the UI
-            self.error = str(exc) or exc.__class__.__name__
-            self.status = Status.ERROR
+            if self._stop.is_set() and not self._worker_error:
+                self.status = Status.PAUSED  # paused while it was waiting to try again
+            else:
+                self.error = str(exc) or exc.__class__.__name__
+                self.status = Status.ERROR
         finally:
             self.speed = 0.0
             self._save_state()
@@ -485,19 +505,29 @@ class DownloadTask:
         # The first request already asks for the first piece of the file: its answer tells
         # us size / name / range support AND its data is kept (no wasted round trip).
         conn = net.Connection(TIMEOUT)
-        try:
+        for attempt in range(1, FIRST_TRIES + 1):
             try:
-                resp = conn.get(self._current_url(), self._headers_for(self._current_url()), 0, FIRST_REQUEST - 1,
-                                cookies=self.cookies)
+                resp = conn.get(self._current_url(), self._headers_for(self._current_url()), 0,
+                                FIRST_REQUEST - 1, cookies=self.cookies)
+                break
             except net.HTTPError as exc:
-                if not self._final_url or exc.code not in (401, 403, 404, 410):
+                conn.close()
+                if self._final_url and exc.code in (401, 403, 404, 410):
+                    # The browser's final address expired already: start again from the link.
+                    self._final_url = None
+                    continue
+                if exc.code not in TRANSIENT_CODES or attempt == FIRST_TRIES:
                     raise
-                # The browser's final address expired already: start again from the link.
-                self._final_url = None
-                resp = conn.get(self.url, _headers(self.headers), 0, FIRST_REQUEST - 1, cookies=self.cookies)
-        except Exception:
-            conn.close()
-            raise
+                self._stop.wait(min(exc.retry_after or 2 ** attempt, MAX_RETRY_AFTER))
+            except (OSError, http.client.HTTPException) as exc:
+                conn.close()
+                if is_cert_error(exc):
+                    raise RuntimeError(CERT_ERROR) from exc
+                if attempt == FIRST_TRIES:
+                    raise
+                self._stop.wait(2 ** attempt)  # a network blip: try again
+            if self._stop.is_set():
+                raise RuntimeError("pausado")  # _run reports it as paused, not as an error
         info = _info_from_response(resp)
         self._final_url = info["url"]
         if self.segments and self.validator and info["validator"] and info["validator"] != self.validator:
@@ -874,6 +904,14 @@ class DownloadTask:
                         conn.close()
                         code = exc.code if isinstance(exc, net.HTTPError) else None
                         refused = isinstance(exc, ConnectionRefusedError)
+                        if is_cert_error(exc):
+                            raise RuntimeError(CERT_ERROR) from exc
+                        wait = getattr(exc, "retry_after", None)
+                        if code in TRANSIENT_CODES and wait is not None:
+                            # The server said when to come back: do exactly that, without using
+                            # up a retry or concluding it limits connections.
+                            self._stop.wait(min(wait, MAX_RETRY_AFTER))
+                            continue
                         if (code in LIMIT_CODES or refused) and not w.got_data and self._active_workers > 1:
                             # The server does not want one more connection from us. It may still
                             # be counting one we just closed, so try once more after a second;
