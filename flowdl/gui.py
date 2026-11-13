@@ -587,6 +587,8 @@ class ProgressWindow(tk.Toplevel):
         status = t.status
         if status == Status.ERROR and t.error:
             status = f"Erro: {t.error}"
+        elif status == Status.PAUSED and t.error:
+            status = f"Pausado: {t.error}"  # e.g. the disk is full: says what to do
         elif status == Status.DOWNLOADING:
             status = "Recebendo dados..." + (f" ({t.connection_note})" if getattr(t, "connection_note", "") else "")
         self.vars["state"].set(status)
@@ -1474,6 +1476,8 @@ class App(tk.Tk):
         status = t.status
         if status == Status.ERROR and t.error:
             status = f"Erro: {t.error}"
+        elif status == Status.PAUSED and t.error:
+            status = f"Pausado: {t.error}"  # e.g. the disk is full: says what to do
         elif status == Status.DOWNLOADING and t.speed_limit:
             status = f"Baixando (limite {format_size(t.speed_limit)}/s)"
         elif status == Status.DOWNLOADING and getattr(t, "connection_note", ""):

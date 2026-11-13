@@ -83,6 +83,16 @@ def is_cert_error(exc: BaseException) -> bool:
     return False
 
 
+class DiskProblem(Exception):
+    """The disk, not the network: full, no permission, folder gone. The download pauses with a
+    plain message (its progress is kept) instead of being retried as a network error."""
+
+
+def _disk(exc: OSError, path: str) -> DiskProblem:
+    from .system import disk_message
+    return DiskProblem(disk_message(exc, os.path.dirname(os.path.abspath(path)) or path))
+
+
 class FileChanged(Exception):
     """The file on the server is not the version we started downloading."""
 
@@ -306,6 +316,7 @@ class DownloadTask:
         self._active_workers = 0
         self._worker_error: str | None = None
         self._answer_time = 0.0  # how long the server takes to start answering a request
+        self._disk_problem: DiskProblem | None = None
         self._refreshes = 0  # fresh addresses obtained for an expired link
         self._same_refusals = 0  # refusals of an address that the original link still leads to
         self._progress_at_same = -1
@@ -330,6 +341,7 @@ class DownloadTask:
         # app while they arrive) and saves the final file itself.
         self.mirror = False
         self.expect: dict | None = None  # what the browser received (size, type), when taken over
+        self.mark_internet = True  # Windows "came from the internet" mark on the finished file
         self.stream_token: str | None = None
         self.rid: str | None = None  # the extension's request id for this download
         self.awaiting_browser = False  # finished here, waiting for the browser to take it
@@ -377,6 +389,7 @@ class DownloadTask:
         self._stop.clear()
         self.error = None
         self._worker_error = None
+        self._disk_problem = None
         self.status = Status.CONNECTING
         self._thread = threading.Thread(target=self._run, name=f"dl-{self.id}", daemon=True)
         self._thread.start()
@@ -508,6 +521,9 @@ class DownloadTask:
                     # Never mix two versions: drop what we have and start over with the new one.
                     self._discard_progress()
                     self.restarted_changed = True
+        except DiskProblem as exc:
+            self.error = str(exc)
+            self.status = Status.PAUSED  # nothing lost: Resume once there is room / a folder
         except Exception as exc:  # noqa: BLE001 - report any failure to the UI
             if self._stop.is_set() and not self._worker_error:
                 self.status = Status.PAUSED  # paused while it was waiting to try again
@@ -532,7 +548,10 @@ class DownloadTask:
         self._stop.clear()
 
     def _prepare(self) -> None:
-        os.makedirs(self.dest_dir, exist_ok=True)
+        try:
+            os.makedirs(self.dest_dir, exist_ok=True)
+        except OSError as exc:
+            raise _disk(exc, os.path.join(self.dest_dir, "x")) from exc
         self._first = None
         if self.path and self.segments and os.path.exists(self._part_path):
             return  # resuming from saved state
@@ -653,8 +672,26 @@ class DownloadTask:
             self._refreshes += 1
             return False
 
+    def _check_room(self, needed: int | None) -> None:
+        """Before writing a new file: is there room for it? Say so now, not at 97%."""
+        if not needed:
+            return
+        from .system import free_space
+        folder = os.path.dirname(os.path.abspath(self._part_path))
+        free = free_space(folder)
+        if free is not None and free < needed:
+            raise DiskProblem(f"Falta espaço em {folder}: precisa de {format_size(needed)}, "
+                              f"há {format_size(free)} livres. Liberte espaço e clique em Retomar")
+
     # -- single connection (server does not support ranges / unknown size)
     def _download_single(self) -> None:
+        try:
+            self._check_room(self.size)
+        except DiskProblem:
+            if self._first:
+                self._first[0].close()
+                self._first = None
+            raise
         self.downloaded = 0
         self._active_workers = 1
         conn, resp = self._first or (net.Connection(TIMEOUT), None)
@@ -667,7 +704,10 @@ class DownloadTask:
                     chunk = resp.read(CHUNK_SIZE)
                     if not chunk:
                         break
-                    f.write(chunk)
+                    try:
+                        f.write(chunk)
+                    except OSError as exc:
+                        raise _disk(exc, self._part_path) from exc
                     self.downloaded += len(chunk)
                     self._update_speed()
                     self._throttle(len(chunk))
@@ -694,8 +734,17 @@ class DownloadTask:
                 first_len = int(m.group(2)) + 1 if m and int(m.group(1)) == 0 else 0
             self._create_segments(first_len)
         if not os.path.exists(self._part_path):
-            with open(self._part_path, "wb") as f:
-                f.truncate(self.size)
+            try:
+                self._check_room(self.size)
+            except DiskProblem:
+                if first is not None:
+                    first[0].close()
+                raise
+            try:
+                with open(self._part_path, "wb") as f:
+                    f.truncate(self.size)
+            except OSError as exc:
+                raise _disk(exc, self._part_path) from exc
 
         threads: list[threading.Thread] = []
         last_save = time.monotonic()
@@ -743,7 +792,7 @@ class DownloadTask:
             self._wake.clear()
             self.downloaded = sum(s.pos - s.start for s in self.segments)
             self._update_speed()
-            if self._worker_error or self._file_changed:
+            if self._worker_error or self._file_changed or self._disk_problem:
                 self._stop.set()
             now = time.monotonic()
             if self._limit_hit:
@@ -803,6 +852,8 @@ class DownloadTask:
         self._workers = []
         if self._file_changed:
             raise FileChanged()
+        if self._disk_problem:
+            raise self._disk_problem
         if self._worker_error:
             raise RuntimeError(self._worker_error)
         if all(s.remaining == 0 for s in self.segments):
@@ -1019,8 +1070,11 @@ class DownloadTask:
                                 last = min(seg.end, seg.inflight_end)
                                 n = max(0, min(len(chunk), last - seg.pos + 1))
                                 if n:
-                                    f.seek(seg.pos)
-                                    f.write(chunk[:n])
+                                    try:
+                                        f.seek(seg.pos)
+                                        f.write(chunk[:n])
+                                    except OSError as exc:
+                                        raise _disk(exc, self._part_path) from exc
                                     seg.pos += n
                                 request_done = seg.pos > last
                             w.count(n)
@@ -1117,6 +1171,8 @@ class DownloadTask:
                         self._stop.wait(min(2 ** retries, 30))
         except FileChanged:
             self._file_changed = True  # the download loop starts over with the new version
+        except DiskProblem as exc:
+            self._disk_problem = exc
         except Exception as exc:  # noqa: BLE001
             self._worker_error = str(exc) or exc.__class__.__name__
         finally:
@@ -1207,9 +1263,16 @@ class DownloadTask:
         final = self.path
         if os.path.exists(final):
             final = unique_path(final)
-        os.replace(self._part_path, final)
+        try:
+            os.replace(self._part_path, final)
+        except OSError as exc:
+            raise _disk(exc, final) from exc
         self.path = final
         self.filename = os.path.basename(final)
+        if self.mark_internet:
+            # Like a file saved by the browser: Windows still warns before running it.
+            from .system import mark_from_internet
+            mark_from_internet(final, self._current_url(), _headers(self.headers).get("Referer"))
         try:
             os.remove(self._state_path)
         except OSError:

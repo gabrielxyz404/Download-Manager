@@ -30,6 +30,10 @@ class DownloadManager:
         self._signature: tuple = ()
         self.folder_rules = None  # (base folder, category rules) -> category folders, or None
         self.on_change = None  # set by the service: called when a download stops/finishes
+        self.keep_awake = True      # Windows must not go to sleep in the middle of downloads
+        self.mark_internet = True   # finished files carry Windows' "came from the internet" mark
+        from .system import Awake
+        self._awake = Awake(lambda: self.keep_awake and any(t.is_running() for t in list(self.tasks)))
         self.load(auto_resume)
 
     # ------------------------------------------------------------- persistence
@@ -116,6 +120,8 @@ class DownloadManager:
         """Add any task object (DownloadTask or video.VideoTask)."""
         task.on_done = self._task_done
         task.on_change = self._task_changed
+        if hasattr(task, "mark_internet"):
+            task.mark_internet = self.mark_internet
         if not start:
             task.status = Status.PAUSED
         with self._lock:
@@ -184,6 +190,8 @@ class DownloadManager:
                 if t.status == Status.QUEUED and not t.is_running():
                     t.start()
                     running += 1
+            if running and self.keep_awake:
+                self._awake.poke()
             signature = tuple((t.id, t.status, t.path) for t in self.tasks)
         if signature != self._signature:  # only touch the disk when something changed
             self._signature = signature

@@ -104,6 +104,8 @@ class Service:
     def _attach(self, manager) -> None:
         self._manager = manager
         manager.on_change = lambda task: self.events.put(("tick", task))
+        manager.keep_awake = getattr(self.settings, "keep_awake", True)
+        manager.mark_internet = getattr(self.settings, "mark_internet", True)
         self.apply_category_settings()
 
     def apply_category_settings(self) -> None:
@@ -328,7 +330,12 @@ class Service:
 
     def _keep_if_unclaimed(self, task) -> None:
         if task.awaiting_browser and not getattr(task, "stream_attached", False):
-            task.finalize_local()
+            try:
+                task.finalize_local()
+            except Exception as exc:  # noqa: BLE001 - e.g. the folder was removed meanwhile
+                log("keep local failed", task.id, exc)
+                task.error = str(exc)
+                return
             self.manager.save()
             self.events.put(("tick", None))
 
