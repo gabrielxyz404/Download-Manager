@@ -62,6 +62,21 @@ ENDGAME_MIN_ETA = 1.5           # ...more than 1.5 s to finish their piece
 TIMEOUT = 30
 
 
+class FileChanged(Exception):
+    """The file on the server is not the version we started downloading."""
+
+
+def validator_of(headers) -> str | None:
+    """What identifies this version of the file for If-Range. Last-Modified first (like XDM:
+    mirrors of one file have different ETags); otherwise a strong ETag (weak ones, W/..., are
+    not allowed in If-Range)."""
+    lm = headers.get("Last-Modified")
+    if lm:
+        return lm
+    etag = headers.get("ETag") or ""
+    return etag if etag.startswith('"') else None
+
+
 class Segment:
     """Byte range [start, end] (inclusive). ``pos`` is the next byte to write."""
 
@@ -137,7 +152,7 @@ def _info_from_response(resp: net.Response) -> dict:
     elif headers.get("Content-Length"):
         size = int(headers["Content-Length"])
     return {"url": resp.url, "size": size, "resumable": resumable,
-            "filename": _filename_from_headers(headers, resp.url)}
+            "filename": _filename_from_headers(headers, resp.url), "validator": validator_of(headers)}
 
 
 def _headers(extra: dict | None) -> dict:
@@ -249,6 +264,9 @@ class DownloadTask:
         # link the user/browser started from, is asked again for a fresh one when that happens.
         self._final_url: str | None = final_url if final_url and final_url != url else None
         self._refresh_lock = threading.Lock()
+        self.validator: str | None = None  # this version of the file (see validator_of)
+        self._file_changed = False
+        self.restarted_changed = False  # the file changed on the server and we started over
         self._first = None
         self._workers: list[_Worker] = []
         # Browser mode: the browser also shows this download (it receives the bytes from the
@@ -367,6 +385,7 @@ class DownloadTask:
             return False
         self.size = state.get("size")
         self.resumable = state.get("resumable", False)
+        self.validator = state.get("validator")
         self.segments = [Segment(*s) for s in state.get("segments", [])]
         self.downloaded = sum(s.pos - s.start for s in self.segments)
         return True
@@ -396,6 +415,7 @@ class DownloadTask:
         state = {
             "url": self.url, "size": self.size, "resumable": self.resumable,
             "segments": segments if segments is not None else [s.to_list() for s in self.segments],
+            "validator": self.validator,
         }
         tmp = self._state_path + ".tmp"
         try:
@@ -407,17 +427,26 @@ class DownloadTask:
 
     def _run(self) -> None:
         try:
-            self._prepare()
-            if self.on_change:
-                self.on_change(self)
-            if self._stop.is_set():
-                self.status = Status.PAUSED
-                return
-            self.status = Status.DOWNLOADING
-            if self.resumable and self.size:
-                self._download_segmented()
-            else:
-                self._download_single()
+            for attempt in (1, 2):
+                try:
+                    self._prepare()
+                    if self.on_change:
+                        self.on_change(self)
+                    if self._stop.is_set():
+                        self.status = Status.PAUSED
+                        return
+                    self.status = Status.DOWNLOADING
+                    if self.resumable and self.size:
+                        self._download_segmented()
+                    else:
+                        self._download_single()
+                    break
+                except FileChanged:
+                    if attempt == 2:
+                        raise RuntimeError("O ficheiro está sempre a mudar no servidor")
+                    # Never mix two versions: drop what we have and start over with the new one.
+                    self._discard_progress()
+                    self.restarted_changed = True
         except Exception as exc:  # noqa: BLE001 - report any failure to the UI
             self.error = str(exc) or exc.__class__.__name__
             self.status = Status.ERROR
@@ -426,6 +455,17 @@ class DownloadTask:
             self._save_state()
             if self.on_done:
                 self.on_done(self)
+
+    def _discard_progress(self) -> None:
+        for p in (self._part_path, self._state_path):
+            try:
+                os.remove(p)
+            except OSError:
+                pass
+        self.segments, self.downloaded, self.size = [], 0, None
+        self.validator, self._final_url, self._file_changed = None, None, False
+        self._worker_error = None
+        self._stop.clear()
 
     def _prepare(self) -> None:
         os.makedirs(self.dest_dir, exist_ok=True)
@@ -460,6 +500,11 @@ class DownloadTask:
             raise
         info = _info_from_response(resp)
         self._final_url = info["url"]
+        if self.segments and self.validator and info["validator"] and info["validator"] != self.validator:
+            # an interrupted download of an older version of this file
+            conn.close()
+            raise FileChanged()
+        self.validator = self.validator or info["validator"]
         self.size = info["size"]
         self.resumable = info["resumable"]
         if not self.filename:
@@ -497,8 +542,10 @@ class DownloadTask:
             if self._current_url() != failed_url:
                 return  # another connection already got a fresh address
             info = probe(self.url, self.headers, self.cookies)
-            if info["size"] != self.size:
-                raise RuntimeError("O ficheiro mudou no servidor")
+            if info["size"] != self.size or (self.validator and info["validator"]
+                                             and info["validator"] != self.validator):
+                self._file_changed = True
+                raise FileChanged()
             self._final_url = info["url"]
 
     # -- single connection (server does not support ranges / unknown size)
@@ -590,7 +637,7 @@ class DownloadTask:
             self._wake.clear()
             self.downloaded = sum(s.pos - s.start for s in self.segments)
             self._update_speed()
-            if self._worker_error:
+            if self._worker_error or self._file_changed:
                 self._stop.set()
             now = time.monotonic()
             if self._limit_hit:
@@ -640,6 +687,8 @@ class DownloadTask:
         self._checkpoint(sync_fd)
         os.close(sync_fd)
         self._workers = []
+        if self._file_changed:
+            raise FileChanged()
         if self._worker_error:
             raise RuntimeError(self._worker_error)
         if all(s.remaining == 0 for s in self.segments):
@@ -770,9 +819,15 @@ class DownloadTask:
                             with seg.lock:
                                 seg.inflight_end = req_end
                             req_url = self._current_url()
-                            resp = conn.get(req_url, self._headers_for(req_url), seg.pos, req_end,
-                                            cookies=self.cookies)
+                            hdrs = self._headers_for(req_url)
+                            if self.validator:
+                                hdrs["If-Range"] = self.validator  # only bytes of the same version
+                            resp = conn.get(req_url, hdrs, seg.pos, req_end, cookies=self.cookies)
                             if resp.status != 206:
+                                if self.validator:
+                                    # If-Range said no: the file on the server is a new version
+                                    self._file_changed = True
+                                    raise FileChanged()
                                 raise RuntimeError("O servidor parou de aceitar downloads em partes")
                             self._final_url = resp.url
                         while not self._stop.is_set():
@@ -837,16 +892,23 @@ class DownloadTask:
                             try:
                                 self._refresh_url(req_url)
                                 continue
+                            except FileChanged:
+                                raise
                             except Exception:  # noqa: BLE001
                                 pass
+                        if code == 416:  # the range is gone: the file got smaller, i.e. it changed
+                            self._file_changed = True
+                            raise FileChanged()
                         if code in (401, 403, 404, 410):
                             raise RuntimeError(f"HTTP {exc.code}: {exc.reason}") from exc
                         retries += 1
                         if retries > MAX_RETRIES:
                             raise RuntimeError(f"Falha na conexão: {exc}") from exc
                         self._stop.wait(min(2 ** retries, 30))
+        except FileChanged:
+            self._file_changed = True  # the download loop starts over with the new version
         except Exception as exc:  # noqa: BLE001
-            self._worker_error = str(exc)
+            self._worker_error = str(exc) or exc.__class__.__name__
         finally:
             conn.close()
             if seg is not None:
