@@ -201,7 +201,7 @@ class Tray:
             user32.AppendMenuW(menu, MF_STRING | (MF_CHECKED if state.get("limit_on") else 0), LIMIT,
                                f"Limitar velocidade ({kb} KB/s)")
         else:
-            user32.AppendMenuW(menu, MF_STRING | MF_GRAYED, LIMIT, "Limitar velocidade (defina em Opções)")
+            user32.AppendMenuW(menu, MF_STRING | MF_GRAYED, LIMIT, "Limitar velocidade (defina em ⚙ Configurações)")
         user32.AppendMenuW(menu, MF_SEPARATOR, 0, None)
         user32.AppendMenuW(menu, MF_STRING, QUIT, "Sair")
         pt = wintypes.POINT()

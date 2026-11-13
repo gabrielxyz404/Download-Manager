@@ -45,7 +45,7 @@ Name: "{group}\Desinstalar {#AppName}"; Filename: "{uninstallexe}"
 Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppExe}"; Tasks: desktopicon
 
 [Registry]
-; Same entry the app uses for "Opções → Iniciar com o computador".
+; Same entry the app uses for "Configurações → Sistema → Iniciar com o computador".
 Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "FlowDownloads"; ValueData: """{app}\{#AppExe}"" --background"; Flags: uninsdeletevalue; Tasks: autostart
 ; The app registers itself so the browser can start it when it is closed (native messaging);
 ; these only make sure the entries go away when the app is uninstalled.

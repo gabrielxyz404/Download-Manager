@@ -185,7 +185,7 @@ def main() -> int:
           f"primeiro byte pedido: {min(Site.starts) if Site.starts else '-'}")
     kill_all()
 
-    # 2. Quit normally (Tarefas -> Sair) during a download, open again later.
+    # 2. Quit normally (⚙ -> Sair) during a download, open again later.
     app = App(work / "c2", work / "dl2", confirm_browser=False, auto_resume=True)
     Site.rate = 100_000
     app.start("--background")

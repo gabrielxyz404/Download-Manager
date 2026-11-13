@@ -1,5 +1,13 @@
 # Novidades do Flow Downloads
 
+## 0.9.0
+
+- **Visual novo, só preto e branco** (claro ou escuro). O botão **◐** troca num clique; **Automático** segue o Windows.
+- **Painel de detalhes** à direita: o download escolhido com velocidade, tempo que falta, ligações e o **mapa das partes** (o que cada ligação já baixou). Botões conforme o estado: Pausar, Retomar, Abrir, Tentar de novo.
+- **Erros explicados**: o painel diz o que aconteceu e o que fazer. Novo **Atualizar link** para links que expiraram: o download continua de onde parou.
+- **Botão ⚙** no lugar da barra de menus, e uma janela de **Configurações** (Ctrl+,) com tudo por secções: Aparência, Downloads, Velocidade, Navegador, Sistema, Atualizações.
+- Filtros na barra lateral ou em botões por cima da lista; campo do link com dica; menos colunas por defeito (o resto está no painel).
+
 ## 0.8.0
 
 - **Ícone ao lado do relógio do Windows:** mostra os downloads e a velocidade ao passar o rato; duplo clique abre a app; botão direito: pausar tudo, retomar tudo, ligar/desligar o limite de velocidade, sair. Aviso do Windows quando um download termina ou falha.

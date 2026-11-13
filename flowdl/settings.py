@@ -6,7 +6,8 @@ import json
 
 from .paths import config_dir, default_download_dir
 
-DEFAULT_COLUMNS = ["name", "size", "progress", "speed", "eta", "conns", "status"]
+DEFAULT_COLUMNS = ["name", "size", "progress", "speed", "eta"]  # the details panel shows the rest
+OLD_DEFAULT_COLUMNS = ["name", "size", "progress", "speed", "eta", "conns", "status"]  # up to 0.8.0
 
 
 class Settings:
@@ -17,7 +18,10 @@ class Settings:
         self.max_active = 3
         self.watch_clipboard = True
         self.dark = False
-        self.theme = None  # "auto", "claro", "escuro", "meia-noite", "brasa", "menta" (None: from "dark")
+        self.theme = "auto"  # "auto" (like Windows), "claro", "escuro" (None, from older versions: "dark")
+        self.filter_style = "side"   # filters: "side" (bar on the left) or "pills" (above the list)
+        self.show_details = True     # details of the chosen download on the right
+        self.show_parts_map = True   # ... with the map of the parts
         self.columns = list(DEFAULT_COLUMNS)
         self.global_limit_kb = 0
         self.limit_on = True         # the global limit can be switched off/on from the tray icon

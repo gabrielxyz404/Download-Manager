@@ -23,7 +23,7 @@ from .limiter import GLOBAL_LIMITER
 from .manager import config_dir
 from .paths import FROZEN, install_dir
 from .scheduler import ACTIONS, shutdown_computer, sleep_computer
-from .settings import DEFAULT_COLUMNS, Settings  # noqa: F401 (re-exported)
+from .settings import DEFAULT_COLUMNS, OLD_DEFAULT_COLUMNS, Settings  # noqa: F401 (re-exported)
 from .video import VideoTask
 
 REFRESH_MS = 500
@@ -36,11 +36,11 @@ def is_video_site(url: str) -> bool:
     host = urllib.parse.urlparse(url).netloc.lower().split(":")[0]
     return any(host == d or host.endswith("." + d) for d in VIDEO_SITES)
 COLUMNS = {
-    "name": ("Arquivo", 220),
-    "size": ("Tamanho", 85),
-    "progress": ("Progresso", 175),
-    "speed": ("Velocidade", 95),
-    "eta": ("Restante", 75),
+    "name": ("Arquivo", 200),
+    "size": ("Tamanho", 80),
+    "progress": ("Progresso", 140),
+    "speed": ("Velocidade", 92),
+    "eta": ("Restante", 78),
     "conns": ("Conexões", 82),
     "status": ("Status", 200),
     "category": ("Categoria", 95),
@@ -48,32 +48,24 @@ COLUMNS = {
     "url": ("Endereço", 200),
 }
 
-# Looks of the app. Colours only (and fonts / spacing in apply_theme): no images, no extra
-# library, so a look costs nothing. "muted", "done", "error", "paused" keep their meaning.
+# Looks of the app: black & white only (light / dark). Colours only, no images or extra library,
+# so a look costs nothing. Keys keep their meaning: "accent" is the main button / the bars,
+# "muted" secondary text, "trough" the empty part of a bar.
 THEMES = {
-    "claro": dict(label="Claro", bg="#f6f7f9", fg="#1f2328", field="#ffffff", head="#eef0f3",
-                  border="#d8dce2", sel="#dbe7ff", selfg="#0b1f44", hover="#e8ecf2", muted="#667085",
-                  sidebar="#eef1f5", stripe="#f8f9fb", accent="#2563eb", accentfg="#ffffff",
-                  done="#15803d", error="#c62828", paused="#a16207"),
-    "escuro": dict(label="Escuro", bg="#1c1d21", fg="#e6e8eb", field="#24262b", head="#2b2e34",
-                   border="#363a41", sel="#2d4a7a", selfg="#ffffff", hover="#30343b", muted="#9aa0a8",
-                   sidebar="#18191c", stripe="#282a30", accent="#3b82f6", accentfg="#ffffff",
-                   done="#4ade80", error="#f87171", paused="#facc15"),
-    "meia-noite": dict(label="Meia-noite", bg="#0f172a", fg="#e2e8f0", field="#111c33", head="#16233f",
-                       border="#1f2e4d", sel="#164e63", selfg="#ecfeff", hover="#1a2847", muted="#94a3b8",
-                       sidebar="#0b1222", stripe="#14203a", accent="#22d3ee", accentfg="#082f49",
-                       done="#34d399", error="#fb7185", paused="#fbbf24"),
-    "brasa": dict(label="Brasa", bg="#18181b", fg="#ececee", field="#202024", head="#27272b",
-                  border="#34343a", sel="#5a2d12", selfg="#fff7ed", hover="#2c2c31", muted="#a1a1aa",
-                  sidebar="#141416", stripe="#252529", accent="#f97316", accentfg="#1c0a00",
-                  done="#4ade80", error="#f87171", paused="#fde047"),
-    "menta": dict(label="Menta", bg="#f4f7f5", fg="#1b2a22", field="#ffffff", head="#e9efeb",
-                  border="#d3ddd7", sel="#d7f0e0", selfg="#0f2e1c", hover="#e3ebe6", muted="#5f7369",
-                  sidebar="#e8f0eb", stripe="#f7faf8", accent="#16a34a", accentfg="#ffffff",
-                  done="#15803d", error="#c62828", paused="#a16207"),
+    "claro": dict(label="Claro", bg="#ffffff", fg="#111111", field="#ffffff", head="#f5f5f5",
+                  border="#e6e6e6", sel="#ececec", selfg="#111111", hover="#f0f0f0", muted="#6e6e6e",
+                  sidebar="#f5f5f5", stripe="#fafafa", accent="#111111", accentfg="#ffffff",
+                  trough="#e8e8e8", partial="#9a9a9a",
+                  done="#6e6e6e", error="#111111", paused="#111111"),
+    "escuro": dict(label="Escuro", bg="#111111", fg="#eeeeee", field="#111111", head="#1a1a1a",
+                   border="#2a2a2a", sel="#262626", selfg="#ffffff", hover="#222222", muted="#9a9a9a",
+                   sidebar="#1a1a1a", stripe="#151515", accent="#f2f2f2", accentfg="#111111",
+                   trough="#2c2c2c", partial="#6e6e6e",
+                   done="#9a9a9a", error="#eeeeee", paused="#eeeeee"),
 }
 THEMES["light"], THEMES["dark"] = THEMES["claro"], THEMES["escuro"]  # older settings / dialogs
-DARK_THEMES = ("escuro", "meia-noite", "brasa")
+DARK_THEMES = ("escuro",)
+OLD_LOOKS = {"meia-noite": "escuro", "brasa": "escuro", "menta": "claro"}  # looks of 0.8.0
 
 
 def windows_prefers_dark() -> bool:
@@ -94,7 +86,8 @@ def theme_name(settings) -> str:
     name = getattr(settings, "theme", None) or ("escuro" if getattr(settings, "dark", False) else "claro")
     if name == "auto":
         return "escuro" if windows_prefers_dark() else "claro"
-    return name if name in THEMES else "claro"
+    name = OLD_LOOKS.get(name, name)
+    return name if name in ("claro", "escuro") else "claro"
 
 
 def open_path(path: str) -> None:
@@ -106,7 +99,7 @@ def open_path(path: str) -> None:
         subprocess.Popen(["xdg-open", path])
 
 
-def progress_bar(fraction: float, width: int = 12) -> str:
+def progress_bar(fraction: float, width: int = 9) -> str:
     filled = int(round(fraction * width))
     return "━" * filled + "╌" * (width - filled) + f"  {fraction * 100:5.1f}%"
 
@@ -1014,8 +1007,393 @@ class ShutdownCountdown(tk.Toplevel):
 
 
 # ------------------------------------------------------------------ main app
+def error_hint(error: str) -> str:
+    """What to do about a download error, in plain words."""
+    e = (error or "").lower()
+    if "403" in e or "401" in e or "410" in e or "expir" in e:
+        return "o link pode ter expirado: volte à página, copie o link de novo e use Atualizar link"
+    if "404" in e:
+        return "o ficheiro já não está neste endereço: procure-o de novo na página"
+    if "espaço" in e or "disco" in e or "space" in e:
+        return "liberte espaço no disco (ou mude a pasta) e clique em Tentar de novo"
+    if "tempo" in e or "timed out" in e or "conex" in e or "connection" in e or "rede" in e:
+        return "a ligação falhou: verifique a internet e clique em Tentar de novo"
+    return "clique em Tentar de novo; se repetir, atualize o link"
+
+
+class DetailsPanel(ttk.Frame):
+    """Right side of the window: the chosen download, with the map of its parts.
+    Built once; refresh() only changes texts and colours (cheap, twice a second)."""
+
+    CELLS, ROWS = 36, 2
+    WIDTH = 360
+
+    def __init__(self, app: "App", parent):
+        super().__init__(parent, style="Soft.TFrame", padding=(20, 16), width=self.WIDTH + 40)
+        self.app = app
+        self.task = None
+        self._map_key = None
+        self.empty = ttk.Label(self, text="Escolha um download na lista para ver os detalhes.",
+                               style="SoftMuted.TLabel", wraplength=self.WIDTH)
+        self.box = ttk.Frame(self, style="Soft.TFrame")
+        self.name = ttk.Label(self.box, style="SoftName.TLabel", wraplength=self.WIDTH)
+        self.name.pack(anchor="w")
+        self.url = ttk.Label(self.box, style="SoftMuted.TLabel")
+        self.url.pack(anchor="w", pady=(2, 12))
+        self.bar = ttk.Progressbar(self.box, style="Big.Horizontal.TProgressbar", length=self.WIDTH, maximum=1000)
+        self.bar.pack(anchor="w")
+        grid = ttk.Frame(self.box, style="Soft.TFrame")
+        grid.pack(anchor="w", pady=(12, 8), fill="x")
+        self.rows = []
+        for i in range(5):
+            k = ttk.Label(grid, style="SoftMuted.TLabel")
+            v = ttk.Label(grid, style="Soft.TLabel", wraplength=self.WIDTH - 110, justify="left")
+            k.grid(row=i, column=0, sticky="nw", pady=3, padx=(0, 18))
+            v.grid(row=i, column=1, sticky="nw", pady=3)
+            self.rows.append((k, v))
+        self.map_box = ttk.Frame(self.box, style="Soft.TFrame")
+        ttk.Label(self.map_box, text="MAPA DAS PARTES", style="SoftSmall.TLabel").pack(anchor="w", pady=(6, 4))
+        self.canvas = tk.Canvas(self.map_box, width=self.WIDTH, height=self.ROWS * 22 - 4, highlightthickness=0)
+        self.canvas.pack(anchor="w")
+        step = self.WIDTH / self.CELLS
+        self.cells = [self.canvas.create_rectangle(int(c * step), r * 22, int((c + 1) * step) - 2, r * 22 + 18,
+                                                   width=0)
+                      for r in range(self.ROWS) for c in range(self.CELLS)]
+        self.legend = ttk.Label(self.map_box, text="■ baixado   ▪ a meio   □ falta", style="SoftMuted.TLabel")
+        self.legend.pack(anchor="w", pady=(4, 0))
+        self.buttons = ttk.Frame(self.box, style="Soft.TFrame")
+        self.buttons.pack(anchor="w", pady=(16, 0))
+        self.primary = ttk.Button(self.buttons, style="Accent.TButton")
+        self.second = ttk.Button(self.buttons, style="Soft.TButton")
+        self.third = ttk.Button(self.buttons, style="Soft.TButton")
+        for b in (self.primary, self.second, self.third):
+            b.pack(side="left", padx=(0, 8))
+        self.pack_propagate(False)
+        self.recolor()
+        self.show(None)
+
+    def recolor(self) -> None:
+        self.canvas.configure(background=self.app.colors["sidebar"])
+        self._map_key = None
+
+    def show(self, task) -> None:
+        self.task = task
+        self._map_key = None
+        if task is None:
+            self.box.pack_forget()
+            self.empty.pack(anchor="w")
+        else:
+            self.empty.pack_forget()
+            self.box.pack(fill="both", expand=True)
+            self.refresh()
+
+    def _set_rows(self, rows) -> None:
+        for i, (k, v) in enumerate(self.rows):
+            if i < len(rows):
+                k.configure(text=rows[i][0])
+                v.configure(text=rows[i][1])
+                k.grid()
+                v.grid()
+            else:
+                k.grid_remove()
+                v.grid_remove()
+
+    def _buttons(self, spec) -> None:
+        for b, (text, cmd) in zip((self.primary, self.second, self.third), spec):
+            b.configure(text=text, command=cmd)
+            b.pack(side="left", padx=(0, 8))
+        for b in (self.primary, self.second, self.third)[len(spec):]:
+            b.pack_forget()
+
+    def refresh(self) -> None:
+        t, app = self.task, self.app
+        if t is None or not self.app.settings.show_details:
+            return
+        if t not in app.manager.tasks:
+            self.show(None)
+            return
+        self.name.configure(text=t.filename or name_from_url(t.url))
+        url = t.url if len(t.url) <= 46 else t.url[:44] + "…"
+        self.url.configure(text=url)
+        self.bar["value"] = t.progress * 1000
+        folder = (os.path.dirname(t.path) if t.path else "") or t.dest_dir
+        size = format_size(t.size) if t.size else "desconhecido"
+        got = f"{format_size(t.downloaded)} de {size}" + (f" ({t.progress * 100:.0f}%)" if t.size else "")
+        st = t.status
+        if t.is_running() and st == Status.DOWNLOADING:
+            conns = f"{t.active_connections} ativas"
+            if getattr(t, "server_limit", None):
+                conns += f" · servidor aceita {t.server_limit}"
+            elif getattr(t, "connection_note", ""):
+                conns += f" · {t.connection_note}"
+            limit = f" (limite {format_size(t.speed_limit)}/s)" if t.speed_limit else ""
+            rows = [("Baixado", got), ("Velocidade", f"{format_size(t.speed)}/s{limit}"),
+                    ("Falta", format_time(t.eta)), ("Ligações", conns), ("Guardar em", folder)]
+            buttons = [("॥ Pausar", app._pause), ("Abrir pasta", app._open_folder), ("✕", app._remove)]
+        elif st == Status.COMPLETED:
+            rows = [("Tamanho", size),
+                    ("Adicionado", time.strftime("%d/%m/%Y %H:%M", time.localtime(t.added_at)))]
+            if getattr(t, "check", ""):
+                rows.append(("Verificação", t.check))
+            rows.append(("Guardado em", folder))
+            buttons = [("Abrir", app._open_file), ("Abrir pasta", app._open_folder), ("✕", app._remove)]
+        elif st == Status.ERROR:
+            rows = [("Baixado", got), ("Problema", t.error or "erro desconhecido"),
+                    ("O que fazer", error_hint(t.error or "")), ("Guardar em", folder)]
+            buttons = [("↻ Tentar de novo", app._resume), ("Atualizar link", app._update_link), ("✕", app._remove)]
+        elif st == Status.PAUSED:
+            again = ("o servidor permite continuar ✓" if t.resumable or not t.downloaded
+                     else "o servidor não permite continuar: recomeça do início")
+            rows = [("Baixado", got), ("Estado", f"pausado · {t.error}" if t.error else "pausado"),
+                    ("Retomar", again), ("Guardar em", folder)]
+            buttons = [("▶ Retomar", app._resume), ("Abrir pasta", app._open_folder), ("✕", app._remove)]
+        else:  # queued / starting / video steps
+            rows = [("Estado", st), ("Baixado", got), ("Guardar em", folder)]
+            buttons = [("॥ Pausar", app._pause) if t.is_running() else ("▶ Iniciar", app._resume),
+                       ("Abrir pasta", app._open_folder), ("✕", app._remove)]
+        self._set_rows(rows)
+        self._buttons(buttons)
+        show_map = (app.settings.show_parts_map and st != Status.COMPLETED and bool(t.size)
+                    and getattr(t, "kind", "") != "video")
+        if show_map:
+            self.map_box.pack(anchor="w", fill="x", before=self.buttons)
+            self._draw_map(t)
+        else:
+            self.map_box.pack_forget()
+
+    def _draw_map(self, t) -> None:
+        """Each cell is a slice of the file: filled when downloaded, grey while it is being
+        downloaded, empty when it is still missing."""
+        n = len(self.cells)
+        size = t.size or 0
+        if size <= 0:
+            return
+        bounds = [i * size // n for i in range(n + 1)]  # cell i = bytes [bounds[i], bounds[i+1])
+        done = [0] * n
+        segments = list(t.segments)
+        ranges = ([(seg.start, min(seg.pos, seg.end + 1)) for seg in segments] if segments
+                  else [(0, min(t.downloaded, size))])  # one stream from the start
+        for a, b in ranges:
+            if b <= a:
+                continue
+            i = min(n - 1, a * n // size)
+            while i < n and bounds[i] < b:
+                done[i] += max(0, min(b, bounds[i + 1]) - max(a, bounds[i]))
+                i += 1
+        c = self.app.colors
+        fills = [c["accent"] if d >= bounds[i + 1] - bounds[i] else c["partial"] if d > 0 else c["trough"]
+                 for i, d in enumerate(done)]
+        if fills == self._map_key:
+            return
+        self._map_key = fills
+        for item, fill in zip(self.cells, fills):
+            self.canvas.itemconfigure(item, fill=fill)
+
+
+class SettingsDialog(tk.Toplevel):
+    """⚙ → Configurações: every option in one window, by section."""
+
+    SECTIONS = ("Aparência", "Downloads", "Velocidade", "Navegador", "Sistema", "Atualizações")
+
+    def __init__(self, app: "App", section: str = "Aparência"):
+        super().__init__(app)
+        self.app = app
+        self.title("Configurações")
+        self.geometry("900x560")
+        self.minsize(760, 480)
+        app.attach_dialog(self)
+        self.configure(background=app.colors["bg"])
+        self.bind("<Escape>", lambda _e: self.destroy())
+        side = ttk.Frame(self, style="Side.TFrame", padding=(8, 12, 0, 12))
+        side.pack(side="left", fill="y")
+        self.nav = ttk.Treeview(side, show="tree", selectmode="browse", style="Side.Treeview")
+        self.nav.column("#0", width=190)
+        for name in self.SECTIONS:
+            self.nav.insert("", "end", iid=name, text=name)
+        self.nav.pack(fill="both", expand=True)
+        self.nav.bind("<<TreeviewSelect>>", lambda _e: self._fill())
+        self.line = tk.Frame(self, width=1)
+        self.line.pack(side="left", fill="y")
+        self.page = ttk.Frame(self, padding=(28, 18))
+        self.page.pack(side="left", fill="both", expand=True)
+        self.cards: dict[str, tuple] = {}
+        self.recolor()
+        self.show(section)
+
+    def recolor(self) -> None:
+        c = self.app.colors
+        self.configure(background=c["bg"])
+        self.line.configure(background=c["border"])
+        for value, (box, canvas, label) in self.cards.items():
+            chosen = self.app.theme_var.get() == value
+            box.configure(background=c["sidebar"], highlightbackground=c["fg"] if chosen else c["border"],
+                          highlightthickness=2 if chosen else 1)
+            canvas.configure(background=c["sidebar"])
+            label.configure(background=c["sidebar"], foreground=c["fg"])
+            for w in box.winfo_children():
+                if isinstance(w, tk.Label) and w is not label:
+                    w.configure(background=c["sidebar"], foreground=c["muted"])
+
+    def show(self, section: str) -> None:
+        section = section if section in self.SECTIONS else self.SECTIONS[0]
+        self.nav.selection_set(section)
+        self._fill()
+
+    # helpers
+    def _head(self, text: str, first: bool = False) -> None:
+        ttk.Label(self.page, text=text.upper(), style="Muted.TLabel", font=self.app._fonts[2]).pack(
+            anchor="w", pady=(0 if first else 16, 6))
+
+    def _check(self, text: str, var: tk.BooleanVar, command=None) -> None:
+        ttk.Checkbutton(self.page, text=text, variable=var, command=command).pack(anchor="w", pady=3)
+
+    def _setting_check(self, text: str, key: str, after=None) -> tk.BooleanVar:
+        var = tk.BooleanVar(value=bool(getattr(self.app.settings, key, False)))
+
+        def changed():
+            setattr(self.app.settings, key, var.get())
+            self.app.settings.save()
+            if after:
+                after()
+        self._check(text, var, changed)
+        return var
+
+    def _row(self, text: str, button: str, command) -> ttk.Label:
+        row = ttk.Frame(self.page)
+        row.pack(anchor="w", fill="x", pady=3)
+        label = ttk.Label(row, text=text)
+        label.pack(side="left")
+        ttk.Button(row, text=button, command=lambda: (command(), self.after(300, self._fill))).pack(
+            side="right")
+        return label
+
+    def _fill(self) -> None:
+        sel = self.nav.selection()
+        section = sel[0] if sel else self.SECTIONS[0]
+        for w in self.page.winfo_children():
+            w.destroy()
+        self.cards = {}
+        app, st = self.app, self.app.settings
+        if section == "Aparência":
+            self._head("Tema", first=True)
+            row = ttk.Frame(self.page)
+            row.pack(anchor="w")
+            for value, name, sub in (("auto", "Automático", "segue o Windows"), ("claro", "Claro", "fundo branco"),
+                                     ("escuro", "Escuro", "fundo preto")):
+                self._card(row, value, name, sub)
+            self._head("Filtros")
+            self.filter_var = tk.StringVar(value=st.filter_style)
+            for value, text in (("side", "Barra lateral à esquerda"), ("pills", "Botões por cima da lista")):
+                ttk.Radiobutton(self.page, text=text, value=value, variable=self.filter_var,
+                                command=self._filters).pack(anchor="w", pady=3)
+            self._head("Outros")
+            self._setting_check("Mostrar os detalhes do download à direita", "show_details", app._layout)
+            self._setting_check("Mostrar o mapa das partes", "show_parts_map", lambda: app.details.refresh())
+        elif section == "Downloads":
+            self._head("Onde guardar", first=True)
+            self._row(f"Pasta padrão: {st.dest_dir}", "Alterar...", app._choose_dir)
+            self._setting_check("Guardar cada categoria na sua pasta (Downloads\\Vídeos...)", "category_folders")
+            self._row("Categorias, regras e pastas", "Editar...", lambda: CategoriesDialog(app))
+            self._head("Fila")
+            self._row(f"Downloads ao mesmo tempo: {app.manager.max_active}", "Alterar...", app._max_active)
+            self._check("Retomar downloads ao abrir o Flow Downloads", app.resume_var,
+                        lambda: setattr(st, "auto_resume", app.resume_var.get()))
+            self._head("Quando terminar")
+            self._row("Abrir, extrair, analisar com o antivírus, correr um comando", "Escolher...",
+                      lambda: AfterDialog(app))
+        elif section == "Velocidade":
+            limit = f"{st.global_limit_kb} KB/s" if st.global_limit_kb else "sem limite"
+            self._head("Limites", first=True)
+            self._row(f"Velocidade máxima total: {limit}", "Alterar...", app._global_limit)
+            self._row("Máximo de ligações por site", "Editar...", lambda: HostLimitsDialog(app))
+            self._head("Horário")
+            self._row("Agendador (começar, parar, desligar o PC)", "Abrir...", lambda: SchedulerDialog(app))
+        elif section == "Navegador":
+            self._head("Extensão", first=True)
+            self._check("Receber downloads do navegador", app.bridge_var, app._toggle_bridge)
+            self._check("Perguntar antes de baixar (em vez de começar logo)", app.confirm_var,
+                        lambda: setattr(st, "confirm_browser", app.confirm_var.get()))
+            self._setting_check("Mostrar a janela de progresso", "show_progress_window")
+            self._row("Tipos de ficheiro apanhados e sites ignorados", "Editar...", lambda: CaptureDialog(app))
+            self._row("Como instalar a extensão no Brave / Chrome / Edge", "Ver...", app._extension_help)
+            self._head("Área de transferência")
+            self._check("Detetar links copiados", app.clip_var,
+                        lambda: setattr(st, "watch_clipboard", app.clip_var.get()))
+        elif section == "Sistema":
+            self._head("Segundo plano", first=True)
+            self._check("Continuar em segundo plano ao fechar a janela", app.bg_var,
+                        lambda: setattr(st, "run_in_background", app.bg_var.get()))
+            ttk.Checkbutton(self.page, text="Iniciar com o computador (em segundo plano)",
+                            variable=app.autostart_var, command=app._toggle_autostart,
+                            state="normal" if autostart.supported() else "disabled").pack(anchor="w", pady=3)
+            self._setting_check("Ícone ao lado do relógio do Windows", "show_tray", self._tray)
+            self._setting_check("Avisar quando um download termina", "tray_notify")
+            self._head("Windows")
+            self._setting_check("Não deixar o PC adormecer durante downloads", "keep_awake", self._awake)
+            self._setting_check("Marcar ficheiros como vindos da internet (aviso do Windows ao abrir programas)",
+                                "mark_internet")
+        elif section == "Atualizações":
+            self._head("Flow Downloads", first=True)
+            self._setting_check("Procurar novas versões uma vez por dia", "check_updates")
+            self._row("Versão instalada: " + _version(), "Procurar agora...", app._check_updates)
+            self._head("Vídeos")
+            self._row("Suporte a vídeos (yt-dlp)", "Atualizar...", lambda: VideoDialog.install(app))
+
+    def _card(self, parent, value: str, name: str, sub: str) -> None:
+        c = self.app.colors
+        box = tk.Frame(parent, padx=14, pady=12, cursor="hand2")
+        box.pack(side="left", padx=(0, 12))
+        canvas = tk.Canvas(box, width=150, height=84, highlightthickness=0, cursor="hand2")
+        canvas.pack()
+        halves = {"claro": [THEMES["claro"]], "escuro": [THEMES["escuro"]],
+                  "auto": [THEMES["claro"], THEMES["escuro"]]}[value]
+        w = 150 // len(halves)
+        for i, look in enumerate(halves):
+            x0, x1 = i * w, (i + 1) * w
+            canvas.create_rectangle(x0, 0, x1, 84, fill=look["bg"], outline=look["border"])
+            canvas.create_rectangle(x0 + 8, 8, x1 - 8, 16, fill=look["border"], width=0)
+            for k in range(4):
+                canvas.create_rectangle(x0 + 8, 26 + k * 13, x0 + 8 + (x1 - x0 - 16) * (0.9 - k * 0.15),
+                                        31 + k * 13, fill=look["fg"], width=0)
+        label = tk.Label(box, text=name, font=self.app._bold_font, anchor="w")
+        label.pack(anchor="w", pady=(10, 0))
+        tk.Label(box, text=sub, anchor="w").pack(anchor="w")
+        self.cards[value] = (box, canvas, label)
+        for widget in (box, canvas, label, *box.winfo_children()):
+            widget.bind("<Button-1>", lambda _e, v=value: self._theme(v))
+        self.recolor()
+
+    def _theme(self, value: str) -> None:
+        self.app.theme_var.set(value)
+        self.app._choose_theme()  # recolours this window too (apply_theme -> recolor)
+
+    def _filters(self) -> None:
+        self.app.settings.filter_style = self.filter_var.get()
+        self.app.settings.save()
+        if self.app.settings.filter_style != "pills":
+            self.app._filter = (self.app.side.selection() or ("all",))[0]
+        self.app._layout()
+
+    def _tray(self) -> None:
+        svc = self.app.service
+        if self.app.settings.show_tray:
+            if hasattr(svc, "start_tray"):
+                svc.start_tray()
+        elif hasattr(svc, "stop_tray"):
+            svc.stop_tray()
+
+    def _awake(self) -> None:
+        self.app.manager.keep_awake = self.app.settings.keep_awake
+
+
+def _version() -> str:
+    from . import __version__
+    return __version__
+
+
 class App(tk.Tk):
     SIDEBAR = [("all", "Todos os downloads"), ("unfinished", "Incompletos"), ("finished", "Concluídos")]
+    SHORT = [("all", "Todos"), ("unfinished", "Incompletos"), ("finished", "Concluídos")]
 
     def __init__(self, service, mode: str = "main") -> None:
         """``mode``: "main" shows the window; "dialog" only shows the browser's dialog;
@@ -1052,6 +1430,8 @@ class App(tk.Tk):
         except tk.TclError:
             pass
 
+        if list(self.settings.columns) == OLD_DEFAULT_COLUMNS:
+            self.settings.columns = list(DEFAULT_COLUMNS)  # the details panel shows the rest
         self._build_menu()
         self._build_ui()
         self.apply_theme()
@@ -1096,7 +1476,7 @@ class App(tk.Tk):
                 "Continua em segundo plano",
                 "O Flow Downloads continua a funcionar em segundo plano (quase sem gastar memória ou CPU), "
                 "pronto para receber downloads do navegador.\n\n"
-                "Para fechar de vez: menu Tarefas → Sair.\n"
+                "Para fechar de vez: botão ⚙ → Sair (ou Ctrl+Q).\n"
                 "Para voltar a abrir: abra o Flow Downloads de novo ou use o botão da extensão.", parent=self)
         self._save_ui_settings()
         self.close_gui()
@@ -1127,146 +1507,145 @@ class App(tk.Tk):
 
     # ------------------------------------------------------------------- menu
     def _build_menu(self) -> None:
-        menubar = tk.Menu(self)
-        self.menus = [menubar]
+        """The ⚙ button's menu (no menu bar: the window stays clean). Options are in
+        Configurações (SettingsDialog); the variables live here, shared by both."""
+        self.menus = []
+        self.bridge_var = tk.BooleanVar(value=self.settings.browser_integration)
+        self.confirm_var = tk.BooleanVar(value=self.settings.confirm_browser)
+        self.clip_var = tk.BooleanVar(value=self.settings.watch_clipboard)
+        self.resume_var = tk.BooleanVar(value=self.settings.auto_resume)
+        self.bg_var = tk.BooleanVar(value=self.settings.run_in_background)
+        self.autostart_var = tk.BooleanVar(value=autostart.supported() and autostart.is_enabled())
+        self.theme_var = tk.StringVar(value=self._theme_choice())
 
-        tasks = tk.Menu(menubar, tearoff=False)
-        tasks.add_command(label="Adicionar URL...", accelerator="Ctrl+N", command=self.open_add_dialog)
-        tasks.add_command(label="Baixar vídeo (YouTube, Instagram...)...", command=self.open_video_dialog)
-        tasks.add_command(label="Capturar arquivos de um site...", command=lambda: GrabberDialog(self))
-        tasks.add_separator()
-        tasks.add_command(label="Fechar janela (continua em segundo plano)", accelerator="Ctrl+W",
-                          command=self.close_window)
-        tasks.add_command(label="Sair", accelerator="Ctrl+Q", command=self.quit_all)
-        menubar.add_cascade(label="Tarefas", menu=tasks)
-
-        dl = tk.Menu(menubar, tearoff=False)
-        dl.add_command(label="Retomar", command=self._resume)
-        dl.add_command(label="Pausar", command=self._pause)
+        gear = self.gear_menu = tk.Menu(self, tearoff=False)
+        gear.add_command(label="Configurações...", accelerator="Ctrl+,", command=self.open_settings)
+        looks = tk.Menu(gear, tearoff=False)
+        for value, label in (("auto", "Automático (como o Windows)"), ("claro", "Claro"), ("escuro", "Escuro")):
+            looks.add_radiobutton(label=label, value=value, variable=self.theme_var, command=self._choose_theme)
+        gear.add_cascade(label="Tema", menu=looks)
+        gear.add_separator()
+        gear.add_command(label="Adicionar URL...", accelerator="Ctrl+N", command=self.open_add_dialog)
+        gear.add_command(label="Baixar vídeo (YouTube, Instagram...)...", command=self.open_video_dialog)
+        gear.add_command(label="Capturar arquivos de um site...", command=lambda: GrabberDialog(self))
+        gear.add_separator()
+        dl = tk.Menu(gear, tearoff=False)
         dl.add_command(label="Retomar tudo", command=self.manager.resume_all)
         dl.add_command(label="Pausar tudo", command=self._pause_all)
         dl.add_separator()
-        dl.add_command(label="Limitador de velocidade...", command=self._global_limit)
-        dl.add_command(label="Agendador...", command=lambda: SchedulerDialog(self))
-        dl.add_separator()
         dl.add_command(label="Remover concluídos da lista", command=self._clear_finished)
-        menubar.add_cascade(label="Downloads", menu=dl)
-
-        view = tk.Menu(menubar, tearoff=False)
-        self.theme_var = tk.StringVar(value=getattr(self.settings, "theme", None)
-                                      or ("escuro" if self.settings.dark else "claro"))
-        looks = tk.Menu(view, tearoff=False)
-        self.menus.append(looks)
-        looks.add_radiobutton(label="Automático (como o Windows)", value="auto", variable=self.theme_var,
-                              command=self._choose_theme)
-        looks.add_separator()
-        for key in ("claro", "escuro", "meia-noite", "brasa", "menta"):
-            looks.add_radiobutton(label=THEMES[key]["label"], value=key, variable=self.theme_var,
-                                  command=self._choose_theme)
-        view.add_cascade(label="Aparência", menu=looks)
-        cols = tk.Menu(view, tearoff=False)
+        gear.add_cascade(label="Downloads", menu=dl)
+        cols = tk.Menu(gear, tearoff=False)
         self.col_vars = {}
         for key, (title, _w) in COLUMNS.items():
             var = tk.BooleanVar(value=key in self.settings.columns)
             self.col_vars[key] = var
             cols.add_checkbutton(label=title, variable=var, command=self._apply_columns,
                                  state="disabled" if key == "name" else "normal")
-        view.add_cascade(label="Colunas", menu=cols)
-        menubar.add_cascade(label="Exibir", menu=view)
-
-        opts = tk.Menu(menubar, tearoff=False)
-        self.bridge_var = tk.BooleanVar(value=self.settings.browser_integration)
-        self.confirm_var = tk.BooleanVar(value=self.settings.confirm_browser)
-        self.clip_var = tk.BooleanVar(value=self.settings.watch_clipboard)
-        opts.add_checkbutton(label="Integração com o navegador", variable=self.bridge_var,
-                             command=self._toggle_bridge)
-        opts.add_checkbutton(label="Confirmar downloads vindos do navegador", variable=self.confirm_var)
-        opts.add_checkbutton(label="Capturar links copiados", variable=self.clip_var)
-        self.resume_var = tk.BooleanVar(value=self.settings.auto_resume)
-        opts.add_checkbutton(label="Retomar downloads ao abrir o Flow Downloads", variable=self.resume_var)
-        self.bg_var = tk.BooleanVar(value=self.settings.run_in_background)
-        opts.add_checkbutton(label="Continuar em segundo plano ao fechar a janela", variable=self.bg_var,
-                             command=lambda: setattr(self.settings, "run_in_background", self.bg_var.get()))
-        self.autostart_var = tk.BooleanVar(value=autostart.supported() and autostart.is_enabled())
-        opts.add_checkbutton(label="Iniciar com o computador (em segundo plano)", variable=self.autostart_var,
-                             command=self._toggle_autostart,
-                             state="normal" if autostart.supported() else "disabled")
-        opts.add_command(label="Atualizar suporte a vídeos (yt-dlp)",
-                         command=lambda: VideoDialog.install(self))
-        opts.add_command(label="Downloads simultâneos...", command=self._max_active)
-        opts.add_command(label="Pasta padrão...", command=self._choose_dir)
-        opts.add_command(label="Categorias e pastas...", command=lambda: CategoriesDialog(self))
-        opts.add_command(label="Tipos apanhados do navegador...", command=lambda: CaptureDialog(self))
-        opts.add_command(label="Limites por site...", command=lambda: HostLimitsDialog(self))
-        opts.add_command(label="Ao terminar um download...", command=lambda: AfterDialog(self))
-        menubar.add_cascade(label="Opções", menu=opts)
-
-        helpm = tk.Menu(menubar, tearoff=False)
-        helpm.add_command(label="Procurar atualizações...", command=self._check_updates)
-        helpm.add_command(label="Como instalar a extensão do navegador", command=self._extension_help)
-        helpm.add_command(label="Sobre", command=lambda: messagebox.showinfo(
+        gear.add_cascade(label="Colunas", menu=cols)
+        gear.add_command(label="Limitador de velocidade...", command=self._global_limit)
+        gear.add_command(label="Agendador...", command=lambda: SchedulerDialog(self))
+        gear.add_command(label="Limites por site...", command=lambda: HostLimitsDialog(self))
+        gear.add_separator()
+        gear.add_command(label="Procurar atualizações...", command=self._check_updates)
+        gear.add_command(label="Como instalar a extensão do navegador", command=self._extension_help)
+        gear.add_command(label="Sobre", command=lambda: messagebox.showinfo(
             "Sobre", "Flow Downloads — gerenciador de downloads gratuito\n"
-                     "Downloads com várias conexões, retomada, agendador e integração com o navegador."))
-        menubar.add_cascade(label="Ajuda", menu=helpm)
-
-        self.menus += [tasks, dl, view, cols, opts, helpm]
-        self.config(menu=menubar)
+                     "Downloads com várias conexões, retomada, agendador e integração com o navegador.",
+            parent=self))
+        gear.add_separator()
+        gear.add_command(label="Fechar janela (continua em segundo plano)", accelerator="Ctrl+W",
+                         command=self.close_window)
+        gear.add_command(label="Sair", accelerator="Ctrl+Q", command=self.quit_all)
+        self.menus += [gear, looks, dl, cols]
         self.bind_all("<Control-n>", lambda _e: self.open_add_dialog())
+        self.bind("<Control-comma>", lambda _e: self.open_settings())
         self.bind("<Control-w>", lambda _e: self.close_window())
         self.bind("<Control-q>", lambda _e: self.quit_all())
 
+    def _theme_choice(self) -> str:
+        name = getattr(self.settings, "theme", None) or ("escuro" if self.settings.dark else "claro")
+        return name if name == "auto" else theme_name(self.settings)
+
+    def _show_gear(self) -> None:
+        b = self.gear_button
+        self.gear_menu.tk_popup(b.winfo_rootx() + b.winfo_width() - 260, b.winfo_rooty() + b.winfo_height() + 4)
+
+    def open_settings(self, section: str = "Aparência") -> "SettingsDialog":
+        for w in self.winfo_children():
+            if isinstance(w, SettingsDialog):
+                w.show(section)
+                w.lift()
+                return w
+        return SettingsDialog(self, section)
+
+    def _toggle_dark(self) -> None:
+        """◐: light <-> dark in one click."""
+        self.theme_var.set("claro" if theme_name(self.settings) in DARK_THEMES else "escuro")
+        self._choose_theme()
+
     # --------------------------------------------------------------------- UI
     def _build_ui(self) -> None:
-        toolbar = ttk.Frame(self, padding=(8, 6), style="Toolbar.TFrame")
-        toolbar.pack(fill="x")
-        for text, cmd in (
-            ("➕ Adicionar", self.open_add_dialog),
-            ("▶ Retomar", self._resume),
-            ("⏸ Pausar", self._pause),
-            ("⏹ Pausar tudo", self._pause_all),
-            ("🗑 Excluir", self._remove),
-            ("🚀 Limitador", self._global_limit),
-            ("⏰ Agendador", lambda: SchedulerDialog(self)),
-            ("🕸 Capturar site", lambda: GrabberDialog(self)),
-        ):
-            ttk.Button(toolbar, text=text, command=cmd, style="Tool.TButton").pack(side="left", padx=2)
-
-        urlbar = ttk.Frame(self, padding=(10, 4, 10, 6))
-        urlbar.pack(fill="x")
-        ttk.Label(urlbar, text="URL:").pack(side="left")
+        top = ttk.Frame(self, padding=(18, 12, 18, 12))
+        top.pack(fill="x")
+        ttk.Label(top, text="Flow Downloads", style="Title.TLabel").pack(side="left", padx=(0, 18))
         self.url_var = tk.StringVar()
-        entry = ttk.Entry(urlbar, textvariable=self.url_var)
-        entry.pack(side="left", fill="x", expand=True, padx=6)
+        entry = self.url_entry = ttk.Entry(top, textvariable=self.url_var)
+        entry.pack(side="left", fill="x", expand=True)
         entry.bind("<Return>", lambda _e: self._quick_add())
         entry.focus_set()
-        ttk.Button(urlbar, text="Colar", command=self._paste).pack(side="left")
-        ttk.Button(urlbar, text="⬇ Baixar", command=self._quick_add, style="Accent.TButton").pack(side="left", padx=(6, 0))
+        self.placeholder = tk.Label(entry, text="Cole um link para baixar…", anchor="w", cursor="xterm")
+        self.placeholder.bind("<Button-1>", lambda _e: entry.focus_set())
+        self.url_var.trace_add("write", lambda *_a: self._placeholder())
+        self._placeholder()
+        ttk.Button(top, text="Baixar", command=self._quick_add, style="Accent.TButton").pack(side="left", padx=(8, 8))
+        ttk.Button(top, text="+", width=3, command=self.open_add_dialog, style="Tool.TButton").pack(side="left")
+        ttk.Button(top, text="◐", width=3, command=self._toggle_dark, style="Tool.TButton").pack(side="left")
+        self.gear_button = ttk.Button(top, text="⚙", width=3, command=self._show_gear)
+        self.gear_button.pack(side="left", padx=(4, 0))
+        self.lines = [tk.Frame(self, height=1)]
+        self.lines[-1].pack(fill="x")
 
-        paned = ttk.PanedWindow(self, orient="horizontal")
-        paned.pack(fill="both", expand=True, padx=10)
+        self.status_var = tk.StringVar(value="Pronto")
+        ttk.Label(self, textvariable=self.status_var, anchor="w", style="Status.TLabel").pack(fill="x", side="bottom")
+        self.lines.append(tk.Frame(self, height=1))
+        self.lines[-1].pack(fill="x", side="bottom")
 
-        side = ttk.Frame(paned, style="Side.TFrame")
-        self.side = ttk.Treeview(side, show="tree", selectmode="browse", style="Side.Treeview")
+        body = self.body = ttk.Frame(self)
+        body.pack(fill="both", expand=True)
+        # Filters: a bar on the left, or "pills" above the list (Configurações → Aparência).
+        self.side_frame = ttk.Frame(body, style="Side.TFrame", padding=(8, 10, 0, 10))
+        self.side = ttk.Treeview(self.side_frame, show="tree", selectmode="browse", style="Side.Treeview")
         self.side.pack(fill="both", expand=True)
-        self.side.column("#0", width=210)
+        self.side.column("#0", width=200)
         for key, label in self.SIDEBAR:
             self.side.insert("", "end", iid=key, text=label, open=True)
         self._build_category_sidebar()
         self.side.selection_set("all")
         self.side.bind("<<TreeviewSelect>>", self._on_filter)
-        paned.add(side, weight=0)
+        self.side_line = tk.Frame(body, width=1)
+        self.lines.append(self.side_line)
 
-        table = ttk.Frame(paned)
+        self.details = DetailsPanel(self, body)
+        self.details_line = tk.Frame(body, width=1)
+        self.lines.append(self.details_line)
+
+        self.center = ttk.Frame(body, padding=(14, 6, 10, 0))
+        self.pills = ttk.Frame(self.center, padding=(0, 4, 0, 8))
+        self.pill_buttons: dict[str, ttk.Button] = {}
+        table = self.table_frame = ttk.Frame(self.center)
+        table.pack(side="bottom", fill="both", expand=True)
         self.tree = ttk.Treeview(table, columns=list(COLUMNS), show="headings", selectmode="extended")
         for key, (title, width) in COLUMNS.items():
-            self.tree.heading(key, text=title)
-            self.tree.column(key, width=width, anchor="w" if key in ("name", "url") else "center",
+            self.tree.heading(key, text=title.upper(), anchor="w")
+            self.tree.column(key, width=width, minwidth=120 if key == "name" else 50, anchor="w",
                              stretch=key == "name")
         scroll = ttk.Scrollbar(table, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscrollcommand=scroll.set)
         self.tree.pack(side="left", fill="both", expand=True)
         scroll.pack(side="right", fill="y")
-        paned.add(table, weight=1)
+        self.tree.bind("<<TreeviewSelect>>", lambda _e: self.details.show(self._shown_task()))
+        self._layout()
 
         self.tree.bind("<Double-1>", lambda _e: self._open_file())
         self.tree.bind("<Delete>", lambda _e: self._remove())
@@ -1282,13 +1661,95 @@ class App(tk.Tk):
         self.ctx.add_command(label="Limitar velocidade...", command=self._task_limit)
         self.ctx.add_command(label="Copiar endereço", command=self._copy_url)
         self.ctx.add_command(label="Verificar checksum...", command=self._verify_checksum)
+        self.ctx.add_command(label="Atualizar link...", command=self._update_link)
         self.ctx.add_separator()
         self.ctx.add_command(label="Excluir", command=self._remove)
         self.menus.append(self.ctx)
 
-        self.status_var = tk.StringVar(value="Pronto")
-        ttk.Label(self, textvariable=self.status_var, anchor="w", padding=(10, 4),
-                  style="Status.TLabel").pack(fill="x", side="bottom")
+    def _placeholder(self) -> None:
+        if self.url_var.get():
+            self.placeholder.place_forget()
+        else:
+            self.placeholder.place(x=9, rely=0.5, anchor="w")
+
+    def _layout(self) -> None:
+        """Place the filters (bar / pills) and the details panel as the settings say."""
+        for w in (self.side_frame, self.side_line, self.details, self.details_line, self.center, self.pills):
+            w.pack_forget()
+        if self.settings.filter_style != "pills":
+            self.side_frame.pack(side="left", fill="y")
+            self.side_line.pack(side="left", fill="y")
+        if self.settings.show_details:
+            self.details.pack(side="right", fill="y")
+            self.details_line.pack(side="right", fill="y")
+        self.center.pack(side="left", fill="both", expand=True)
+        if self.settings.filter_style == "pills":
+            self._build_pills()
+            self.pills.pack(side="top", fill="x")
+        self.details.show(self._shown_task())
+
+    def _build_pills(self) -> None:
+        for b in self.pill_buttons.values():
+            b.destroy()
+        self.pill_buttons = {}
+        keys = [k for k, _l in self.SIDEBAR] + self._pill_categories()
+        self._pill_keys = keys
+        for key in keys:
+            b = ttk.Button(self.pills, style="Pill.TButton", width=0, command=lambda k=key: self._pick_filter(k))
+            b.pack(side="left", padx=(0, 6))
+            self.pill_buttons[key] = b
+        self._update_pills()
+
+    def _pill_categories(self) -> list:
+        """Categories that have downloads (plus the chosen one): the pills stay on one line."""
+        used = {self._category(t) for t in self.manager.tasks}
+        names = [r["name"] for r in self.settings.category_rules()] + [OTHER]
+        return [f"cat:{n}" for n in names if n in used or self._filter == f"cat:{n}"]
+
+    def _pick_filter(self, key: str) -> None:
+        if self.side.exists(key):
+            self.side.selection_set(key)  # same path as the bar: _on_filter
+        self._filter = key
+        self._update_pills()
+        self._refresh(schedule=False)
+
+    def _update_pills(self, counts: dict | None = None) -> None:
+        labels = dict(self.SHORT)
+        for key, b in self.pill_buttons.items():
+            text = labels.get(key) or key[4:]
+            if counts and key in counts:
+                text += f"  {counts[key]}"
+            b.configure(text=text, style="PillOn.TButton" if key == self._filter else "Pill.TButton")
+
+    def _shown_task(self):
+        sel = self.tree.selection()
+        if not sel:
+            return None
+        return next((t for t in self.manager.tasks if t.id == sel[0]), None)
+
+    def _update_link(self) -> None:
+        """A link that expired: give the download a fresh one (it continues where it stopped
+        when the file is the same; the engine starts over if the server sends another version)."""
+        tasks = [t for t in self._selected() if getattr(t, "kind", "") != "video"]
+        if not tasks:
+            return
+        t = tasks[0]
+        url = simpledialog.askstring(
+            "Atualizar link", "Volte à página do download, copie o link de novo e cole-o aqui:",
+            initialvalue="", parent=self)
+        url = (url or "").strip()
+        if not url:
+            return
+        if not url.lower().startswith(("http://", "https://", "ftp://")):
+            messagebox.showwarning("URL inválida", "Informe um link que comece com http://, https:// ou ftp://",
+                                   parent=self)
+            return
+        t.pause()
+        t.url, t._final_url = url, None
+        t.error = None
+        self.manager.save()
+        self.manager.resume(t)
+        self.status_var.set(f"Link atualizado: {t.filename or url}")
 
     def apply_theme(self) -> None:
         c = self.colors = THEMES[theme_name(self.settings)]
@@ -1320,7 +1781,7 @@ class App(tk.Tk):
                         bordercolor=c["accent"], lightcolor=c["accent"], darkcolor=c["accent"], font=bold)
         style.map("Accent.TButton", background=[("pressed", c["accent"]), ("active", c["accent"])],
                   foreground=[("active", c["accentfg"])])
-        style.configure("Tool.TButton", padding=(10, 7), background=c["bg"], borderwidth=0,
+        style.configure("Tool.TButton", padding=(8, 5), background=c["bg"], borderwidth=0,
                         lightcolor=c["bg"], darkcolor=c["bg"], bordercolor=c["bg"])
         style.map("Tool.TButton", background=[("active", c["hover"]), ("pressed", c["sel"])])
         style.configure("Toolbar.TFrame", background=c["bg"])
@@ -1348,11 +1809,39 @@ class App(tk.Tk):
         style.map("Side.Treeview", background=[("selected", c["sel"])], foreground=[("selected", c["selfg"])])
         style.configure("Side.TFrame", background=c["sidebar"])
         style.configure("TPanedwindow", background=c["border"])
-        style.configure("Status.TLabel", background=c["sidebar"], foreground=c["muted"], padding=(12, 5))
+        style.configure("Status.TLabel", background=c["bg"], foreground=c["muted"], padding=(18, 6))
         style.configure("TScrollbar", background=c["head"], troughcolor=c["field"], bordercolor=c["field"],
                         lightcolor=c["head"], darkcolor=c["head"], arrowcolor=c["muted"], gripcount=0)
-        style.configure("TProgressbar", background=c["accent"], troughcolor=c["head"], bordercolor=c["head"],
+        style.configure("TProgressbar", background=c["accent"], troughcolor=c["trough"], bordercolor=c["trough"],
                         lightcolor=c["accent"], darkcolor=c["accent"])
+        style.configure("Big.Horizontal.TProgressbar", background=c["accent"], troughcolor=c["trough"],
+                        bordercolor=c["trough"], lightcolor=c["accent"], darkcolor=c["accent"], thickness=8)
+        title = tkfont.nametofont("TkDefaultFont").copy()
+        title.configure(size=15, weight="bold")
+        name = tkfont.nametofont("TkDefaultFont").copy()
+        name.configure(size=12, weight="bold")
+        small = tkfont.nametofont("TkDefaultFont").copy()
+        small.configure(size=8, weight="bold")
+        self._fonts = (title, name, small)
+        style.configure("Title.TLabel", font=title)
+        style.configure("Treeview.Heading", font=small)  # small capitals: the titles fit
+        style.configure("Muted.TLabel", foreground=c["muted"])
+        style.configure("Pill.TButton", padding=(9, 3), background=c["bg"], foreground=c["muted"],
+                        bordercolor=c["border"], lightcolor=c["bg"], darkcolor=c["bg"])
+        style.map("Pill.TButton", background=[("active", c["hover"])], foreground=[("active", c["fg"])])
+        style.configure("PillOn.TButton", padding=(9, 3), background=c["accent"], foreground=c["accentfg"],
+                        bordercolor=c["accent"], lightcolor=c["accent"], darkcolor=c["accent"])
+        style.map("PillOn.TButton", background=[("active", c["accent"])], foreground=[("active", c["accentfg"])])
+        # Details panel: its own tone (like the filter bar)
+        style.configure("Soft.TFrame", background=c["sidebar"])
+        style.configure("Soft.TLabel", background=c["sidebar"], foreground=c["fg"])
+        style.configure("SoftMuted.TLabel", background=c["sidebar"], foreground=c["muted"])
+        style.configure("SoftSmall.TLabel", background=c["sidebar"], foreground=c["muted"], font=small)
+        style.configure("SoftName.TLabel", background=c["sidebar"], foreground=c["fg"], font=name)
+        style.configure("Soft.TButton", padding=(12, 5), background=c["sidebar"], bordercolor=c["border"],
+                        lightcolor=c["sidebar"], darkcolor=c["sidebar"])
+        style.map("Soft.TButton", background=[("active", c["hover"]), ("pressed", c["sel"])])
+        style.configure("Card.TFrame", background=c["sidebar"])
         style.configure("TLabelframe", background=c["bg"], bordercolor=c["border"])
         style.configure("TLabelframe.Label", background=c["bg"], foreground=c["muted"])
         style.configure("TNotebook", background=c["bg"], bordercolor=c["border"])
@@ -1377,14 +1866,22 @@ class App(tk.Tk):
                 pass
         if getattr(self, "side", None) is not None:
             self.side.configure(style="Side.Treeview")
+        if getattr(self, "placeholder", None) is not None:
+            self.placeholder.configure(background=c["field"], foreground=c["muted"])
+        for line in getattr(self, "lines", []):
+            line.configure(background=c["border"])
+        if getattr(self, "details", None) is not None:
+            self.details.recolor()
         self.tree.tag_configure(Status.COMPLETED, foreground=c["done"])
-        self.tree.tag_configure(Status.ERROR, foreground=c["error"])
+        self.tree.tag_configure(Status.ERROR, foreground=c["error"], font=self._bold_font)
         self.tree.tag_configure(Status.PAUSED, foreground=c["paused"])
         self.tree.tag_configure("stripe", background=c["stripe"])
         for w in self.winfo_children():  # open dialogs follow the new look (plain Tk widgets)
             if isinstance(w, tk.Toplevel):
                 try:
                     w.configure(background=c["bg"])
+                    if hasattr(w, "recolor"):
+                        w.recolor()
                 except tk.TclError:
                     pass
 
@@ -1620,6 +2117,7 @@ class App(tk.Tk):
     def _on_filter(self, _event=None) -> None:
         sel = self.side.selection()
         self._filter = sel[0] if sel else "all"
+        self._update_pills()
         self._refresh(schedule=False)
 
     def _choose_theme(self) -> None:
@@ -1763,6 +2261,8 @@ class App(tk.Tk):
         for rule in self.settings.category_rules():
             self.side.insert("all", "end", iid=f"cat:{rule['name']}", text=rule["name"])
         self.side.insert("all", "end", iid=f"cat:{OTHER}", text=OTHER)
+        if getattr(self, "pill_buttons", None) and self.settings.filter_style == "pills":
+            self._build_pills()
 
     def _category(self, t) -> str:
         if getattr(t, "kind", "") == "video":
@@ -1853,6 +2353,15 @@ class App(tk.Tk):
                   "finished": sum(t.status == Status.COMPLETED for t in self.manager.tasks)}
         for key, label in self.SIDEBAR:
             self.side.item(key, text=f"{label} ({counts[key]})")
+        if self.settings.filter_style == "pills":
+            if [k for k, _l in self.SIDEBAR] + self._pill_categories() != getattr(self, "_pill_keys", None):
+                self._build_pills()
+            self._update_pills(counts)
+        if self.details.task is not None or self.tree.selection():
+            if self.details.task is not self._shown_task():
+                self.details.show(self._shown_task())
+            else:
+                self.details.refresh()
 
         if schedule:
             if active:

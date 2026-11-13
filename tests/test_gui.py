@@ -267,7 +267,7 @@ class GuiTests(unittest.TestCase):
     def test_looks_and_columns(self):
         app = self.open_app()
         style = self.gui.ttk.Style(app)
-        for key in ("claro", "escuro", "meia-noite", "brasa", "menta"):
+        for key in ("claro", "escuro"):
             app.theme_var.set(key)
             app._choose_theme()
             look = self.gui.THEMES[key]
@@ -276,7 +276,17 @@ class GuiTests(unittest.TestCase):
             self.assertEqual(style.lookup("Side.Treeview", "background"), look["sidebar"], key)
             self.assertEqual(self.svc.settings.theme, key)
             self.assertEqual(self.svc.settings.dark, key in self.gui.DARK_THEMES)
-        self.assertIn('"theme": "menta"', read_text(self.svc.settings.path))
+        self.assertIn('"theme": "escuro"', read_text(self.svc.settings.path))
+        # black & white only: no colour in any look
+        for look in (self.gui.THEMES["claro"], self.gui.THEMES["escuro"]):
+            for value in look.values():
+                if value.startswith("#"):
+                    self.assertTrue(value[1:3] == value[3:5] == value[5:7], value)
+        # ◐ switches light <-> dark
+        app._toggle_dark()
+        self.assertEqual(self.svc.settings.theme, "claro")
+        app._toggle_dark()
+        self.assertEqual(self.svc.settings.theme, "escuro")
         with mock.patch.object(self.gui, "windows_prefers_dark", return_value=True):
             app.theme_var.set("auto")
             app._choose_theme()
@@ -284,6 +294,10 @@ class GuiTests(unittest.TestCase):
         self.svc.settings.theme = None  # settings from an older version: "dark" decides
         self.svc.settings.dark = True
         self.assertEqual(self.gui.theme_name(self.svc.settings), "escuro")
+        for old, new in (("meia-noite", "escuro"), ("brasa", "escuro"), ("menta", "claro")):  # looks of 0.8.0
+            self.svc.settings.theme = old
+            self.assertEqual(self.gui.theme_name(self.svc.settings), new)
+        self.svc.settings.theme = "auto"
         app.col_vars["speed"].set(False)
         app.col_vars["url"].set(True)
         app._apply_columns()
@@ -291,6 +305,112 @@ class GuiTests(unittest.TestCase):
         self.assertNotIn("speed", shown)
         self.assertIn("url", shown)
         self.assertEqual(self.svc.settings.columns, shown)
+
+    def test_gear_menu_and_settings_window(self):
+        app = self.open_app()
+        labels = [app.gear_menu.entrycget(i, "label") for i in range(app.gear_menu.index("end") + 1)
+                  if app.gear_menu.type(i) not in ("separator", "tearoff")]
+        for wanted in ("Configurações...", "Tema", "Adicionar URL...", "Agendador...", "Sair"):
+            self.assertIn(wanted, labels)
+        self.assertEqual(str(app["menu"]), "")  # no menu bar any more
+        app.event_generate("<Control-comma>")
+        pump(app, 0.3)
+        win = dialogs(app, self.gui.SettingsDialog)
+        self.assertEqual(len(win), 1)
+        win = win[0]
+        self.assertIs(app.open_settings("Sistema"), win)  # one window only
+        for section in win.SECTIONS:  # every page builds
+            win.show(section)
+            pump(app, 0.1)
+            self.assertTrue(win.page.winfo_children(), section)
+        win.show("Aparência")
+        pump(app, 0.1)
+        win._theme("escuro")
+        self.assertEqual(self.svc.settings.theme, "escuro")
+        self.assertEqual(str(win.cards["escuro"][0]["highlightthickness"]), "2")
+        win._theme("claro")
+        win.filter_var.set("pills")
+        win._filters()
+        pump(app, 0.2)
+        self.assertEqual(self.svc.settings.filter_style, "pills")
+        self.assertFalse(app.side_frame.winfo_ismapped())
+        self.assertIn("all", app.pill_buttons)
+        self.assertNotIn("cat:Vídeos", app.pill_buttons)  # only categories in use
+        win.filter_var.set("side")
+        win._filters()
+        pump(app, 0.2)
+        self.assertTrue(app.side_frame.winfo_ismapped())
+        win.destroy()
+
+    def test_pills_filter(self):
+        self.svc.settings.filter_style = "pills"
+        try:
+            app = self.open_app()
+            for name in ("filme.mp4", "contrato.pdf"):
+                app.add_download(f"{self.base}/{name}", self.dl, 2)
+            tasks = self.svc.manager.tasks
+            self.assertTrue(pump(app, 30, lambda: all(t.status == "Concluído" for t in tasks)))
+            app.pill_buttons["cat:Vídeos"].invoke()
+            pump(app, 0.3)
+            shown = [app.tree.item(i)["values"][0] for i in app.tree.get_children()]
+            self.assertEqual(shown, ["filme.mp4"])
+            self.assertEqual(str(app.pill_buttons["cat:Vídeos"]["style"]), "PillOn.TButton")
+            app.pill_buttons["all"].invoke()
+            pump(app, 0.6)
+            self.assertEqual(len(app.tree.get_children()), 2)
+            self.assertIn("2", app.pill_buttons["all"]["text"])
+        finally:
+            self.svc.settings.filter_style = "side"
+
+    def test_details_panel(self):
+        Handler.delay = 0.2
+        app = self.open_app()
+        app.add_download(self.base + "/detalhe.bin", self.dl, 4)
+        task = self.svc.manager.tasks[0]
+        self.wait_status(task, "Baixando", 10)
+        pump(app, 1)
+        self.select(task)
+        pump(app, 0.6)
+        panel = app.details
+        self.assertIs(panel.task, task)
+        self.assertEqual(panel.name["text"], "detalhe.bin")
+        self.assertEqual(str(panel.primary["text"]), "॥ Pausar")
+        self.assertTrue(panel.map_box.winfo_ismapped())
+        fills = [panel.canvas.itemcget(i, "fill") for i in panel.cells]
+        self.assertIn(app.colors["accent"], fills + [app.colors["partial"]])
+        panel.primary.invoke()  # pause from the panel
+        self.wait_status(task, "Pausado", 10)
+        pump(app, 0.6)
+        self.assertEqual(str(panel.primary["text"]), "▶ Retomar")
+        self.assertIn("continuar", panel.rows[2][1]["text"])
+        Handler.delay = 0.0
+        panel.primary.invoke()
+        self.wait_status(task, "Concluído")
+        pump(app, 3, lambda: str(panel.primary["text"]) == "Abrir")
+        self.assertEqual(str(panel.primary["text"]), "Abrir")
+        self.assertFalse(panel.map_box.winfo_ismapped())
+        task.status, task.error = "Erro", "HTTP 403: Forbidden"  # how an expired link looks
+        pump(app, 3, lambda: str(panel.second["text"]) == "Atualizar link")
+        self.assertEqual(str(panel.second["text"]), "Atualizar link")
+        self.assertIn("expirado", panel.rows[2][1]["text"])
+        task.status, task.error = "Concluído", None
+        # the panel can be hidden
+        self.svc.settings.show_details = False
+        app._layout()
+        pump(app, 0.2)
+        self.assertFalse(panel.winfo_ismapped())
+        self.svc.settings.show_details = True
+        app._layout()
+
+    def test_update_link(self):
+        app = self.open_app()
+        app.add_download(self.base + "/expirou.bin", self.dl, 2, start=False)
+        task = self.svc.manager.tasks[0]
+        self.select(task)
+        with mock.patch.object(self.gui.simpledialog, "askstring", return_value=self.base + "/novo.bin"):
+            app._update_link()
+        self.assertEqual(task.url, self.base + "/novo.bin")
+        self.wait_status(task, "Concluído")
 
     def test_copy_url_and_open_folder(self):
         app = self.open_app()

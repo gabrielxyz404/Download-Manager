@@ -370,7 +370,7 @@ class Service:
     # ------------------------------------------------------------- updates
     def check_updates_later(self, delay: float = 90) -> None:
         """Installed app: at most once a day, look for a new version in the background and tell
-        the user next to the clock (installing is their choice: Ajuda → Procurar atualizações)."""
+        the user next to the clock (installing is their choice: ⚙ → Procurar atualizações)."""
         from .paths import FROZEN
         if not (FROZEN and getattr(self.settings, "check_updates", True)):
             return
@@ -384,7 +384,7 @@ class Service:
             self.settings.save()
             if update is not None and self.tray is not None:
                 self.tray.notify(f"Flow Downloads {update.version} disponível",
-                                 "Abra o Flow Downloads → Ajuda → Procurar atualizações.")
+                                 "Abra o Flow Downloads → ⚙ → Procurar atualizações.")
         timer = threading.Timer(delay, work)
         timer.daemon = True
         timer.start()
