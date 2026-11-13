@@ -53,12 +53,41 @@ def host_matches(pattern: str, host: str) -> bool:
     return host == pattern or host.endswith("." + pattern)
 
 
-def should_capture(settings, url: str, final_url: str = "", filename: str = "", mime: str = "",
-                   page: str = "") -> bool:
-    hosts = {(urllib.parse.urlsplit(u).hostname or "").lower() for u in (url, final_url, page) if u}
+def skipped_site(settings, *urls: str) -> str | None:
+    """The entry of the "never from these sites" list that covers one of these addresses."""
+    hosts = {(urllib.parse.urlsplit(u).hostname or "").lower() for u in urls if u}
     for pattern in getattr(settings, "capture_skip_sites", []):
         if any(host_matches(pattern, h) for h in hosts if h):
+            return pattern
+    return None
+
+
+def set_site_skipped(settings, host: str, skipped: bool) -> bool:
+    """Add / remove a site from the "never from these sites" list (www. is ignored, so the
+    whole site counts). Returns True if the list changed."""
+    host = (host or "").strip().lower().rstrip(".")
+    if host.startswith("www."):
+        host = host[4:]
+    if not host or "/" in host or " " in host:
+        return False
+    sites = list(getattr(settings, "capture_skip_sites", []))
+    if skipped:
+        if skipped_site(settings, "https://" + host + "/"):
             return False
+        sites.append(host)
+    else:
+        kept = [p for p in sites if not host_matches(p, host) and not host_matches(p, "www." + host)]
+        if len(kept) == len(sites):
+            return False
+        sites = kept
+    settings.capture_skip_sites = sites
+    return True
+
+
+def should_capture(settings, url: str, final_url: str = "", filename: str = "", mime: str = "",
+                   page: str = "") -> bool:
+    if skipped_site(settings, url, final_url, page):
+        return False
     if getattr(settings, "capture_all_types", False):
         return True
     types = {t.lower().lstrip(".") for t in getattr(settings, "capture_types", DEFAULT_TYPES)}

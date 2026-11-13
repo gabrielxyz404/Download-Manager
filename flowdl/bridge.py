@@ -123,7 +123,7 @@ def handle_request(method: str, path: str, headers: dict, body: bytes,
         from . import __version__
         return 200, {"app": "flowdl", "ok": True, "version": __version__,
                      "extension_ok": extension_ok(headers), "min_extension": MIN_EXTENSION_VERSION}
-    if api is not None and (path.startswith("/request/") or path in ("/control", "/mirror-done", "/check")):
+    if api is not None and (path.startswith("/request/") or path in ("/control", "/mirror-done", "/check", "/site")):
         try:
             data = json.loads(body or b"{}") if method == "POST" else {}
         except ValueError:

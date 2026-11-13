@@ -41,7 +41,8 @@ const cdnSeen = [];
 const appMethods = [];
 let browserUA = "", browserCH = "", onceUsed = false, pageUsed = false, slowStartUsed = false;
 const onceSeen = [], uaSeen = [];
-const links = ["relatorio", "lento", "cancelar", "confirmado", "naoquero", "menu", "off", "fechado"]
+const links = ["relatorio", "lento", "cancelar", "confirmado", "naoquero", "menu", "off", "fechado",
+               "altclique", "proximo", "ignorado"]
   .map((n) => `<a id="${n}" href="/${n === "lento" || n === "cancelar" ? "slow" : "files"}/${n}.zip">${n}</a>`).join(" ");
 const site = http.createServer((req, res) => {
   if (req.url === "/") { // the browser's identity
@@ -50,7 +51,7 @@ const site = http.createServer((req, res) => {
   }
   if (req.url === "/") {
     res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Set-Cookie": "sessao=abc123; Path=/" });
-    return res.end(links + ' <a id="cdn" href="/redir/cdn.zip">cdn</a> <a id="notas" href="/files/notas.txt">notas</a> <a id="semnome" href="/get?id=7">semnome</a> <a id="acento" href="/files/Atualiza%E7%E3o_FC27.zip">acento</a> <a id="umavez" href="/once/mod_umavez.zip">umavez</a> <a id="cloudflare" href="/ua/protegido.zip">cloudflare</a> <a id="pagina" href="/page/patch.zip">pagina</a> <a id="desisto" href="/slowstart/desisto.zip">desisto</a>' +
+    return res.end(links + ' <a id="cdn" href="/redir/cdn.zip">cdn</a> <a id="notas" href="/files/notas.txt">notas</a> <a id="semnome" href="/get?id=7">semnome</a> <a id="relatorio2" href="/files/relatorio2.zip">relatorio2</a> <a id="acento" href="/files/Atualiza%E7%E3o_FC27.zip">acento</a> <a id="umavez" href="/once/mod_umavez.zip">umavez</a> <a id="cloudflare" href="/ua/protegido.zip">cloudflare</a> <a id="pagina" href="/page/patch.zip">pagina</a> <a id="desisto" href="/slowstart/desisto.zip">desisto</a>' +
                    '<form id="formpost" method="post" action="/files/formulario.zip"><button id="postbtn">post</button></form>');
   }
   if (req.url === "/setcdn") { // the file server's own login cookie (a different site: localhost)
@@ -423,6 +424,41 @@ const sameAsBig = (file) => fs.existsSync(file) && fs.readFileSync(file).equals(
         pausedSeen && desisto.every((d) => d.state !== "complete" && d.state !== "in_progress") &&
         !appTasks().some((t) => (t.url || "").includes("/slowstart/")),
         `pausado=${pausedSeen} ${desisto.map((d) => d.state).join(",")} app=${appTasks().filter((t) => (t.url || "").includes("/slowstart/")).length}`);
+  await page.goto(SITE + "/");
+
+  // 3j. Alt+click: the browser keeps this one.
+  const keptByBrowser = async (name) => {
+    let d = null;
+    await waitFor(async () => { d = (await all()).find((x) => x.url.endsWith("/" + name)); return d && d.state === "complete"; }, 15000);
+    return !!d && d.state === "complete" && sameAsBig(d.filename) && !appTasks().some((t) => (t.url || "").endsWith("/" + name));
+  };
+  const lastLine = async () => { const q = await popup(); const t = await q.textContent("#last"); await q.close(); return t; };
+  await page.click("#altclique", { modifiers: ["Alt"] });
+  check("Alt+clique: o navegador baixa sozinho", await keptByBrowser("altclique.zip"));
+  check("…e o popup diz porquê", /altclique\.zip.*Alt\+clique/.test(await lastLine()));
+
+  // 3k. The popup's "next download stays in the browser".
+  pp = await popup();
+  await pp.click("#next");
+  await pp.close();
+  await page.click("#proximo");
+  check("Botão \"Próximo download fica no navegador\"", await keptByBrowser("proximo.zip"));
+  ids = (await byUrl()).map((d) => d.id);
+  await page.click("#relatorio2");
+  check("…e só vale para um download (o seguinte volta à app)", !!(await newest(ids)));
+  await page.goto(SITE + "/");
+
+  // 3l. "Capture on this site" off: this site's downloads stay with the browser; on again: back to the app.
+  pp = await popup();
+  const off = await pp.evaluate(() => new Promise((r) => chrome.runtime.sendMessage({ type: "site", host: "127.0.0.1", skip: true }, r)));
+  await pp.close();
+  await page.click("#ignorado");
+  check("Site desligado no menu: fica com o navegador", off.skipped === true && await keptByBrowser("ignorado.zip"));
+  check("…com o motivo no popup", /ignorado\.zip.*site ignorado/.test(await lastLine()));
+  pp = await popup();
+  const on = await pp.evaluate(() => new Promise((r) => chrome.runtime.sendMessage({ type: "site", host: "127.0.0.1", skip: false }, r)));
+  await pp.close();
+  check("…e volta a ser capturado quando se liga de novo", on.skipped === false);
   await page.goto(SITE + "/");
 
   // 3c. A link that redirects to a signed address on another site with its own login cookie.

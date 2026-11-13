@@ -31,5 +31,17 @@
     "48": "icons/icon48.png",
     "128": "icons/icon128.png"
   },
-  "minimum_chrome_version": "110"
+  "minimum_chrome_version": "110",
+  "content_scripts": [
+    {
+      "matches": [
+        "<all_urls>"
+      ],
+      "js": [
+        "bypass.js"
+      ],
+      "run_at": "document_start",
+      "all_frames": true
+    }
+  ]
 }

@@ -61,6 +61,25 @@ class CaptureRuleTests(unittest.TestCase):
         self.assertFalse(host_matches("banco.pt", "meubanco.pt"))  # not a sub-domain
 
 
+class SiteSwitchTests(unittest.TestCase):
+    def test_turn_a_site_off_and_on(self):
+        from flowdl.capture import set_site_skipped, skipped_site
+
+        class St(S):
+            capture_skip_sites: list = []
+        st = St()
+        self.assertTrue(set_site_skipped(st, "www.exemplo.com.br", True))
+        self.assertEqual(st.capture_skip_sites, ["exemplo.com.br"])  # the whole site, www. or not
+        self.assertTrue(skipped_site(st, "https://cdn.exemplo.com.br/a.zip"))
+        self.assertFalse(should_capture(st, "https://www.exemplo.com.br/a.zip"))
+        self.assertFalse(set_site_skipped(st, "exemplo.com.br", True))  # already there
+        self.assertTrue(set_site_skipped(st, "exemplo.com.br", False))
+        self.assertEqual(st.capture_skip_sites, [])
+        self.assertTrue(should_capture(st, "https://www.exemplo.com.br/a.zip"))
+        for bad in ("", "a b", "x.com/caminho"):
+            self.assertFalse(set_site_skipped(st, bad, True))
+
+
 class CheckEndpointTests(unittest.TestCase):
     def test_extension_asks_the_app(self):
         tmp = tempfile.mkdtemp()

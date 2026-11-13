@@ -76,6 +76,29 @@ async function postJson(path, payload, tries = 4) {
   return null;
 }
 
+// Downloads the user wants the browser to keep: Alt+click on a link (bypass.js), or the popup's
+// "next download stays in the browser". Kept in session storage: the worker may sleep meanwhile.
+const BYPASS_MS = 15000;
+
+async function bypassed(urls) {
+  const { bypass = {}, bypassNext = 0 } = await chrome.storage.session.get(["bypass", "bypassNext"]);
+  const now = Date.now();
+  if (bypassNext > now) {
+    await chrome.storage.session.set({ bypassNext: 0 }); // only the next one
+    return "o próximo download ficou no navegador (pedido no menu)";
+  }
+  if (urls.some((u) => u && bypass[u] > now - BYPASS_MS)) return "Alt+clique: o navegador baixa sozinho";
+  return null;
+}
+
+async function rememberBypass(url) {
+  const { bypass = {} } = await chrome.storage.session.get("bypass");
+  const now = Date.now();
+  for (const k of Object.keys(bypass)) if (bypass[k] < now - BYPASS_MS) delete bypass[k];
+  bypass[url] = now;
+  await chrome.storage.session.set({ bypass });
+}
+
 // What happened to the last download the extension saw, shown in the popup: when something
 // does not work on a user's computer, this says where it stopped.
 async function note(name, text) {
@@ -317,6 +340,16 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         } catch {}
       }
       sendResponse({ enabled: await isEnabled(), app, extensionOk });
+    } else if (msg.type === "bypass") { // Alt+click on a link (bypass.js)
+      await rememberBypass(msg.url);
+      sendResponse({ ok: true });
+    } else if (msg.type === "bypassNext") { // popup: the next download stays in the browser
+      await chrome.storage.session.set({ bypassNext: msg.on ? Date.now() + 120000 : 0 });
+      sendResponse({ ok: true });
+    } else if (msg.type === "site") { // popup: capture on this site, or not
+      const payload = { host: msg.host };
+      if (typeof msg.skip === "boolean") payload.skip = msg.skip;
+      sendResponse((await postJson("/site", payload, 2)) || { ok: false });
     } else if (msg.type === "toggle") {
       await chrome.storage.local.set({ enabled: !!msg.enabled });
       await updateBadge();
@@ -361,6 +394,8 @@ async function handleDownload(item) {
     return note(label, "deixado ao navegador: o ficheiro foi criado pela própria página (" + finalUrl.split(":")[0] + ":)");
   }
   if (passThrough.delete(url) || passThrough.delete(finalUrl)) return;
+  const bypass = await bypassed([url, finalUrl]);
+  if (bypass) return note(label, "deixado ao navegador: " + bypass);
   const watched = seenFor(url) || seenFor(finalUrl);
   if (watched && watched.method !== "GET") {
     return note(label, "deixado ao navegador: veio de um formulário (" + watched.method + ")");
@@ -374,7 +409,8 @@ async function handleDownload(item) {
     mime: item.mime || "", referrer: item.referrer || "",
   }, 2);
   if (verdict && verdict.capture === false) {
-    return note(label, `deixado ao navegador: tipo fora da lista da app (${item.mime || "tipo desconhecido"}) ou site ignorado`);
+    const why = verdict.reason || "tipo fora da lista da app ou site ignorado";
+    return note(label, `deixado ao navegador: ${why}` + (why.startsWith("tipo") ? ` (${item.mime || "tipo desconhecido"})` : ""));
   }
   const checkProblem = verdict ? "" : lastFailure;
 

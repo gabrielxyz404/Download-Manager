@@ -36,6 +36,9 @@
                      font-weight: 500; margin-top: 0; }
   #openBox { padding: 0 14px 12px; }
   #last { padding: 0 14px 10px; font-size: 11px; color: var(--muted); word-break: break-word; }
+  .row.small { border-top: 1px solid var(--border); padding: 8px 14px; }
+  .row.small button { margin: 0; }
+  .hint { padding: 0 14px 10px; font-size: 11px; color: var(--muted); }
   label.row { display: flex; align-items: center; gap: 8px; cursor: pointer;
               border-top: 1px solid var(--border); padding: 10px 14px; }
 </style>
@@ -64,6 +67,14 @@
     <input type="checkbox" id="capture">
     Capturar downloads do navegador
   </label>
+  <label class="row" id="siteRow" hidden>
+    <input type="checkbox" id="site">
+    <span>Capturar neste site: <b id="siteName"></b></span>
+  </label>
+  <div class="row small">
+    <button class="secondary" id="next">Próximo download fica no navegador</button>
+  </div>
+  <div class="hint">Dica: segure <b>Alt</b> ao clicar num link para o navegador baixar sozinho.</div>
 
   <script src="popup.js"></script>
 </body>

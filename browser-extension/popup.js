@@ -57,5 +57,31 @@ async function lastDownload() {
   $("last").textContent = `Último download (${when}): ${lastEvent.name} — ${lastEvent.text}`;
 }
 
+// "Capture on this site": the site of the open tab, added to / removed from the app's skip list.
+async function siteSwitch() {
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  let host = "";
+  try { host = new URL(tab && tab.url).hostname.replace(/^www\./, ""); } catch {}
+  if (!host || !tab.url.startsWith("http")) return;
+  const res = await send({ type: "site", host });
+  if (!res.ok) return;
+  $("siteName").textContent = host;
+  $("site").checked = !res.skipped;
+  $("siteRow").hidden = false;
+  $("site").addEventListener("change", async (e) => {
+    const r = await send({ type: "site", host, skip: !e.target.checked });
+    if (r.ok) {
+      $("site").checked = !r.skipped;
+      show(r.skipped ? `Os downloads de ${host} ficam com o navegador.` : `${host} volta a ser capturado.`, "ok");
+    }
+  });
+}
+
+$("next").addEventListener("click", async () => {
+  await send({ type: "bypassNext", on: true });
+  show("✔ O próximo download (nos próximos 2 minutos) fica com o navegador.", "ok");
+});
+
 refresh();
 lastDownload();
+siteSwitch();

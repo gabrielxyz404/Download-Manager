@@ -260,10 +260,20 @@ class Service:
                 time.sleep(0.2)
             return 200, {"ok": True, **{k: v for k, v in req.items() if k != "task"}}
         if path == "/check":  # should the app take this browser download? (file types, sites)
-            from .capture import should_capture
-            return 200, {"ok": True, "capture": should_capture(
-                self.settings, str(data.get("url", "")), str(data.get("final_url", "")),
-                str(data.get("filename", "")), str(data.get("mime", "")), str(data.get("referrer", "")))}
+            from .capture import should_capture, skipped_site
+            url, final, ref = str(data.get("url", "")), str(data.get("final_url", "")), str(data.get("referrer", ""))
+            ok = should_capture(self.settings, url, final, str(data.get("filename", "")),
+                                str(data.get("mime", "")), ref)
+            reason = "" if ok else ("site ignorado" if skipped_site(self.settings, url, final, ref)
+                                    else "tipo fora da lista da app")
+            return 200, {"ok": True, "capture": ok, "reason": reason}
+        if path == "/site":  # the popup's "capture on this site" switch
+            from .capture import set_site_skipped, skipped_site
+            host = str(data.get("host", ""))
+            if "skip" in data and set_site_skipped(self.settings, host, bool(data["skip"])):
+                self.settings.save()
+            return 200, {"ok": True, "host": host,
+                         "skipped": bool(skipped_site(self.settings, "https://" + host + "/"))}
         rid = str(data.get("rid", ""))
         self._restore_request(rid)
         task = self._task_for(rid) if rid in self.requests else None
