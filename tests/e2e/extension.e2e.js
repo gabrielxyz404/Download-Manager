@@ -39,7 +39,7 @@ const cookiesSeen = [];
 const redirSeen = [];
 const cdnSeen = [];
 const appMethods = [];
-let browserUA = "", browserCH = "", onceUsed = false;
+let browserUA = "", browserCH = "", onceUsed = false, pageUsed = false;
 const onceSeen = [], uaSeen = [];
 const links = ["relatorio", "lento", "cancelar", "confirmado", "naoquero", "menu", "off", "fechado"]
   .map((n) => `<a id="${n}" href="/${n === "lento" || n === "cancelar" ? "slow" : "files"}/${n}.zip">${n}</a>`).join(" ");
@@ -50,7 +50,7 @@ const site = http.createServer((req, res) => {
   }
   if (req.url === "/") {
     res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Set-Cookie": "sessao=abc123; Path=/" });
-    return res.end(links + ' <a id="cdn" href="/redir/cdn.zip">cdn</a> <a id="notas" href="/files/notas.txt">notas</a> <a id="semnome" href="/get?id=7">semnome</a> <a id="acento" href="/files/Atualiza%E7%E3o_FC27.zip">acento</a> <a id="umavez" href="/once/mod_umavez.zip">umavez</a> <a id="cloudflare" href="/ua/protegido.zip">cloudflare</a>' +
+    return res.end(links + ' <a id="cdn" href="/redir/cdn.zip">cdn</a> <a id="notas" href="/files/notas.txt">notas</a> <a id="semnome" href="/get?id=7">semnome</a> <a id="acento" href="/files/Atualiza%E7%E3o_FC27.zip">acento</a> <a id="umavez" href="/once/mod_umavez.zip">umavez</a> <a id="cloudflare" href="/ua/protegido.zip">cloudflare</a> <a id="pagina" href="/page/patch.zip">pagina</a>' +
                    '<form id="formpost" method="post" action="/files/formulario.zip"><button id="postbtn">post</button></form>');
   }
   if (req.url === "/setcdn") { // the file server's own login cookie (a different site: localhost)
@@ -99,6 +99,27 @@ const site = http.createServer((req, res) => {
     if (m) h["Content-Range"] = `bytes ${start}-${end}/${BIG.length}`;
     res.writeHead(m ? 206 : 200, h);
     let i = start; // slow enough that the browser is still downloading when the app is asked
+    const tick = () => {
+      if (res.destroyed) return;
+      if (i > end) return res.end();
+      res.write(BIG.subarray(i, Math.min(i + 65536, end + 1))); i += 65536; setTimeout(tick, 20);
+    };
+    return tick();
+  }
+  if (req.url.startsWith("/page/")) { // the file for the browser, a page ("wait 5 s...") for anyone else
+    const m = /bytes=(\d+)-(\d*)/.exec(req.headers.range || "");
+    const start = m ? +m[1] : 0, end = BIG.length - 1;
+    const first = !pageUsed;
+    pageUsed = true;
+    if (!first && start === 0) {
+      res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+      return res.end("<html><body>O download começa em 5 segundos...</body></html>");
+    }
+    const h = { "Content-Type": "application/zip", "Accept-Ranges": "bytes", "Content-Length": end - start + 1,
+                "Content-Disposition": 'attachment; filename="patch.zip"' };
+    if (m) h["Content-Range"] = `bytes ${start}-${end}/${BIG.length}`;
+    res.writeHead(m ? 206 : 200, h);
+    let i = start;
     const tick = () => {
       if (res.destroyed) return;
       if (i > end) return res.end();
@@ -355,6 +376,21 @@ const sameAsBig = (file) => fs.existsSync(file) && fs.readFileSync(file).equals(
   check("Site que exige a identidade do navegador (tipo Cloudflare): a app consegue",
         !!prot && sameAsBig(prot.filename) && appTasks().some((t) => (t.url || "").includes("/ua/")),
         `${prot ? prot.filename : "não"} pedidos=${uaSeen.length} sec-ch-ua=${browserCH ? "sim" : "não"}`);
+  await page.goto(SITE + "/");
+
+  // 3h. The site answers the app with a page ("your download starts in 5 s") instead of the file:
+  // the app must not save that page; the browser keeps its own download.
+  await page.click("#pagina");
+  let pag = null;
+  await waitFor(async () => { pag = (await all()).find((d) => d.url.includes("/page/")); return pag && pag.state === "complete"; }, 30000);
+  pp = await popup();
+  last = await pp.textContent("#last");
+  await pp.close();
+  check("Site que dá à app uma página em vez do ficheiro: o Brave termina o seu, intacto",
+        !!pag && pag.state === "complete" && sameAsBig(pag.filename) &&
+        !appTasks().some((t) => (t.url || "").includes("/page/")) &&
+        !(fs.existsSync(DL) && fs.readdirSync(DL, { recursive: true }).some((f) => String(f).includes("patch"))),
+        `${pag ? pag.state : "nenhum"} | ${last}`);
   await page.goto(SITE + "/");
 
   // 3c. A link that redirects to a signed address on another site with its own login cookie.

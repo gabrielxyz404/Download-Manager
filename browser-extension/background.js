@@ -155,7 +155,7 @@ async function cookiesByHost(urls) {
 // short-lived signed address): the app uses the latter, and the link to get a fresh one.
 // ``original``: the browser's own download of this file, paused while the app checks that
 // the site lets it download (null when there is none, e.g. the right-click menu).
-async function sendToApp(url, filename, referrer, finalUrl = "", original = null) {
+async function sendToApp(url, filename, referrer, finalUrl = "", original = null, received = null) {
   const cookies_by_host = await cookiesByHost([url, finalUrl || url]);
   const watched = seenFor(finalUrl || url) || seenFor(url) || {};
   const res = await postJson("/add", {
@@ -165,6 +165,9 @@ async function sendToApp(url, filename, referrer, finalUrl = "", original = null
     user_agent: watched.ua || navigator.userAgent,
     accept_language: watched.lang || (navigator.languages || []).join(","),
     browser_headers: watched.hdrs || {},
+    // what the browser itself is receiving: the app checks it gets the same file
+    browser_size: received ? received.size : 0,
+    browser_type: received ? received.type : "",
   });
   if (!res) return false;
   if (res.rid) showInBrowser(res.rid, original); // not awaited: may wait for the user's confirmation
@@ -354,7 +357,8 @@ async function handleDownload(item) {
   } catch {}
 
   const name = item.filename ? item.filename.split(/[\\/]/).pop() : "";
-  if (!(await sendToApp(url, name, item.referrer || "", finalUrl, original))) {
+  const received = { size: item.totalBytes > 0 ? item.totalBytes : 0, type: item.mime || "" };
+  if (!(await sendToApp(url, name, item.referrer || "", finalUrl, original, received))) {
     if (original.paused) {
       try { await chrome.downloads.resume(item.id); } catch {}
     }

@@ -226,5 +226,31 @@ class BrowserIdentityTests(unittest.TestCase):
             self.assertNotIn(name, headers)
 
 
+class SameFileTests(unittest.TestCase):
+    """A download taken over from the browser: the app must be getting the same file."""
+
+    def test_a_page_instead_of_the_file_is_refused(self):
+        from flowdl.engine import _check_expected
+        info = {"type": "text/html", "size": 900}
+        with self.assertRaises(RuntimeError):
+            _check_expected({"size": 0, "type": "application/zip"}, info)
+        _check_expected({"size": 0, "type": "text/html"}, info)  # the browser was saving a page too
+        _check_expected(None, info)  # not from the browser: nothing to compare
+
+    def test_a_different_size_is_refused(self):
+        from flowdl.engine import _check_expected
+        with self.assertRaises(RuntimeError):
+            _check_expected({"size": 5000, "type": ""}, {"type": "application/zip", "size": 4000})
+        _check_expected({"size": 5000, "type": ""}, {"type": "application/zip", "size": 5000})
+        _check_expected({"size": 0, "type": ""}, {"type": "application/zip", "size": 4000})  # unknown
+
+    def test_expectation_from_the_extension(self):
+        from flowdl.bridge import _download_item
+        item = _download_item({"url": "https://a.com/x.zip", "browser_size": 1234, "browser_type": "application/zip"})
+        self.assertEqual(item["expect"], {"size": 1234, "type": "application/zip"})
+        self.assertIsNone(_download_item({"url": "https://a.com/x.zip"})["expect"])
+        self.assertIsNone(_download_item({"url": "https://a.com/x.zip", "browser_size": "lixo"})["expect"])
+
+
 if __name__ == "__main__":
     unittest.main()

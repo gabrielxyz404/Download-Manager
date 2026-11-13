@@ -106,6 +106,16 @@ Depois de atualizar o Flow Downloads, clique em **↻ (recarregar)** na extensã
 O Flow Downloads precisa estar a correr (pode ser em segundo plano). Se estiver fechado, o navegador baixa normalmente.
 No menu da extensão também pode ligar/desligar a captura de downloads (quando desligada aparece "OFF" no ícone).
 
+**Nunca pior do que o navegador sozinho.** Quando um download começa, a extensão **pausa** o do navegador
+(não o cancela) e passa-o à app, com os cookies e a identidade exata do navegador (User-Agent e os outros
+cabeçalhos que sites protegidos, como os que usam Cloudflare, comparam). Só quando a app está mesmo a receber
+o ficheiro é que o download do navegador é trocado pelo da app. Se o site recusar a app — um link que só serve
+uma vez, uma página de proteção, um login — o navegador **continua o seu próprio download** de onde estava.
+
+**O que aconteceu ao último download?** O menu da extensão mostra-o numa linha, por exemplo
+"baixado pela app ✔", "o Brave baixou sozinho: a app não conseguiu (HTTP 403)" ou "deixado ao navegador:
+veio de um formulário". Útil quando um site não funciona como esperado.
+
 ## Como funciona a aceleração
 
 1. O Flow Downloads pergunta ao servidor o tamanho do arquivo e se ele aceita downloads em partes (`Range`).
@@ -114,13 +124,18 @@ No menu da extensão também pode ligar/desligar a captura de downloads (quando 
 3. **Teste de velocidade:** começa com 2 conexões (4 em arquivos grandes) e vai dobrando (2 → 4 → 8...)
    enquanto a velocidade total subir pelo menos 15%. Se não compensar (linha ou servidor no limite), para
    de abrir conexões — e volta a testar se a velocidade cair a meio. Se o servidor recusar conexões a mais
-   (erro 503/429), usa só as que ele aceita, sem dar erro. O valor de "Conexões" é o **máximo**.
+   (erro 503/429, ou 403 em alguns sites de ficheiros), usa só as que ele aceita, sem dar erro. O valor de "Conexões" é o **máximo**.
 4. **Conexões reaproveitadas:** cada conexão fica aberta e vai pedindo pedaço atrás de pedaço (de ~2 s de
    dados cada), sem repetir o "aperto de mão" com o servidor. O primeiro pedido já traz o início do arquivo.
 5. Quando uma conexão termina, ela pega metade da maior parte que ainda falta — todas ficam ocupadas até o fim.
 6. **Sem ficar nos 99%:** uma conexão muito mais lenta que as outras é reaberta (pode cair num servidor
    mais rápido), e no fim as conexões rápidas assumem o que a mais lenta ainda tem por receber.
-7. O progresso é salvo em `arquivo.part.json` (gravado no disco antes de ser anotado, para aguentar faltas de luz).
+7. **Sem paragens:** uma conexão que deixa de receber (o servidor ou a linha calou-se sem a fechar) é trocada
+   ao fim de 4 s se as outras estão a receber, ou 6 s se todas pararam — em vez de esperar 30 s. Servidores
+   lentos a responder não são cortados em ciclo: a espera aprende o tempo de resposta do servidor.
+8. **Na lista do navegador**, a app trabalha perto do início do ficheiro, para o progresso do navegador
+   acompanhar o da app (o navegador só pode receber o ficheiro a partir do início).
+9. O progresso é salvo em `arquivo.part.json` (gravado no disco antes de ser anotado, para aguentar faltas de luz).
 
 ### Comparar com e sem o Flow Downloads
 

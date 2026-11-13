@@ -77,6 +77,17 @@ def _browser_headers(value) -> dict:
     return out
 
 
+def _expected(size, mime) -> dict | None:
+    try:
+        size = int(size or 0)
+    except (TypeError, ValueError):
+        size = 0
+    mime = (_header_value(mime) or "").split(";")[0].strip().lower()
+    if size <= 0 and not mime:
+        return None
+    return {"size": max(0, size), "type": mime}
+
+
 def _download_item(data: dict) -> dict:
     url = str(data.get("url", ""))
     if not url.startswith(("http://", "https://", "ftp://")):
@@ -93,7 +104,9 @@ def _download_item(data: dict) -> dict:
             # the browser's own identity: sites behind Cloudflare & co. tie their cookies to it
             "user_agent": _header_value(data.get("user_agent")),
             "accept_language": _header_value(data.get("accept_language")),
-            "browser_headers": _browser_headers(data.get("browser_headers"))}
+            "browser_headers": _browser_headers(data.get("browser_headers")),
+            # what the browser itself received: the app must get the same file
+            "expect": _expected(data.get("browser_size"), data.get("browser_type"))}
     if data.get("mirror"):
         # The extension wants to show this download in the browser too: it will ask about
         # this request id until the download starts (or is cancelled in the app).

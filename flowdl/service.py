@@ -375,7 +375,7 @@ class Service:
         task = self.manager.add(item["url"], self.settings.dest_dir, self.settings.connections,
                                 filename=item.get("filename"), headers=headers, cookies=cookies,
                                 final_url=item.get("final_url"), auto_folder=True,
-                                page=item.get("referrer") or "")
+                                page=item.get("referrer") or "", expect=item.get("expect"))
         self.bind_request(item.get("rid"), task)
         if self.settings.show_progress_window:
             self.pending.append({"kind": "progress", "task": task.id})

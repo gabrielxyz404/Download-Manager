@@ -182,7 +182,22 @@ def _info_from_response(resp: net.Response) -> dict:
     elif headers.get("Content-Length"):
         size = int(headers["Content-Length"])
     return {"url": resp.url, "size": size, "resumable": resumable,
-            "filename": _filename_from_headers(headers, resp.url), "validator": validator_of(headers)}
+            "filename": _filename_from_headers(headers, resp.url), "validator": validator_of(headers),
+            "type": (headers.get("Content-Type") or "").split(";")[0].strip().lower()}
+
+
+def _check_expected(expect: dict | None, info: dict) -> None:
+    """For a download taken over from the browser: is the app getting the same file? Some
+    sites answer anyone else with a page (a protection check, "your download starts in 5 s",
+    a login form) instead of the file; that must not be saved as the download."""
+    if not expect:
+        return
+    want_type = (expect.get("type") or "").lower()
+    if info["type"] in ("text/html", "application/xhtml+xml") and want_type not in ("text/html", "application/xhtml+xml"):
+        raise RuntimeError("o site respondeu à app com uma página em vez do ficheiro")
+    want_size = expect.get("size") or 0
+    if want_size > 0 and info["size"] and info["size"] != want_size:
+        raise RuntimeError(f"o site deu à app outro ficheiro ({info['size']} bytes em vez de {want_size})")
 
 
 def _headers(extra: dict | None) -> dict:
@@ -314,6 +329,7 @@ class DownloadTask:
         # Browser mode: the browser also shows this download (it receives the bytes from the
         # app while they arrive) and saves the final file itself.
         self.mirror = False
+        self.expect: dict | None = None  # what the browser received (size, type), when taken over
         self.stream_token: str | None = None
         self.rid: str | None = None  # the extension's request id for this download
         self.awaiting_browser = False  # finished here, waiting for the browser to take it
@@ -557,6 +573,11 @@ class DownloadTask:
             if self._stop.is_set():
                 raise RuntimeError("pausado")  # _run reports it as paused, not as an error
         info = _info_from_response(resp)
+        try:
+            _check_expected(self.expect, info)
+        except RuntimeError:
+            conn.close()
+            raise
         self._final_url = info["url"]
         if self.segments and self.validator and info["validator"] and info["validator"] != self.validator:
             # an interrupted download of an older version of this file

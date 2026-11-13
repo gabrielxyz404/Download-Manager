@@ -263,14 +263,19 @@ class StallTests(unittest.TestCase):
             task = DownloadTask(f"http://127.0.0.1:{server.server_address[1]}/f.bin", tmp.name, 8)
             t0 = time.monotonic()
             task.start()
-            task.wait(90)
+            timeline = []  # (second, MB so far, swaps, connections): printed if too slow
+            while task.is_running() and time.monotonic() - t0 < 90:
+                time.sleep(1)
+                timeline.append((round(time.monotonic() - t0), round(task.downloaded / 1e6, 1),
+                                 task.reconnections, task.active_connections))
+            task.wait(5)
             took = time.monotonic() - t0
             self.assertEqual(task.status, Status.COMPLETED, task.error)
             with open(task.path, "rb") as f:
                 self.assertEqual(hashlib.sha256(f.read()).digest(), hashlib.sha256(BIG).digest())
             # Before: each silent connection blocked for the 30 s timeout (and the end waited
             # for a connection whose piece another one had finished).
-            self.assertLess(took, 30, f"{took:.0f}s")
+            self.assertLess(took, 30, f"{took:.0f}s {timeline}")
             self.assertGreater(task.reconnections, 0)
         finally:
             server.shutdown()
