@@ -168,7 +168,7 @@ def main() -> int:
     Site.rate, Site.starts = 100_000, []
     app.start("--background")
     post("/add", {"url": site + "/filme.mkv"})
-    target = app.dl / "filme.mkv"
+    target = app.dl / "Vídeos" / "filme.mkv"  # saved in its category folder
     part_json = Path(str(target) + ".part.json")
     wait_for(part_json.exists, 10)
     time.sleep(3)
@@ -203,7 +203,7 @@ def main() -> int:
     check("Download marcado para continuar", statuses == ["Na fila"], str(statuses))
     Site.rate = 0
     app.start("--background")
-    check("Ao abrir de novo, continua e termina", wait_for(lambda: file_ok(app.dl / "jogo.iso"), 30))
+    check("Ao abrir de novo, continua e termina", wait_for(lambda: file_ok(app.dl / "Compactados" / "jogo.iso"), 30))
 
     # 3. Single instance: opening the app again shows the running one.
     pids_before = app_pids()
@@ -224,7 +224,7 @@ def main() -> int:
     app.start("--background")
     post("/add", {"url": site + "/instavel.zip"})
     check("Internet instável: 6 ligações cortadas a meio, ficheiro completo e intacto",
-          wait_for(lambda: file_ok(app.dl / "instavel.zip"), 60), f"cortes por fazer: {Site.drop_first}")
+          wait_for(lambda: file_ok(app.dl / "Compactados" / "instavel.zip"), 60), f"cortes por fazer: {Site.drop_first}")
     kill_all()
 
     # 5. Command line, interrupted with Ctrl+C, then the same command again.
