@@ -106,6 +106,7 @@ class Connection:
         self.response: Response | None = None
         self.requests = 0  # requests sent on the current connection (for tests/stats)
         self.aborted = False  # cut on purpose by abort(): never re-send on its own
+        self.address: tuple[str, str] | None = None  # (host, ip): use this address of the host
         self.opened = 0    # connections opened (TCP/TLS set-ups)
 
     def abort(self) -> None:
@@ -158,6 +159,12 @@ class Connection:
             else:
                 conn = http.client.HTTPConnection(host, port, timeout=self.timeout)
                 self.via_proxy_http = False
+        if not proxy and self.address and self.address[0] == host.lower():
+            # Connect to one chosen address of this server (it has several): the name is still
+            # used for the Host header and the HTTPS certificate check, exactly as before.
+            ip = self.address[1]
+            conn._create_connection = lambda addr, timeout=None, source=None: socket.create_connection(
+                (ip, addr[1]), timeout, source)
         self.conn, self.key = conn, (scheme, host, port)
         self.opened += 1
         self.requests = 0
@@ -232,3 +239,17 @@ class Connection:
                 scheme, host, port = self.key
                 self._connect(scheme, host, port)
         raise AssertionError("unreachable")
+
+
+def addresses(host: str, port: int) -> list[str]:
+    """The different addresses a server name has (big servers / CDNs have several)."""
+    try:
+        infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    except OSError:
+        return []
+    out = []
+    for family, *_rest, sockaddr in infos:
+        ip = sockaddr[0]
+        if ip not in out:
+            out.append(ip)
+    return out

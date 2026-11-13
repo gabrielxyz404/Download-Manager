@@ -383,6 +383,67 @@ class HostMemoryTests(unittest.TestCase):
             server.shutdown()
 
 
+class ManyAddressesTests(unittest.TestCase):
+    """A server name with several addresses (CDNs): connections are spread over them."""
+
+    def serve_on(self, ip, port=0):
+        seen = []
+
+        class H(Handler):
+            def do_GET(self):
+                seen.append(self.headers.get("Host"))
+                super().do_GET()
+        srv = ThreadingHTTPServer((ip, port), H)
+        srv.daemon_threads = True
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        return srv, seen
+
+    def test_connections_go_to_every_address_and_the_file_is_intact(self):
+        from unittest import mock
+        from flowdl import net
+        a, seen_a = self.serve_on("127.0.0.1")
+        port = a.server_address[1]
+        try:
+            b, seen_b = self.serve_on("127.0.0.2", port)
+        except OSError:
+            a.shutdown()
+            self.skipTest("127.0.0.2 não disponível")
+        tmp = tempfile.TemporaryDirectory()
+        try:
+            with mock.patch.object(net, "addresses", return_value=["127.0.0.1", "127.0.0.2"]):
+                task = DownloadTask(f"http://127.0.0.1:{port}/grande.bin", tmp.name, 8)
+                task.start()
+                task.wait(60)
+            self.assertEqual(task.status, Status.COMPLETED, task.error)
+            with open(task.path, "rb") as f:
+                self.assertEqual(hashlib.sha256(f.read()).digest(), hashlib.sha256(DATA).digest())
+            self.assertTrue(seen_a and seen_b, (len(seen_a), len(seen_b)))
+            self.assertTrue(all(h == f"127.0.0.1:{port}" for h in seen_b))  # the name, not the address
+            self.assertEqual(task.server_addresses, 2)
+        finally:
+            a.shutdown()
+            b.shutdown()
+            tmp.cleanup()
+
+    def test_a_dead_address_does_not_break_the_download(self):
+        from unittest import mock
+        from flowdl import net
+        a, _ = self.serve_on("127.0.0.1")
+        port = a.server_address[1]
+        tmp = tempfile.TemporaryDirectory()
+        try:
+            with mock.patch.object(net, "addresses", return_value=["127.0.0.1", "127.0.0.3"]):  # .3: nobody there
+                task = DownloadTask(f"http://127.0.0.1:{port}/grande.bin", tmp.name, 8)
+                task.start()
+                task.wait(60)
+            self.assertEqual(task.status, Status.COMPLETED, task.error)
+            with open(task.path, "rb") as f:
+                self.assertEqual(hashlib.sha256(f.read()).digest(), hashlib.sha256(DATA).digest())
+        finally:
+            a.shutdown()
+            tmp.cleanup()
+
+
 if __name__ == "__main__":
     unittest.main()
 
@@ -586,7 +647,7 @@ class ConnectionReuseTests(unittest.TestCase):
             time.sleep(0.05)
         self.assertEqual(task.status, Status.COMPLETED, task.error)
         with open(task.path, "rb") as f:
-            self.assertEqual(hashlib.sha256(f.read()).digest(), hashlib.sha256(BIG).digest())
+            self.assertEqual(hashlib.sha256(f.read()).digest(), hashlib.sha256(DATA).digest())
         return task, peak
 
     def test_connections_are_reused_for_many_pieces(self):

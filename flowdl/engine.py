@@ -353,6 +353,7 @@ class DownloadTask:
         self.check = ""  # what the end-of-download actions found (checksum, antivirus...)
         self.after_ran = False
         self.host_memory = None    # HostMemory: what each server taught us (set by the manager)
+        self.server_addresses = 0  # how many addresses the server has (connections are spread)
         self._settled_at = 0
         self.stream_token: str | None = None
         self.rid: str | None = None  # the extension's request id for this download
@@ -782,7 +783,20 @@ class DownloadTask:
         self._rescued: list = []
         self._workers = []
 
+        # A server name with several addresses (CDNs): spread the connections over them, so
+        # one busy machine or a per-address limit does not hold every connection back.
+        url = self._current_url()
+        parts = urllib.parse.urlsplit(url)
+        port = parts.port or (443 if parts.scheme == "https" else 80)
+        ips = [] if net._proxy_for(parts.scheme, parts.hostname or "") else net.addresses(parts.hostname or "", port)
+        self.server_addresses = len(ips)
+        turn = [1]  # the first connection (the initial request) is already on the first address
+
         def spawn(seg: Segment, conn=None, resp=None) -> None:
+            if conn is None and len(ips) > 1 and host_of(self._current_url()) == (parts.hostname or "").lower():
+                conn = net.Connection(TIMEOUT)
+                conn.address = ((parts.hostname or "").lower(), ips[turn[0] % len(ips)])
+                turn[0] += 1
             w = _Worker(seg, conn, resp)
             with self._lock:
                 self._active_workers += 1
@@ -1190,6 +1204,8 @@ class DownloadTask:
                             continue
                         code = exc.code if isinstance(exc, net.HTTPError) else None
                         refused = isinstance(exc, ConnectionRefusedError)
+                        if conn.address and not isinstance(exc, net.HTTPError):
+                            conn.address = None  # that address failed: let the system choose
                         if is_cert_error(exc):
                             raise RuntimeError(CERT_ERROR) from exc
                         wait = getattr(exc, "retry_after", None)
