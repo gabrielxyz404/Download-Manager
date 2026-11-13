@@ -32,6 +32,12 @@ class Settings:
         self.capture_types = list(DEFAULT_TYPES)
         self.capture_all_types = False
         self.capture_skip_sites: list = []
+        # When a download finishes (all off by default; a checksum given for a download is
+        # always verified)
+        self.after_open = False      # open the file
+        self.after_extract = False   # extract .zip files next to them
+        self.after_scan = False      # scan with the Windows antivirus
+        self.after_command = ""      # run a command: {ficheiro} {pasta} {nome} {url}
         self.host_limits: dict = {}  # max connections per site, e.g. {"lento.com": 2}
         self.keep_awake = True       # no sleep while downloading (Windows)
         self.mark_internet = True    # Windows warns before running a downloaded program, as with the browser

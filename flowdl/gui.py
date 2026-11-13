@@ -111,9 +111,14 @@ class AddDialog(tk.Toplevel):
         self.auto = tk.BooleanVar(value=app.settings.category_folders)
         ttk.Checkbutton(frm, text="Guardar na pasta da categoria (Vídeos, Compactados...) dentro desta pasta",
                         variable=self.auto).grid(row=5, column=1, columnspan=2, sticky="w", pady=(4, 0))
+        ttk.Label(frm, text="Checksum (opcional):").grid(row=6, column=0, sticky="w", pady=3)
+        self.checksum = tk.StringVar()
+        ttk.Entry(frm, textvariable=self.checksum).grid(row=6, column=1, columnspan=2, sticky="ew")
+        ttk.Label(frm, text="(MD5, SHA-1 ou SHA-256 do site: confirma que o ficheiro chegou perfeito)",
+                  foreground=app.colors["muted"]).grid(row=7, column=1, sticky="w")
 
         btns = ttk.Frame(frm)
-        btns.grid(row=6, column=0, columnspan=3, sticky="e", pady=(12, 0))
+        btns.grid(row=8, column=0, columnspan=3, sticky="e", pady=(12, 0))
         ttk.Button(btns, text="Baixar agora", command=lambda: self._ok(True)).pack(side="left", padx=4)
         ttk.Button(btns, text="Baixar depois", command=lambda: self._ok(False)).pack(side="left", padx=4)
         ttk.Button(btns, text="Cancelar", command=self.destroy).pack(side="left", padx=4)
@@ -163,6 +168,10 @@ class AddDialog(tk.Toplevel):
                                      cookies=self.cookies, final_url=self.final_url if same_link else None,
                                      auto_folder=bool(self.auto.get()),
                                      page=(self.headers or {}).get("Referer", ""))
+        from .after import algo_for, clean_hash
+        wanted = clean_hash(self.checksum.get())
+        if wanted and algo_for(wanted):
+            task.expected_hash = wanted
         self._decided = True
         svc = self.app.service
         if start:
@@ -589,6 +598,8 @@ class ProgressWindow(tk.Toplevel):
             status = f"Erro: {t.error}"
         elif status == Status.PAUSED and t.error:
             status = f"Pausado: {t.error}"  # e.g. the disk is full: says what to do
+        if status == Status.COMPLETED and getattr(t, "check", ""):
+            status = f"Concluído · {t.check}"
         elif status == Status.DOWNLOADING:
             status = "Recebendo dados..." + (f" ({t.connection_note})" if getattr(t, "connection_note", "") else "")
         self.vars["state"].set(status)
@@ -750,6 +761,43 @@ class CategoryEditor(tk.Toplevel):
                 "folder": self.folder.get().strip() or None,
                 "url_patterns": lines(self.urls), "name_patterns": lines(self.names)}
         self.parent.store(rule, self.index)
+        self.destroy()
+
+
+class AfterDialog(tk.Toplevel):
+    """What to do with each file when its download finishes."""
+
+    def __init__(self, app: "App"):
+        super().__init__(app)
+        self.app = app
+        app.attach_dialog(self)
+        self.title("Ao terminar um download")
+        s = app.settings
+        frm = ttk.Frame(self, padding=12)
+        frm.pack(fill="both", expand=True)
+        self.scan = tk.BooleanVar(value=s.after_scan)
+        self.extract = tk.BooleanVar(value=s.after_extract)
+        self.open = tk.BooleanVar(value=s.after_open)
+        ttk.Checkbutton(frm, text="Analisar com o antivírus do Windows", variable=self.scan).pack(anchor="w")
+        ttk.Checkbutton(frm, text="Extrair ficheiros .zip (para uma pasta ao lado)", variable=self.extract).pack(anchor="w")
+        ttk.Checkbutton(frm, text="Abrir o ficheiro", variable=self.open).pack(anchor="w")
+        ttk.Label(frm, text="Correr um comando (opcional):").pack(anchor="w", pady=(10, 2))
+        self.command = tk.StringVar(value=s.after_command)
+        ttk.Entry(frm, textvariable=self.command, width=60).pack(fill="x")
+        ttk.Label(frm, text="Pode usar {ficheiro}, {pasta}, {nome} e {url}.",
+                  foreground=app.colors["muted"]).pack(anchor="w")
+        ttk.Label(frm, text="Se um checksum não conferir ou o antivírus encontrar algo, nada é aberto nem extraído.",
+                  foreground=app.colors["muted"]).pack(anchor="w", pady=(6, 0))
+        btns = ttk.Frame(frm)
+        btns.pack(fill="x", pady=(10, 0))
+        ttk.Button(btns, text="Cancelar", command=self.destroy).pack(side="right")
+        ttk.Button(btns, text="Guardar", command=self._save).pack(side="right", padx=4)
+
+    def _save(self) -> None:
+        s = self.app.settings
+        s.after_scan, s.after_extract, s.after_open = self.scan.get(), self.extract.get(), self.open.get()
+        s.after_command = self.command.get().strip()
+        s.save()
         self.destroy()
 
 
@@ -1087,6 +1135,7 @@ class App(tk.Tk):
         opts.add_command(label="Categorias e pastas...", command=lambda: CategoriesDialog(self))
         opts.add_command(label="Tipos apanhados do navegador...", command=lambda: CaptureDialog(self))
         opts.add_command(label="Limites por site...", command=lambda: HostLimitsDialog(self))
+        opts.add_command(label="Ao terminar um download...", command=lambda: AfterDialog(self))
         menubar.add_cascade(label="Opções", menu=opts)
 
         helpm = tk.Menu(menubar, tearoff=False)
@@ -1168,6 +1217,7 @@ class App(tk.Tk):
         self.ctx.add_command(label="Pausar", command=self._pause)
         self.ctx.add_command(label="Limitar velocidade...", command=self._task_limit)
         self.ctx.add_command(label="Copiar endereço", command=self._copy_url)
+        self.ctx.add_command(label="Verificar checksum...", command=self._verify_checksum)
         self.ctx.add_separator()
         self.ctx.add_command(label="Excluir", command=self._remove)
         self.menus.append(self.ctx)
@@ -1335,6 +1385,34 @@ class App(tk.Tk):
             folder = os.path.dirname(tasks[0].path)  # e.g. the browser's folder
         if os.path.isdir(folder):
             open_path(folder)
+
+    def _verify_checksum(self) -> None:
+        tasks = [t for t in self._selected() if t.status == Status.COMPLETED and t.path and os.path.isfile(t.path)]
+        if not tasks:
+            messagebox.showinfo("Verificar checksum", "Escolha um download concluído.", parent=self)
+            return
+        task = tasks[0]
+        text = simpledialog.askstring(
+            "Verificar checksum", "Cole o checksum indicado no site (MD5, SHA-1 ou SHA-256).\n"
+            "Deixe vazio para ver o SHA-256 deste ficheiro.", parent=self)
+        if text is None:
+            return
+        from . import after
+
+        def work():
+            try:
+                if text.strip():
+                    ok, msg = after.verify(task.path, text)
+                    task.check = msg
+                    self.manager.save()
+                    result = (ok, msg)
+                else:
+                    result = (True, "SHA-256:\n" + after.file_hash(task.path, "sha256"))
+            except OSError as exc:
+                result = (False, f"Não consegui ler o ficheiro: {exc}")
+            self.after(0, lambda: (messagebox.showinfo if result[0] else messagebox.showwarning)(
+                "Verificar checksum", f"{task.filename}\n\n{result[1]}", parent=self))
+        threading.Thread(target=work, daemon=True).start()
 
     def _copy_url(self) -> None:
         tasks = self._selected()
@@ -1508,6 +1586,8 @@ class App(tk.Tk):
             status = f"Erro: {t.error}"
         elif status == Status.PAUSED and t.error:
             status = f"Pausado: {t.error}"  # e.g. the disk is full: says what to do
+        if status == Status.COMPLETED and getattr(t, "check", ""):
+            status = f"Concluído · {t.check}"
         elif status == Status.DOWNLOADING and t.speed_limit:
             status = f"Baixando (limite {format_size(t.speed_limit)}/s)"
         elif status == Status.DOWNLOADING and getattr(t, "connection_note", ""):

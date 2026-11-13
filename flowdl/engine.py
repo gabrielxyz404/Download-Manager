@@ -343,6 +343,9 @@ class DownloadTask:
         self.mirror = False
         self.expect: dict | None = None  # what the browser received (size, type), when taken over
         self.mark_internet = True  # Windows "came from the internet" mark on the finished file
+        self.expected_hash: str | None = None  # checksum the user gave: verified when it finishes
+        self.check = ""  # what the end-of-download actions found (checksum, antivirus...)
+        self.after_ran = False
         self.host_memory = None    # HostMemory: what each server taught us (set by the manager)
         self._settled_at = 0
         self.stream_token: str | None = None
@@ -417,6 +420,7 @@ class DownloadTask:
             "cookies": vault.protect(self.cookies), "final_url": self._final_url,
             "mirror": self.mirror, "stream_token": self.stream_token, "rid": self.rid,
             "awaiting_browser": self.awaiting_browser,
+            "expected_hash": self.expected_hash, "check": self.check,
         }
 
     @classmethod
@@ -432,6 +436,9 @@ class DownloadTask:
         t.stream_token = d.get("stream_token")
         t.rid = d.get("rid")
         t.awaiting_browser = d.get("awaiting_browser", False)
+        t.expected_hash = d.get("expected_hash")
+        t.check = d.get("check", "")
+        t.after_ran = d.get("status") == Status.COMPLETED  # never again for an old download
         status = d.get("status", Status.PAUSED)
         if status == Status.COMPLETED:
             t.status = Status.COMPLETED

@@ -296,6 +296,7 @@ class Service:
         if path == "/mirror-done":  # the browser saved the file: drop our temporary copy
             task.release_to_browser(str(data.get("path") or "") or None)
             self.manager.save()
+            self.after_download(task)  # now the file is where the browser saved it
             self.events.put(("tick", None))
             return 200, {"ok": True}
         return 404, {"ok": False}
@@ -337,6 +338,7 @@ class Service:
                 log("keep local failed", task.id, exc)
                 task.error = str(exc)
                 return
+            self.after_download(task)
             self.manager.save()
             self.events.put(("tick", None))
 
@@ -363,10 +365,35 @@ class Service:
                 for t in self._manager.tasks:
                     t.pause()
 
+    def after_download(self, task) -> None:
+        """A download's file is in its final place: checksum, antivirus, extract, command, open
+        (whatever was chosen), in a background thread. Once per download."""
+        if task is None or getattr(task, "after_ran", True) or task.status != Status.COMPLETED:
+            return
+        if getattr(task, "awaiting_browser", False):
+            return  # the browser is still saving it: done when it tells us where it is
+        s = self.settings
+        if not (getattr(task, "expected_hash", None) or s.after_scan or s.after_extract
+                or s.after_command or s.after_open):
+            return
+        task.after_ran = True
+
+        def work():
+            from . import after
+            try:
+                notes = after.run(task, s)
+            except Exception as exc:  # noqa: BLE001 - never take the app down for this
+                notes = [f"ações no fim falharam ({exc})"]
+            task.check = " · ".join(n for n in notes if n)
+            self.manager.save()
+            self.events.put(("tick", None))
+        threading.Thread(target=work, name="after", daemon=True).start()
+
     def on_tick(self, task=None) -> str | None:
         """A download stopped: start the next ones; if it was the last one to finish,
         return the 'when all downloads finish' action ("countdown" / "quit")."""
         self.manager.tick()
+        self.after_download(task)
         if (task is not None and task.status == Status.COMPLETED and getattr(task, "awaiting_browser", False)
                 and not getattr(task, "stream_attached", False)):
             # Browser mode, but the browser has not started receiving: give it some time.

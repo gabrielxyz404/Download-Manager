@@ -338,6 +338,45 @@ class GuiTests(unittest.TestCase):
         self.wait_status(task, "Concluído")
         self.assertEqual(os.path.basename(task.path), "meu arquivo.bin")
 
+    def test_checksum_given_when_adding_is_verified_at_the_end(self):
+        app = self.open_app()
+        for name, given, expect in (("bom.bin", hashlib.sha256(DATA).hexdigest(), "SHA-256 confere"),
+                                    ("mau.bin", "0" * 64, "NÃO confere")):
+            dlg = self.gui.AddDialog(app, self.base + "/" + name)
+            dlg.checksum.set(given)
+            dlg._ok(True)
+            task = next(t for t in self.svc.manager.tasks if t.url.endswith(name))
+            self.wait_status(task, "Concluído")
+            for _ in range(100):
+                pump(app, 0.1)
+                if task.check:
+                    break
+            self.assertIn(expect, task.check)
+            app._refresh(schedule=False)
+            status_col = list(app.tree["columns"]).index("status")
+            self.assertIn(expect, str(app.tree.item(task.id)["values"][status_col]))  # shown in the list
+
+    def test_after_download_window_and_actions(self):
+        app = self.open_app()
+        dlg = self.gui.AfterDialog(app)
+        dlg.open.set(True)
+        dlg.command.set("echo {ficheiro}")
+        dlg._save()
+        s = self.svc.settings
+        self.assertTrue(s.after_open)
+        self.assertEqual(s.after_command, "echo {ficheiro}")
+        with mock.patch("flowdl.after.open_file") as opened, mock.patch("flowdl.after.run_command", return_value="") as ran:
+            app.url_var.set(self.base + "/acabou.bin")
+            app._quick_add()
+            task = self.svc.manager.tasks[-1]
+            self.wait_status(task, "Concluído")
+            for _ in range(100):
+                pump(app, 0.1)
+                if opened.called:
+                    break
+            opened.assert_called_once_with(task.path)
+            ran.assert_called_once()
+
     def test_video_window_without_ytdlp_offers_install(self):
         app = self.open_app()
         with mock.patch.object(self.gui.video, "available", return_value=False):
