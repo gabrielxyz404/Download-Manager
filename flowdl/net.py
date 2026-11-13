@@ -29,9 +29,29 @@ def ssl_context() -> ssl.SSLContext:
 
 
 class HTTPError(Exception):
-    def __init__(self, code: int, reason: str, url: str):
+    def __init__(self, code: int, reason: str, url: str, retry_after: float | None = None):
         super().__init__(f"HTTP {code}: {reason}")
         self.code, self.reason, self.url = code, reason, url
+        self.retry_after = retry_after  # seconds the server asked us to wait (429 / 503)
+
+
+def parse_retry_after(value: str | None) -> float | None:
+    """Retry-After is either seconds or an HTTP date."""
+    if not value:
+        return None
+    value = value.strip()
+    if value.isdigit():
+        return float(value)
+    try:
+        import email.utils
+        import time
+        when = email.utils.parsedate_to_datetime(value).timestamp()
+        return max(0.0, when - time.time())
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+SENSITIVE = ("cookie", "authorization")  # never sent to a different site after a redirect
 
 
 class Response:
@@ -115,12 +135,18 @@ class Connection:
         self.opened += 1
         self.requests = 0
 
-    def get(self, url: str, headers: dict, start: int | None = None, end: int | None = None) -> Response:
+    def get(self, url: str, headers: dict, start: int | None = None, end: int | None = None,
+            cookies: dict | None = None) -> Response:
         """GET ``url`` (optionally a byte range), following redirects. Raises HTTPError for
         4xx/5xx answers. The previous response must have been read to the end; otherwise
-        the connection is closed and a new one is opened."""
+        the connection is closed and a new one is opened.
+
+        ``cookies`` maps a host to the Cookie header the browser sends to that host. Like a
+        browser, each request only carries the cookies of its own host, and credentials given
+        in ``headers`` are not passed on when a redirect leads to another host."""
         if self.response is not None and not self.response.finished:
             self.close()
+        first_host = (urllib.parse.urlsplit(url).hostname or "").lower()
         for _ in range(MAX_REDIRECTS + 1):
             parts = urllib.parse.urlsplit(url)
             scheme = parts.scheme.lower()
@@ -132,7 +158,15 @@ class Connection:
                 self._connect(scheme, host, port)
             path = urllib.parse.urlunsplit(("", "", parts.path or "/", parts.query, ""))
             target = url if self.via_proxy_http else path
-            hdrs = {"Host": parts.netloc.rsplit("@", 1)[-1], "Accept-Encoding": "identity", **headers}
+            hdrs = {"Host": parts.netloc.rsplit("@", 1)[-1], "Accept-Encoding": "identity"}
+            for k, v in headers.items():
+                if k.lower() in SENSITIVE and host.lower() != first_host:
+                    continue  # another site: do not hand it our credentials
+                hdrs[k] = v
+            if cookies is not None:
+                hdrs = {k: v for k, v in hdrs.items() if k.lower() != "cookie"}
+                if cookies.get(host.lower()):
+                    hdrs["Cookie"] = cookies[host.lower()]
             if self.via_proxy_http:
                 hdrs.update(getattr(self, "proxy_headers", {}))
             if start is not None:
@@ -149,7 +183,7 @@ class Connection:
                 finally:
                     if not raw.isclosed():
                         self.close()
-                raise HTTPError(raw.status, raw.reason, url)
+                raise HTTPError(raw.status, raw.reason, url, parse_retry_after(raw.getheader("Retry-After")))
             self.response = Response(raw, url)
             return self.response
         raise HTTPError(310, "redirecionamentos a mais", url)

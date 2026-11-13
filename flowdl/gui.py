@@ -76,9 +76,11 @@ class AddDialog(tk.Toplevel):
     """'Download file info' dialog: confirm name / folder before downloading."""
 
     def __init__(self, app: "App", url: str = "", filename: str | None = None,
-                 headers: dict | None = None, title: str = "Adicionar download", rid: str | None = None):
+                 headers: dict | None = None, title: str = "Adicionar download", rid: str | None = None,
+                 cookies: dict | None = None, final_url: str | None = None):
         super().__init__(app)
         self.app, self.headers = app, headers
+        self.cookies, self.final_url = cookies, final_url
         self.rid = rid  # set when the download came from the browser
         self._decided = False
         self.bind("<Destroy>", self._on_destroy)
@@ -90,6 +92,7 @@ class AddDialog(tk.Toplevel):
         frm.columnconfigure(1, weight=1)
 
         self.url = tk.StringVar(value=url)
+        self.url_original = url
         self.name = tk.StringVar(value=filename or "")
         self.folder = tk.StringVar(value=app.settings.dest_dir)
         self.conns = tk.IntVar(value=app.settings.connections)
@@ -133,8 +136,10 @@ class AddDialog(tk.Toplevel):
             conns = max(1, min(32, int(self.conns.get())))
         except (tk.TclError, ValueError):
             conns = 8
+        same_link = url == self.url_original
         task = self.app.add_download(url, self.folder.get(), conns, start,
-                                     self.name.get().strip() or None, self.headers)
+                                     self.name.get().strip() or None, self.headers,
+                                     cookies=self.cookies, final_url=self.final_url if same_link else None)
         self._decided = True
         svc = self.app.service
         if start:
@@ -329,9 +334,7 @@ class VideoDialog(tk.Toplevel):
         self.geometry("620x400")
         self.results: queue.Queue = queue.Queue()
         self.choices: dict[str, dict] = {}
-        host = urllib.parse.urlparse(page).netloc or "site"
-        self.cookiefile = video.write_cookiefile(
-            cookie_jar or [], str(config_dir() / "cookies" / f"{re_safe(host)}.txt"))
+        self.cookie_jar = list(cookie_jar or [])  # kept in memory; written only temporarily
         self.headers = {"Referer": page}
 
         frm = ttk.Frame(self, padding=14)
@@ -389,7 +392,7 @@ class VideoDialog(tk.Toplevel):
 
         def work():
             try:
-                self.results.put(("ok", video.get_options(self.page, self.cookiefile, self.headers)))
+                self.results.put(("ok", video.get_options(self.page, None, self.headers, self.cookie_jar)))
             except Exception as exc:  # noqa: BLE001
                 self.results.put(("err", str(exc).replace("ERROR: ", "")))
 
@@ -444,7 +447,7 @@ class VideoDialog(tk.Toplevel):
             fmt, audio = (c.get("format", "b"), c.get("audio_only", False)) if c["type"] == "ytdlp" \
                 else ("b", False)
             task = VideoTask(c["url"], s.dest_dir, fmt, audio, self.name_var.get(), s.connections,
-                             headers=self.headers, cookiefile=self.cookiefile,
+                             headers=self.headers, cookie_jar=self.cookie_jar,
                              quality=c.get("label", "HLS"))
             self.app.manager.add_task(task)
             self.app.status_var.set(f"Vídeo adicionado: {self.name_var.get()}")
@@ -891,10 +894,12 @@ class App(tk.Tk):
         self.tree.tag_configure(Status.PAUSED, foreground=c["paused"])
 
     # ---------------------------------------------------------------- actions
-    def add_download(self, url, folder, conns, start=True, filename=None, headers=None):
+    def add_download(self, url, folder, conns, start=True, filename=None, headers=None,
+                     cookies=None, final_url=None):
         self.settings.dest_dir = folder or self.settings.dest_dir
         self.settings.connections = conns
-        task = self.manager.add(url, folder, conns, start=start, filename=filename, headers=headers)
+        task = self.manager.add(url, folder, conns, start=start, filename=filename, headers=headers,
+                                cookies=cookies, final_url=final_url)
         self._last_clip = url
         self.status_var.set(f"Adicionado: {filename or url}")
         self._refresh(schedule=False)
@@ -1085,12 +1090,10 @@ class App(tk.Tk):
             if item.get("kind") == "video":
                 VideoDialog(self, item["page"], item.get("title"), item.get("media"), item.get("cookie_jar"))
                 continue
-            headers = {}
-            if item.get("referrer"):
-                headers["Referer"] = item["referrer"]
-            if item.get("cookies"):
-                headers["Cookie"] = item["cookies"]
+            from .service import browser_request
+            headers, cookies = browser_request(item)
             AddDialog(self, item["url"], item.get("filename"), headers, title="Download do navegador",
+                      cookies=cookies, final_url=item.get("final_url"),
                       rid=item.get("rid"))
 
     def _extension_help(self) -> None:

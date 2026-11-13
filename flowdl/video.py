@@ -18,6 +18,7 @@ import uuid
 from collections import deque
 
 from .categories import category_for
+from . import vault
 from .engine import Status, sanitize_filename
 
 yt_dlp = None  # optional dependency, imported only when a video is requested (it costs ~25 MB)
@@ -76,10 +77,33 @@ def write_cookiefile(cookies: list[dict], path: str) -> str | None:
             c.get("name", ""),
             c.get("value", ""),
         ]))
-    os.makedirs(os.path.dirname(path), exist_ok=True)
+    if os.path.dirname(path):
+        os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
         f.write("\n".join(lines) + "\n")
     return path
+
+
+class temp_cookiefile:
+    """A cookies.txt that exists only while yt-dlp needs it (readable by this user only)."""
+
+    def __init__(self, jar: list | None, legacy_path: str | None = None):
+        self.jar, self.legacy_path, self.path = jar, legacy_path, None
+
+    def __enter__(self) -> str | None:
+        if not self.jar:
+            return self.legacy_path if self.legacy_path and os.path.exists(self.legacy_path) else None
+        import tempfile
+        fd, self.path = tempfile.mkstemp(prefix="flowdl-", suffix=".txt")  # created with mode 0600
+        os.close(fd)
+        return write_cookiefile(self.jar, self.path)
+
+    def __exit__(self, *exc) -> None:
+        if self.path:
+            try:
+                os.remove(self.path)
+            except OSError:
+                pass
 
 
 def _base_opts(cookiefile: str | None = None, headers: dict | None = None) -> dict:
@@ -91,11 +115,12 @@ def _base_opts(cookiefile: str | None = None, headers: dict | None = None) -> di
     return opts
 
 
-def get_options(url: str, cookiefile: str | None = None, headers: dict | None = None) -> dict:
+def get_options(url: str, cookiefile: str | None = None, headers: dict | None = None,
+                cookie_jar: list | None = None) -> dict:
     """Ask yt-dlp which qualities exist. Returns {title, options: [{label, format, audio_only}]}."""
     if not available():
         raise RuntimeError("yt-dlp não está instalado")
-    with _lib().YoutubeDL(_base_opts(cookiefile, headers)) as ydl:
+    with temp_cookiefile(cookie_jar, cookiefile) as path, _lib().YoutubeDL(_base_opts(path, headers)) as ydl:
         info = ydl.extract_info(url, download=False)
     if info.get("_type") == "playlist" and info.get("entries"):
         info = next(e for e in info["entries"] if e)
@@ -149,7 +174,7 @@ class VideoTask:
     def __init__(self, url: str, dest_dir: str, fmt: str = "bv*+ba/b", audio_only: bool = False,
                  title: str | None = None, connections: int = 8, task_id: str | None = None,
                  headers: dict | None = None, cookiefile: str | None = None, speed_limit: int = 0,
-                 quality: str = ""):
+                 quality: str = "", cookie_jar: list | None = None):
         self.id = task_id or "v" + uuid.uuid4().hex[:15]
         self.url = url
         self.dest_dir = dest_dir
@@ -159,7 +184,8 @@ class VideoTask:
         self.title = title
         self.connections = max(1, int(connections))
         self.headers = dict(headers or {})
-        self.cookiefile = cookiefile
+        self.cookiefile = cookiefile  # old versions kept a cookies.txt; now cookie_jar instead
+        self.cookie_jar = list(cookie_jar or [])  # browser cookies, protected on disk (vault)
         self._speed_limit = int(speed_limit)
         self.filename: str | None = sanitize_filename(title) if title else None
         self.path: str | None = None
@@ -236,6 +262,7 @@ class VideoTask:
             "kind": self.kind, "id": self.id, "url": self.url, "dest_dir": self.dest_dir,
             "format": self.format, "audio_only": self.audio_only, "title": self.title,
             "connections": self.connections, "headers": self.headers, "cookiefile": self.cookiefile,
+            "cookie_jar": vault.protect(self.cookie_jar),
             "speed_limit": self.speed_limit, "quality": self.quality, "filename": self.filename,
             "path": self.path, "size": self.size, "downloaded": self.downloaded,
             "status": self.status, "added_at": self.added_at,
@@ -245,7 +272,8 @@ class VideoTask:
     def from_dict(cls, d: dict) -> "VideoTask":
         t = cls(d["url"], d["dest_dir"], d.get("format", "bv*+ba/b"), d.get("audio_only", False),
                 d.get("title"), d.get("connections", 8), d.get("id"), d.get("headers"),
-                d.get("cookiefile"), d.get("speed_limit", 0), d.get("quality", ""))
+                d.get("cookiefile"), d.get("speed_limit", 0), d.get("quality", ""),
+                vault.unprotect(d.get("cookie_jar"), []))
         t.filename, t.path = d.get("filename") or t.filename, d.get("path")
         t.size, t.downloaded = d.get("size"), d.get("downloaded", 0)
         t.added_at = d.get("added_at", t.added_at)
@@ -282,7 +310,8 @@ class VideoTask:
 
     def _run(self) -> None:
         os.makedirs(self.dest_dir, exist_ok=True)
-        opts = _base_opts(self.cookiefile, self.headers)
+        self._cookies = temp_cookiefile(self.cookie_jar, self.cookiefile)
+        opts = _base_opts(self._cookies.__enter__(), self.headers)
         opts.update({
             "format": self.format,
             "outtmpl": os.path.join(self.dest_dir, self._name_template()),
@@ -323,6 +352,7 @@ class VideoTask:
                 self.error = msg.splitlines()[0][:200] if msg else exc.__class__.__name__
                 self.status = Status.ERROR
         finally:
+            self._cookies.__exit__(None, None, None)
             self.speed = 0.0
             self._eta = None
             if self.on_done:

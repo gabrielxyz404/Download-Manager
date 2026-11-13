@@ -1,0 +1,169 @@
+"""Links and login cookies: per-site cookies, expired signed links, cookies on disk."""
+
+import hashlib
+import json
+import os
+import re
+import stat
+import tempfile
+import threading
+import unittest
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+from flowdl import vault
+from flowdl.engine import DownloadTask, Status
+from flowdl.manager import DownloadManager
+
+DATA = os.urandom(6 * 1024 * 1024)
+
+
+class FileHost(BaseHTTPRequestHandler):
+    """The file server ("site B", reached as localhost). Signed links: /f?token=N is valid for
+    `uses` requests, like short-lived addresses from GitHub or cloud storage."""
+    protocol_version = "HTTP/1.1"
+    seen = []
+    tokens = {}
+    uses = 10 ** 9
+
+    def log_message(self, *a):
+        pass
+
+    def do_GET(self):
+        cls = type(self)
+        cls.seen.append({"path": self.path, "cookie": self.headers.get("Cookie"),
+                         "auth": self.headers.get("Authorization")})
+        token = self.path.split("token=")[-1]
+        left = cls.tokens.get(token, 0)
+        if left <= 0:
+            self.send_response(403)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+        cls.tokens[token] = left - 1
+        m = re.match(r"bytes=(\d+)-(\d*)", self.headers.get("Range", ""))
+        start = int(m.group(1)) if m else 0
+        end = int(m.group(2)) if m and m.group(2) else len(DATA) - 1
+        body = DATA[start:end + 1]
+        self.send_response(206 if m else 200)
+        if m:
+            self.send_header("Content-Range", f"bytes {start}-{end}/{len(DATA)}")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        try:
+            self.wfile.write(body)
+        except OSError:
+            pass
+
+
+class LinkSite(BaseHTTPRequestHandler):
+    """The site with the download link ("site A", 127.0.0.1): each visit hands out a fresh
+    signed address on the file server."""
+    protocol_version = "HTTP/1.1"
+    seen = []
+    counter = 0
+    file_port = 0
+
+    def log_message(self, *a):
+        pass
+
+    def do_GET(self):
+        cls = type(self)
+        cls.seen.append({"cookie": self.headers.get("Cookie")})
+        cls.counter += 1
+        token = f"t{cls.counter}"
+        FileHost.tokens[token] = FileHost.uses
+        self.send_response(302)
+        self.send_header("Location", f"http://localhost:{cls.file_port}/f?token={token}")
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+
+def serve(handler):
+    s = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    s.daemon_threads = True
+    threading.Thread(target=s.serve_forever, daemon=True).start()
+    return s
+
+
+class SecurityTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.files = serve(FileHost)
+        cls.site = serve(LinkSite)
+        LinkSite.file_port = cls.files.server_address[1]
+        cls.link = f"http://127.0.0.1:{cls.site.server_address[1]}/download?id=7"
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.files.shutdown()
+        cls.site.shutdown()
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        FileHost.seen, FileHost.tokens, FileHost.uses = [], {}, 10 ** 9
+        LinkSite.seen, LinkSite.counter = [], 0
+
+    def run_task(self, task):
+        task.start()
+        task.wait(60)
+        self.assertEqual(task.status, Status.COMPLETED, task.error)
+        with open(task.path, "rb") as f:
+            self.assertEqual(hashlib.sha256(f.read()).digest(), hashlib.sha256(DATA).digest())
+
+    def test_cookies_and_password_stay_with_their_site(self):
+        """C: the link site's login must not be sent to the file server it redirects to."""
+        task = DownloadTask(self.link, self.tmp, 4, headers={"Authorization": "Basic c2VjcmV0"},
+                            cookies={"127.0.0.1": "session=abc"})
+        self.run_task(task)
+        self.assertTrue(LinkSite.seen and all(r["cookie"] == "session=abc" for r in LinkSite.seen))
+        self.assertTrue(FileHost.seen)
+        self.assertTrue(all(r["cookie"] is None and r["auth"] is None for r in FileHost.seen), FileHost.seen)
+
+    def test_each_site_gets_its_own_cookies(self):
+        task = DownloadTask(self.link, self.tmp, 4,
+                            cookies={"127.0.0.1": "session=abc", "localhost": "cdn=xyz"})
+        self.run_task(task)
+        self.assertTrue(all(r["cookie"] == "cdn=xyz" for r in FileHost.seen))
+
+    def test_old_cookie_header_belongs_to_the_link_site(self):
+        task = DownloadTask(self.link, self.tmp, 2, headers={"Cookie": "session=abc"})
+        self.assertEqual(task.cookies, {"127.0.0.1": "session=abc"})
+        self.assertNotIn("Cookie", task.headers)
+
+    def test_signed_address_expires_during_download(self):
+        """A: each signed address works for 3 requests; the download asks the original link
+        for fresh ones and completes intact."""
+        FileHost.uses = 3
+        self.run_task(DownloadTask(self.link, self.tmp, 4))
+        self.assertGreater(LinkSite.counter, 1, "it should have asked the link again")
+
+    def test_browser_final_address_already_expired(self):
+        """A: the browser's final address no longer works when the app starts."""
+        task = DownloadTask(self.link, self.tmp, 4,
+                            final_url=f"http://localhost:{LinkSite.file_port}/f?token=velho")
+        self.run_task(task)
+        self.assertEqual(FileHost.seen[0]["path"], "/f?token=velho")  # tried the browser's address first
+
+    def test_cookies_not_in_plain_text_on_disk(self):
+        """E"""
+        db = os.path.join(self.tmp, "db.json")
+        mgr = DownloadManager(db_path=db)
+        mgr.add(self.link, self.tmp, 2, start=False, cookies={"127.0.0.1": "session=SEGREDO123"})
+        mgr.save()
+        with open(db, encoding="utf-8") as f:
+            text = f.read()
+        self.assertNotIn("SEGREDO123", text)
+        if os.name != "nt":
+            self.assertEqual(stat.S_IMODE(os.stat(db).st_mode), 0o600)
+        again = DownloadManager(db_path=db)
+        self.assertEqual(again.tasks[0].cookies, {"127.0.0.1": "session=SEGREDO123"})
+
+    def test_vault_roundtrip(self):
+        value = {"example.com": "a=1; b=2"}
+        self.assertEqual(vault.unprotect(vault.protect(value)), value)
+        self.assertIsNone(vault.protect({}))
+        self.assertEqual(vault.unprotect("lixo", {}), {})
+
+
+if __name__ == "__main__":
+    unittest.main()

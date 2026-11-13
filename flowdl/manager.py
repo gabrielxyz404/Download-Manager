@@ -65,6 +65,8 @@ class DownloadManager:
             self.db_path.parent.mkdir(parents=True, exist_ok=True)
             tmp = self.db_path.with_suffix(".tmp")
             tmp.write_text(payload, encoding="utf-8")
+            if os.name != "nt":
+                os.chmod(tmp, 0o600)  # holds login cookies: readable by this user only
             os.replace(tmp, self.db_path)
             self._last_saved = payload
         except OSError:
@@ -73,10 +75,11 @@ class DownloadManager:
     # -------------------------------------------------------------- operations
     def add(self, url: str, dest_dir: str | None = None, connections: int = 8,
             start: bool = True, filename: str | None = None,
-            headers: dict | None = None) -> DownloadTask:
+            headers: dict | None = None, cookies: dict | None = None,
+            final_url: str | None = None) -> DownloadTask:
         task = DownloadTask(url.strip(), dest_dir or default_download_dir(), connections,
                             filename=sanitize_filename(filename) if filename else None,
-                            headers=headers)
+                            headers=headers, cookies=cookies, final_url=final_url)
         return self.add_task(task, start)
 
     def _task_changed(self, task) -> None:

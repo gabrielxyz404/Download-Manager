@@ -40,8 +40,15 @@ def _download_item(data: dict) -> dict:
     url = str(data.get("url", ""))
     if not url.startswith(("http://", "https://", "ftp://")):
         raise ValueError("url inválida")
+    final = str(data.get("final_url") or "")
+    by_host = data.get("cookies_by_host") or {}
     item = {"url": url, "filename": data.get("filename") or None,
-            "referrer": data.get("referrer") or None, "cookies": data.get("cookies") or None}
+            "referrer": data.get("referrer") or None, "cookies": data.get("cookies") or None,
+            # where the link led in the browser (may be a short-lived signed address)
+            "final_url": final if final.startswith(("http://", "https://")) else None,
+            # the Cookie header the browser sent to each site, as observed by the extension
+            "cookies_by_host": {str(k).lower(): str(v) for k, v in by_host.items() if v}
+            if isinstance(by_host, dict) else {}}
     if data.get("mirror"):
         # The extension wants to show this download in the browser too: it will ask about
         # this request id until the download starts (or is cancelled in the app).

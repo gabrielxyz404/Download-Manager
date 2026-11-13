@@ -55,6 +55,16 @@ SLIM_AFTER_IDLE_S = 5  # restart to free memory only after this many quiet secon
 ROOT = Path(__file__).resolve().parent.parent
 
 
+def browser_request(item: dict) -> tuple[dict, dict]:
+    """Headers and per-site cookies for a download handed over by the browser."""
+    headers = {"Referer": item["referrer"]} if item.get("referrer") else {}
+    cookies = dict(item.get("cookies_by_host") or {})
+    if item.get("cookies") and not cookies:  # older extension: cookies of the link's site
+        from .engine import host_of
+        cookies[host_of(item["url"])] = item["cookies"]
+    return headers, cookies
+
+
 class Service:
     def __init__(self, settings: Settings | None = None, manager=None, port: int = DEFAULT_PORT):
         self.settings = settings or Settings()
@@ -285,13 +295,10 @@ class Service:
         if item.get("kind") == "video" or self.settings.confirm_browser:
             self.pending.append(item)
             return True
-        headers = {}
-        if item.get("referrer"):
-            headers["Referer"] = item["referrer"]
-        if item.get("cookies"):
-            headers["Cookie"] = item["cookies"]
+        headers, cookies = browser_request(item)
         task = self.manager.add(item["url"], self.settings.dest_dir, self.settings.connections,
-                                filename=item.get("filename"), headers=headers)
+                                filename=item.get("filename"), headers=headers, cookies=cookies,
+                                final_url=item.get("final_url"))
         self.bind_request(item.get("rid"), task)
         if self.settings.show_progress_window:
             self.pending.append({"kind": "progress", "task": task.id})

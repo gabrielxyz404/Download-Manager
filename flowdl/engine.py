@@ -28,7 +28,7 @@ import urllib.request
 from collections import deque
 from email.message import Message
 
-from . import net
+from . import net, vault
 from .categories import category_for
 from .limiter import GLOBAL_LIMITER, RateLimiter
 from .status import Status  # noqa: F401 (re-exported)
@@ -144,11 +144,28 @@ def _headers(extra: dict | None) -> dict:
     return {"User-Agent": USER_AGENT, **(extra or {})}
 
 
-def probe(url: str, headers: dict | None = None) -> dict:
+def host_of(url: str) -> str:
+    return (urllib.parse.urlsplit(url).hostname or "").lower()
+
+
+def split_cookies(url: str, headers: dict | None, cookies: dict | None) -> tuple[dict, dict]:
+    """Cookies are kept per site ({host: "a=1; b=2"}), never as a plain header: a header
+    would follow redirects to other sites. An old-style Cookie header belongs to ``url``'s site."""
+    headers = dict(headers or {})
+    cookies = {k.lower(): v for k, v in (cookies or {}).items() if v}
+    for k in [k for k in headers if k.lower() == "cookie"]:
+        value = headers.pop(k)
+        if value:
+            cookies.setdefault(host_of(url), value)
+    return headers, cookies
+
+
+def probe(url: str, headers: dict | None = None, cookies: dict | None = None) -> dict:
     """Find out size, final URL, file name and range support for ``url``."""
+    headers, cookies = split_cookies(url, headers, cookies)
     conn = net.Connection(TIMEOUT)
     try:
-        resp = conn.get(url, _headers(headers), 0, 0)
+        resp = conn.get(url, _headers(headers), 0, 0, cookies=cookies)
         return _info_from_response(resp)
     finally:
         conn.close()
@@ -194,7 +211,8 @@ class DownloadTask:
 
     def __init__(self, url: str, dest_dir: str, connections: int = 8,
                  filename: str | None = None, task_id: str | None = None,
-                 headers: dict | None = None, speed_limit: int = 0):
+                 headers: dict | None = None, speed_limit: int = 0,
+                 cookies: dict | None = None, final_url: str | None = None):
         # Random id: ids from the clock collided on Windows (coarse clock) when several
         # downloads were added at once.
         self.id = task_id or uuid.uuid4().hex[:16]
@@ -211,7 +229,8 @@ class DownloadTask:
         self.downloaded = 0
         self.speed = 0.0
         self.added_at = time.time()
-        self.headers = dict(headers or {})  # e.g. Referer / Cookie sent by the browser
+        # Referer etc. sent by the browser; login cookies kept per site (see split_cookies)
+        self.headers, self.cookies = split_cookies(url, headers, cookies)
         self.limiter = RateLimiter(speed_limit)
 
         self._stop = threading.Event()
@@ -226,8 +245,10 @@ class DownloadTask:
         self.server_limit: int | None = None  # connections the server accepts, when it refuses more
         self.connection_note = ""  # shown in the list: speed test / limit found
         self.reconnections = 0  # slow connections replaced
-        self._final_url: str | None = None  # after redirects; may expire, self.url never does
-        self._url_refreshed = 0.0
+        # Where the link led (after redirects): signed links there may expire; self.url, the
+        # link the user/browser started from, is asked again for a fresh one when that happens.
+        self._final_url: str | None = final_url if final_url and final_url != url else None
+        self._refresh_lock = threading.Lock()
         self._first = None
         self._workers: list[_Worker] = []
         # Browser mode: the browser also shows this download (it receives the bytes from the
@@ -298,6 +319,7 @@ class DownloadTask:
             "path": self.path, "size": self.size, "status": self.status,
             "downloaded": self.downloaded, "added_at": self.added_at,
             "headers": self.headers, "speed_limit": self.speed_limit,
+            "cookies": vault.protect(self.cookies), "final_url": self._final_url,
             "mirror": self.mirror, "stream_token": self.stream_token, "rid": self.rid,
             "awaiting_browser": self.awaiting_browser,
         }
@@ -305,7 +327,8 @@ class DownloadTask:
     @classmethod
     def from_dict(cls, d: dict) -> "DownloadTask":
         t = cls(d["url"], d["dest_dir"], d.get("connections", 8), d.get("filename"), d.get("id"),
-                d.get("headers"), d.get("speed_limit", 0))
+                d.get("headers"), d.get("speed_limit", 0), vault.unprotect(d.get("cookies"), {}),
+                d.get("final_url"))
         t.path = d.get("path")
         t.size = d.get("size")
         t.downloaded = d.get("downloaded", 0)
@@ -423,7 +446,15 @@ class DownloadTask:
         # us size / name / range support AND its data is kept (no wasted round trip).
         conn = net.Connection(TIMEOUT)
         try:
-            resp = conn.get(self.url, _headers(self.headers), 0, FIRST_REQUEST - 1)
+            try:
+                resp = conn.get(self._current_url(), self._headers_for(self._current_url()), 0, FIRST_REQUEST - 1,
+                                cookies=self.cookies)
+            except net.HTTPError as exc:
+                if not self._final_url or exc.code not in (401, 403, 404, 410):
+                    raise
+                # The browser's final address expired already: start again from the link.
+                self._final_url = None
+                resp = conn.get(self.url, _headers(self.headers), 0, FIRST_REQUEST - 1, cookies=self.cookies)
         except Exception:
             conn.close()
             raise
@@ -450,17 +481,25 @@ class DownloadTask:
     def _current_url(self) -> str:
         return self._final_url or self.url
 
-    def _refresh_url(self) -> None:
+    def _headers_for(self, url: str) -> dict:
+        """Credentials given for the link (Authorization) go to the link's own site only, also
+        when we ask the address it led to directly (cookies are per site already)."""
+        headers = _headers(self.headers)
+        if host_of(url) != host_of(self.url):
+            headers = {k: v for k, v in headers.items() if k.lower() not in net.SENSITIVE}
+        return headers
+
+    def _refresh_url(self, failed_url: str) -> None:
         """Signed download links (GitHub, cloud storage...) expire after a while. Ask the
-        original link again for a fresh one."""
-        with self._lock:
-            if time.monotonic() - self._url_refreshed < 5:
-                return
-            self._url_refreshed = time.monotonic()
-        info = probe(self.url, self.headers)
-        if info["size"] != self.size:
-            raise RuntimeError("O ficheiro mudou no servidor")
-        self._final_url = info["url"]
+        original link again for a fresh one. Only once per expired address: connections that
+        hit the same expired address meanwhile just use the new one."""
+        with self._refresh_lock:
+            if self._current_url() != failed_url:
+                return  # another connection already got a fresh address
+            info = probe(self.url, self.headers, self.cookies)
+            if info["size"] != self.size:
+                raise RuntimeError("O ficheiro mudou no servidor")
+            self._final_url = info["url"]
 
     # -- single connection (server does not support ranges / unknown size)
     def _download_single(self) -> None:
@@ -470,7 +509,7 @@ class DownloadTask:
         self._first = None
         try:
             if resp is None or resp.status == 206:  # need the whole body in one answer
-                resp = conn.get(self.url, _headers(self.headers))
+                resp = conn.get(self._current_url(), self._headers_for(self._current_url()), cookies=self.cookies)
             with open(self._part_path, "wb") as f:
                 while not self._stop.is_set():
                     chunk = resp.read(CHUNK_SIZE)
@@ -709,7 +748,8 @@ class DownloadTask:
     def _worker(self, w: "_Worker") -> None:
         retries = 0
         refusals = 0
-        url_refreshed = False
+        refreshed_without_data = False  # asked for a fresh address and got nothing since
+        req_url = self.url
         conn = w.conn or net.Connection(TIMEOUT)
         resp = w.resp
         seg = w.seg
@@ -729,7 +769,9 @@ class DownloadTask:
                             req_end = min(seg.end, seg.pos + w.request_size() - 1)
                             with seg.lock:
                                 seg.inflight_end = req_end
-                            resp = conn.get(self._current_url(), _headers(self.headers), seg.pos, req_end)
+                            req_url = self._current_url()
+                            resp = conn.get(req_url, self._headers_for(req_url), seg.pos, req_end,
+                                            cookies=self.cookies)
                             if resp.status != 206:
                                 raise RuntimeError("O servidor parou de aceitar downloads em partes")
                             self._final_url = resp.url
@@ -751,6 +793,7 @@ class DownloadTask:
                                 request_done = seg.pos > last
                             w.count(n)
                             retries = 0
+                            refreshed_without_data = False
                             if not w.got_data:
                                 w.got_data = True
                                 with self._lock:
@@ -787,10 +830,12 @@ class DownloadTask:
                                 continue
                             self._limit_hit = max(self._limit_hit, self._streaming)
                             return
-                        if code in (401, 403, 410) and not url_refreshed:
-                            url_refreshed = True  # the download link probably expired
+                        if code in (401, 403, 410) and req_url != self._current_url():
+                            continue  # another connection already replaced the expired address
+                        if code in (401, 403, 410) and not refreshed_without_data:
+                            refreshed_without_data = True  # the address probably expired
                             try:
-                                self._refresh_url()
+                                self._refresh_url(req_url)
                                 continue
                             except Exception:  # noqa: BLE001
                                 pass
