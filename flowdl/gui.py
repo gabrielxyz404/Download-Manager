@@ -41,21 +41,60 @@ COLUMNS = {
     "progress": ("Progresso", 175),
     "speed": ("Velocidade", 95),
     "eta": ("Restante", 75),
-    "conns": ("Conexões", 70),
-    "status": ("Status", 150),
+    "conns": ("Conexões", 82),
+    "status": ("Status", 200),
     "category": ("Categoria", 95),
     "added": ("Adicionado", 115),
     "url": ("Endereço", 200),
 }
 
+# Looks of the app. Colours only (and fonts / spacing in apply_theme): no images, no extra
+# library, so a look costs nothing. "muted", "done", "error", "paused" keep their meaning.
 THEMES = {
-    "light": dict(bg="#f3f3f3", fg="#1b1b1b", field="#ffffff", head="#e6e6e6", border="#c8c8c8",
-                  sel="#cce4f7", selfg="#000000", hover="#e0e0e0", muted="#666666",
-                  done="#1a7f37", error="#c62828", paused="#8a6d00"),
-    "dark": dict(bg="#1e1f22", fg="#e6e6e6", field="#2b2d31", head="#313338", border="#3f4147",
-                 sel="#2f5d8a", selfg="#ffffff", hover="#3a3c42", muted="#a0a0a0",
-                 done="#5fd27a", error="#ff7b72", paused="#e3b341"),
+    "claro": dict(label="Claro", bg="#f6f7f9", fg="#1f2328", field="#ffffff", head="#eef0f3",
+                  border="#d8dce2", sel="#dbe7ff", selfg="#0b1f44", hover="#e8ecf2", muted="#667085",
+                  sidebar="#eef1f5", stripe="#f8f9fb", accent="#2563eb", accentfg="#ffffff",
+                  done="#15803d", error="#c62828", paused="#a16207"),
+    "escuro": dict(label="Escuro", bg="#1c1d21", fg="#e6e8eb", field="#24262b", head="#2b2e34",
+                   border="#363a41", sel="#2d4a7a", selfg="#ffffff", hover="#30343b", muted="#9aa0a8",
+                   sidebar="#18191c", stripe="#282a30", accent="#3b82f6", accentfg="#ffffff",
+                   done="#4ade80", error="#f87171", paused="#facc15"),
+    "meia-noite": dict(label="Meia-noite", bg="#0f172a", fg="#e2e8f0", field="#111c33", head="#16233f",
+                       border="#1f2e4d", sel="#164e63", selfg="#ecfeff", hover="#1a2847", muted="#94a3b8",
+                       sidebar="#0b1222", stripe="#14203a", accent="#22d3ee", accentfg="#082f49",
+                       done="#34d399", error="#fb7185", paused="#fbbf24"),
+    "brasa": dict(label="Brasa", bg="#18181b", fg="#ececee", field="#202024", head="#27272b",
+                  border="#34343a", sel="#5a2d12", selfg="#fff7ed", hover="#2c2c31", muted="#a1a1aa",
+                  sidebar="#141416", stripe="#252529", accent="#f97316", accentfg="#1c0a00",
+                  done="#4ade80", error="#f87171", paused="#fde047"),
+    "menta": dict(label="Menta", bg="#f4f7f5", fg="#1b2a22", field="#ffffff", head="#e9efeb",
+                  border="#d3ddd7", sel="#d7f0e0", selfg="#0f2e1c", hover="#e3ebe6", muted="#5f7369",
+                  sidebar="#e8f0eb", stripe="#f7faf8", accent="#16a34a", accentfg="#ffffff",
+                  done="#15803d", error="#c62828", paused="#a16207"),
 }
+THEMES["light"], THEMES["dark"] = THEMES["claro"], THEMES["escuro"]  # older settings / dialogs
+DARK_THEMES = ("escuro", "meia-noite", "brasa")
+
+
+def windows_prefers_dark() -> bool:
+    """Windows' own "dark mode for apps" setting (False elsewhere / if unknown)."""
+    if not sys.platform.startswith("win"):
+        return False
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                            r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize") as k:
+            return winreg.QueryValueEx(k, "AppsUseLightTheme")[0] == 0
+    except OSError:
+        return False
+
+
+def theme_name(settings) -> str:
+    """The chosen look; "auto" follows Windows (light / dark)."""
+    name = getattr(settings, "theme", None) or ("escuro" if getattr(settings, "dark", False) else "claro")
+    if name == "auto":
+        return "escuro" if windows_prefers_dark() else "claro"
+    return name if name in THEMES else "claro"
 
 
 def open_path(path: str) -> None:
@@ -67,9 +106,9 @@ def open_path(path: str) -> None:
         subprocess.Popen(["xdg-open", path])
 
 
-def progress_bar(fraction: float, width: int = 10) -> str:
+def progress_bar(fraction: float, width: int = 12) -> str:
     filled = int(round(fraction * width))
-    return "█" * filled + "░" * (width - filled) + f" {fraction * 100:5.1f}%"
+    return "━" * filled + "╌" * (width - filled) + f"  {fraction * 100:5.1f}%"
 
 
 # ------------------------------------------------------------------- dialogs
@@ -262,7 +301,7 @@ class GrabberDialog(tk.Toplevel):
         self.app = app
         self.title("Capturar arquivos de um site")
         app.attach_dialog(self)
-        self.geometry("820x480")
+        self.geometry("860x560")
         self.results: queue.Queue = queue.Queue()
         self.items: dict[str, dict] = {}
 
@@ -365,7 +404,7 @@ class VideoDialog(tk.Toplevel):
         self.browser_title = (title or "").strip()
         self.title("Baixar vídeo")
         app.attach_dialog(self)
-        self.geometry("620x400")
+        self.minsize(640, 0)  # tall enough for its content (rows are taller in the modern look)
         self.results: queue.Queue = queue.Queue()
         self.choices: dict[str, dict] = {}
         self.cookie_jar = list(cookie_jar or [])  # kept in memory; written only temporarily
@@ -630,7 +669,7 @@ class CategoriesDialog(tk.Toplevel):
         self.app = app
         app.attach_dialog(self)
         self.title("Categorias e pastas")
-        self.geometry("720x420")
+        self.geometry("760x520")
         self.rules = [dict(r) for r in app.settings.category_rules()]
         frm = ttk.Frame(self, padding=12)
         frm.pack(fill="both", expand=True)
@@ -991,14 +1030,14 @@ class App(tk.Tk):
         self.after(3000, self._collect_garbage)
         self.withdraw()
         self.title("Flow Downloads")
-        self.geometry("1100x580")
+        self.geometry("1240x640")
         self.minsize(820, 400)
 
         self.service = service
         self.settings = service.settings
         self.manager = service.manager
         self.scheduler = service.scheduler
-        self.colors = THEMES["dark" if self.settings.dark else "light"]
+        self.colors = THEMES[theme_name(self.settings)]
         self._last_clip = ""
         self._statuses: dict[str, str] = {t.id: t.status for t in self.manager.tasks}
         self._filter = "all"
@@ -1114,8 +1153,17 @@ class App(tk.Tk):
         menubar.add_cascade(label="Downloads", menu=dl)
 
         view = tk.Menu(menubar, tearoff=False)
-        self.dark_var = tk.BooleanVar(value=self.settings.dark)
-        view.add_checkbutton(label="Tema escuro", variable=self.dark_var, command=self._toggle_theme)
+        self.theme_var = tk.StringVar(value=getattr(self.settings, "theme", None)
+                                      or ("escuro" if self.settings.dark else "claro"))
+        looks = tk.Menu(view, tearoff=False)
+        self.menus.append(looks)
+        looks.add_radiobutton(label="Automático (como o Windows)", value="auto", variable=self.theme_var,
+                              command=self._choose_theme)
+        looks.add_separator()
+        for key in ("claro", "escuro", "meia-noite", "brasa", "menta"):
+            looks.add_radiobutton(label=THEMES[key]["label"], value=key, variable=self.theme_var,
+                                  command=self._choose_theme)
+        view.add_cascade(label="Aparência", menu=looks)
         cols = tk.Menu(view, tearoff=False)
         self.col_vars = {}
         for key, (title, _w) in COLUMNS.items():
@@ -1192,13 +1240,13 @@ class App(tk.Tk):
         entry.bind("<Return>", lambda _e: self._quick_add())
         entry.focus_set()
         ttk.Button(urlbar, text="Colar", command=self._paste).pack(side="left")
-        ttk.Button(urlbar, text="⬇ Baixar", command=self._quick_add).pack(side="left", padx=(6, 0))
+        ttk.Button(urlbar, text="⬇ Baixar", command=self._quick_add, style="Accent.TButton").pack(side="left", padx=(6, 0))
 
         paned = ttk.PanedWindow(self, orient="horizontal")
         paned.pack(fill="both", expand=True, padx=10)
 
-        side = ttk.Frame(paned)
-        self.side = ttk.Treeview(side, show="tree", selectmode="browse")
+        side = ttk.Frame(paned, style="Side.TFrame")
+        self.side = ttk.Treeview(side, show="tree", selectmode="browse", style="Side.Treeview")
         self.side.pack(fill="both", expand=True)
         self.side.column("#0", width=210)
         for key, label in self.SIDEBAR:
@@ -1243,40 +1291,102 @@ class App(tk.Tk):
                   style="Status.TLabel").pack(fill="x", side="bottom")
 
     def apply_theme(self) -> None:
-        c = self.colors = THEMES["dark" if self.settings.dark else "light"]
+        c = self.colors = THEMES[theme_name(self.settings)]
         style = ttk.Style(self)
         style.theme_use("clam")
+        family = "Segoe UI" if sys.platform.startswith("win") else None
+        import tkinter.font as tkfont
+        for name in ("TkDefaultFont", "TkTextFont", "TkMenuFont", "TkHeadingFont"):
+            try:
+                f = tkfont.nametofont(name)
+                f.configure(size=10, **({"family": family} if family else {}))
+            except tk.TclError:
+                pass
+        bold = tkfont.nametofont("TkDefaultFont").copy()
+        bold.configure(weight="bold")
+        self._bold_font = bold
         style.configure(".", background=c["bg"], foreground=c["fg"], fieldbackground=c["field"],
                         bordercolor=c["border"], lightcolor=c["bg"], darkcolor=c["bg"],
                         troughcolor=c["field"], selectbackground=c["sel"], selectforeground=c["selfg"],
-                        insertcolor=c["fg"], arrowcolor=c["fg"])
+                        insertcolor=c["fg"], arrowcolor=c["muted"], focuscolor=c["accent"])
         style.map(".", background=[("active", c["hover"]), ("disabled", c["bg"])],
                   foreground=[("disabled", c["muted"])])
-        style.configure("TButton", padding=(10, 4), background=c["head"])
-        style.configure("Tool.TButton", padding=(8, 6), background=c["bg"], borderwidth=0)
+        # Buttons: flat, rounded feel through padding; the main one in the accent colour.
+        style.configure("TButton", padding=(12, 5), background=c["head"], bordercolor=c["border"],
+                        lightcolor=c["head"], darkcolor=c["head"], relief="flat")
+        style.map("TButton", background=[("pressed", c["sel"]), ("active", c["hover"])],
+                  bordercolor=[("focus", c["accent"])])
+        style.configure("Accent.TButton", padding=(14, 5), background=c["accent"], foreground=c["accentfg"],
+                        bordercolor=c["accent"], lightcolor=c["accent"], darkcolor=c["accent"], font=bold)
+        style.map("Accent.TButton", background=[("pressed", c["accent"]), ("active", c["accent"])],
+                  foreground=[("active", c["accentfg"])])
+        style.configure("Tool.TButton", padding=(10, 7), background=c["bg"], borderwidth=0,
+                        lightcolor=c["bg"], darkcolor=c["bg"], bordercolor=c["bg"])
+        style.map("Tool.TButton", background=[("active", c["hover"]), ("pressed", c["sel"])])
         style.configure("Toolbar.TFrame", background=c["bg"])
-        style.configure("TEntry", fieldbackground=c["field"], foreground=c["fg"])
-        style.configure("TSpinbox", fieldbackground=c["field"], foreground=c["fg"])
-        style.configure("TCombobox", fieldbackground=c["field"], foreground=c["fg"])
+        style.configure("TEntry", fieldbackground=c["field"], foreground=c["fg"], padding=(8, 5),
+                        bordercolor=c["border"], lightcolor=c["field"], darkcolor=c["field"])
+        style.map("TEntry", bordercolor=[("focus", c["accent"])], lightcolor=[("focus", c["accent"])])
+        style.configure("TSpinbox", fieldbackground=c["field"], foreground=c["fg"], padding=(6, 3),
+                        bordercolor=c["border"], lightcolor=c["field"], darkcolor=c["field"])
+        style.configure("TCombobox", fieldbackground=c["field"], foreground=c["fg"], padding=(6, 3),
+                        bordercolor=c["border"], lightcolor=c["field"], darkcolor=c["field"])
         style.map("TCombobox", fieldbackground=[("readonly", c["field"])], foreground=[("readonly", c["fg"])])
+        style.configure("TCheckbutton", indicatorbackground=c["field"], indicatorforeground=c["accent"])
+        style.configure("TRadiobutton", indicatorbackground=c["field"], indicatorforeground=c["accent"])
         style.configure("Treeview", background=c["field"], fieldbackground=c["field"], foreground=c["fg"],
-                        rowheight=24, borderwidth=0)
+                        rowheight=30, borderwidth=0, lightcolor=c["field"], darkcolor=c["field"])
         style.map("Treeview", background=[("selected", c["sel"])], foreground=[("selected", c["selfg"])])
-        style.configure("Treeview.Heading", background=c["head"], foreground=c["fg"], relief="flat")
+        style.configure("Treeview.Heading", background=c["field"], foreground=c["muted"], relief="flat",
+                        padding=(8, 6), borderwidth=0, lightcolor=c["field"], darkcolor=c["border"],
+                        bordercolor=c["border"], font=bold)
         style.map("Treeview.Heading", background=[("active", c["hover"])])
-        style.configure("Status.TLabel", background=c["head"], foreground=c["fg"])
+        style.layout("Treeview", [("Treeview.treearea", {"sticky": "nswe"})])  # no frame around the list
+        # Sidebar: its own tone, accent on the chosen filter.
+        style.configure("Side.Treeview", background=c["sidebar"], fieldbackground=c["sidebar"],
+                        foreground=c["fg"], rowheight=32, borderwidth=0)
+        style.map("Side.Treeview", background=[("selected", c["sel"])], foreground=[("selected", c["selfg"])])
+        style.configure("Side.TFrame", background=c["sidebar"])
+        style.configure("TPanedwindow", background=c["border"])
+        style.configure("Status.TLabel", background=c["sidebar"], foreground=c["muted"], padding=(12, 5))
+        style.configure("TScrollbar", background=c["head"], troughcolor=c["field"], bordercolor=c["field"],
+                        lightcolor=c["head"], darkcolor=c["head"], arrowcolor=c["muted"], gripcount=0)
+        style.configure("TProgressbar", background=c["accent"], troughcolor=c["head"], bordercolor=c["head"],
+                        lightcolor=c["accent"], darkcolor=c["accent"])
+        style.configure("TLabelframe", background=c["bg"], bordercolor=c["border"])
+        style.configure("TLabelframe.Label", background=c["bg"], foreground=c["muted"])
+        style.configure("TNotebook", background=c["bg"], bordercolor=c["border"])
+        style.configure("TNotebook.Tab", background=c["head"], padding=(12, 5))
+        style.map("TNotebook.Tab", background=[("selected", c["field"])])
         self.configure(background=c["bg"])
         self.option_add("*TCombobox*Listbox.background", c["field"])
         self.option_add("*TCombobox*Listbox.foreground", c["fg"])
+        self.option_add("*Text.background", c["field"])
+        self.option_add("*Text.foreground", c["fg"])
+        self.option_add("*Text.insertBackground", c["fg"])
+        self.option_add("*Text.relief", "flat")
+        self.option_add("*Text.highlightThickness", 1)
+        self.option_add("*Text.highlightColor", c["accent"])
+        self.option_add("*Text.highlightBackground", c["border"])
         for m in self.menus:
             try:
                 m.configure(background=c["field"], foreground=c["fg"], activebackground=c["sel"],
-                            activeforeground=c["selfg"], selectcolor=c["fg"])
+                            activeforeground=c["selfg"], selectcolor=c["accent"], relief="flat",
+                            borderwidth=1, activeborderwidth=0)
             except tk.TclError:
                 pass
+        if getattr(self, "side", None) is not None:
+            self.side.configure(style="Side.Treeview")
         self.tree.tag_configure(Status.COMPLETED, foreground=c["done"])
         self.tree.tag_configure(Status.ERROR, foreground=c["error"])
         self.tree.tag_configure(Status.PAUSED, foreground=c["paused"])
+        self.tree.tag_configure("stripe", background=c["stripe"])
+        for w in self.winfo_children():  # open dialogs follow the new look (plain Tk widgets)
+            if isinstance(w, tk.Toplevel):
+                try:
+                    w.configure(background=c["bg"])
+                except tk.TclError:
+                    pass
 
     # ---------------------------------------------------------------- actions
     def add_download(self, url, folder, conns, start=True, filename=None, headers=None,
@@ -1512,9 +1622,12 @@ class App(tk.Tk):
         self._filter = sel[0] if sel else "all"
         self._refresh(schedule=False)
 
-    def _toggle_theme(self) -> None:
-        self.settings.dark = self.dark_var.get()
+    def _choose_theme(self) -> None:
+        self.settings.theme = self.theme_var.get()
+        self.settings.dark = theme_name(self.settings) in DARK_THEMES
+        self.settings.save()
         self.apply_theme()
+        self._refresh(schedule=False)
 
     def _apply_columns(self) -> None:
         cols = [k for k in COLUMNS if self.col_vars[k].get() or k == "name"]
@@ -1722,10 +1835,10 @@ class App(tk.Tk):
         for idx, t in enumerate(visible):
             values = self._row(t)
             if self.tree.exists(t.id):
-                self.tree.item(t.id, values=values, tags=(t.status,))
+                self.tree.item(t.id, values=values, tags=(t.status,) + (("stripe",) if idx % 2 else ()))
                 self.tree.move(t.id, "", idx)
             else:
-                self.tree.insert("", idx, iid=t.id, values=values, tags=(t.status,))
+                self.tree.insert("", idx, iid=t.id, values=values, tags=(t.status,) + (("stripe",) if idx % 2 else ()))
         for t in self.manager.tasks:
             total_speed += t.speed
             active += t.is_running()

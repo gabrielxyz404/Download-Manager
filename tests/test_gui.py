@@ -264,13 +264,26 @@ class GuiTests(unittest.TestCase):
             shown = [app.tree.item(i)["values"][0] for i in app.tree.get_children()]
             self.assertEqual(shown, expected, item)
 
-    def test_dark_theme_and_columns(self):
+    def test_looks_and_columns(self):
         app = self.open_app()
-        app.dark_var.set(True)
-        app._toggle_theme()
         style = self.gui.ttk.Style(app)
-        self.assertEqual(style.lookup("Treeview", "background"), self.gui.THEMES["dark"]["field"])
-        self.assertTrue(self.svc.settings.dark)
+        for key in ("claro", "escuro", "meia-noite", "brasa", "menta"):
+            app.theme_var.set(key)
+            app._choose_theme()
+            look = self.gui.THEMES[key]
+            self.assertEqual(style.lookup("Treeview", "background"), look["field"], key)
+            self.assertEqual(style.lookup("Accent.TButton", "background"), look["accent"], key)
+            self.assertEqual(style.lookup("Side.Treeview", "background"), look["sidebar"], key)
+            self.assertEqual(self.svc.settings.theme, key)
+            self.assertEqual(self.svc.settings.dark, key in self.gui.DARK_THEMES)
+        self.assertIn('"theme": "menta"', read_text(self.svc.settings.path))
+        with mock.patch.object(self.gui, "windows_prefers_dark", return_value=True):
+            app.theme_var.set("auto")
+            app._choose_theme()
+            self.assertEqual(style.lookup("Treeview", "background"), self.gui.THEMES["escuro"]["field"])
+        self.svc.settings.theme = None  # settings from an older version: "dark" decides
+        self.svc.settings.dark = True
+        self.assertEqual(self.gui.theme_name(self.svc.settings), "escuro")
         app.col_vars["speed"].set(False)
         app.col_vars["url"].set(True)
         app._apply_columns()

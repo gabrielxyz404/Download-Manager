@@ -17,6 +17,7 @@ class Settings:
         self.max_active = 3
         self.watch_clipboard = True
         self.dark = False
+        self.theme = None  # "auto", "claro", "escuro", "meia-noite", "brasa", "menta" (None: from "dark")
         self.columns = list(DEFAULT_COLUMNS)
         self.global_limit_kb = 0
         self.limit_on = True         # the global limit can be switched off/on from the tray icon
