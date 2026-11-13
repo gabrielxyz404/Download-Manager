@@ -6,6 +6,11 @@
 
 Feito em Python, **sem nenhuma dependência para instalar** — só o Python.
 
+
+**Baixar:** a versão mais recente está sempre em
+[Releases](https://github.com/gabrielxyz404/Download-Manager/releases/latest) (`FlowDownloads-Setup.exe`,
+com o SHA-256 em `SHA256SUMS.txt`). A app procura versões novas em **Ajuda → Procurar atualizações**.
+
 ## Leve em segundo plano
 
 O Flow Downloads foi feito para não pesar no computador:
