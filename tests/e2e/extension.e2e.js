@@ -44,7 +44,7 @@ const links = ["relatorio", "lento", "cancelar", "confirmado", "naoquero", "menu
 const site = http.createServer((req, res) => {
   if (req.url === "/") {
     res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Set-Cookie": "sessao=abc123; Path=/" });
-    return res.end(links + ' <a id="cdn" href="/redir/cdn.zip">cdn</a> <a id="notas" href="/files/notas.txt">notas</a>' +
+    return res.end(links + ' <a id="cdn" href="/redir/cdn.zip">cdn</a> <a id="notas" href="/files/notas.txt">notas</a> <a id="semnome" href="/get?id=7">semnome</a>' +
                    '<form id="formpost" method="post" action="/files/formulario.zip"><button id="postbtn">post</button></form>');
   }
   if (req.url === "/setcdn") { // the file server's own login cookie (a different site: localhost)
@@ -75,6 +75,15 @@ const site = http.createServer((req, res) => {
   if (req.url === "/clip.mp4" && clip) {
     res.writeHead(200, { "Content-Type": "video/mp4", "Content-Length": clip.length });
     return res.end(clip);
+  }
+  if (req.url.startsWith("/get?")) { // a link without the file name: only the server says it is a .zip
+    const m = /bytes=(\d+)-(\d*)/.exec(req.headers.range || "");
+    const start = m ? +m[1] : 0, end = m && m[2] ? +m[2] : BIG.length - 1;
+    const h = { "Content-Type": "application/x-zip-compressed", "Accept-Ranges": "bytes", "Content-Length": end - start + 1,
+                "Content-Disposition": 'attachment; filename="pacote.zip"' };
+    if (m) h["Content-Range"] = `bytes ${start}-${end}/${BIG.length}`;
+    res.writeHead(m ? 206 : 200, h);
+    return res.end(BIG.subarray(start, end + 1));
   }
   const slow = req.url.startsWith("/slow/");
   if (req.url.startsWith("/files/") || slow) {
@@ -251,6 +260,15 @@ const sameAsBig = (file) => fs.existsSync(file) && fs.readFileSync(file).equals(
   check("Tipo fora da lista (.txt) fica com o navegador", !!notas && notas.state === "complete" &&
         (await all()).length === n3 + 1 && !appTasks().some((t) => (t.filename || "").includes("notas")),
         appMethods.filter((m) => m.includes("notas")).length + " pedido(s) ao site");
+
+  // 3b''. A link whose address has no file name (/get?id=7): only the server says "pacote.zip".
+  ids = (await byUrl()).map((d) => d.id);
+  await page.click("#semnome");
+  let pacote = await newest(ids);
+  pacote = pacote && await finished(pacote.id);
+  check("Link sem nome no endereço (o servidor diz que é .zip): a app apanha", !!pacote && sameAsBig(pacote.filename) &&
+        appTasks().some((t) => (t.url || "").endsWith("/get?id=7")), pacote ? pacote.filename : "não apanhou");
+  await page.goto(SITE + "/");
 
   // 3c. A link that redirects to a signed address on another site with its own login cookie.
   const cdnPage = await ctx.newPage();

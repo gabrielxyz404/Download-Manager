@@ -30,6 +30,20 @@ class CaptureRuleTests(unittest.TestCase):
         self.assertFalse(should_capture(S, "https://a.com/download.php?f=1", mime="text/html"))
         self.assertTrue(should_capture(S, "https://a.com/get.php", filename="jogo.iso"))
 
+    def test_name_not_known_yet_uses_server_content_type(self):
+        """The browser often reports the download before it knows the file name."""
+        self.assertTrue(should_capture(S, "https://a.com/get?id=7", mime="application/x-zip-compressed"))
+        self.assertTrue(should_capture(S, "https://a.com/get?id=7", mime="application/vnd.rar"))
+        self.assertTrue(should_capture(S, "https://a.com/get?id=7", mime="video/mp4"))
+        self.assertFalse(should_capture(S, "https://a.com/get?id=7", mime="text/html"))
+        self.assertFalse(should_capture(S, "https://a.com/get?id=7", mime="text/plain"))
+        self.assertFalse(should_capture(S, "https://a.com/get?id=7", mime="image/png"))
+        self.assertFalse(should_capture(S, "https://a.com/get?id=7", mime="application/json"))
+
+        class NoZip(S):
+            capture_types = [t for t in DEFAULT_TYPES if t != "zip"]
+        self.assertFalse(should_capture(NoZip, "https://a.com/get?id=7", mime="application/x-zip-compressed"))
+
     def test_final_address_name(self):
         self.assertTrue(should_capture(S, "https://a.com/go?id=9", final_url="https://cdn.a.com/file.7z"))
 
