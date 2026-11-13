@@ -231,7 +231,8 @@ def main() -> int:
         now = app_pids(name)
         if now:
             mem = memory_mb(now[0])
-            check("Memória em segundo plano", mem < 40, f"{mem:.1f} MB")
+            # ~37 MB, plus ~4 MB for the icon next to the clock (Windows loads shell32 for it)
+            check("Memória em segundo plano", mem < 45, f"{mem:.1f} MB")
     else:
         print("(psutil em falta: verificações de processo ignoradas)")
     check("Continua a responder ao navegador", wait_for(ping, 10))
