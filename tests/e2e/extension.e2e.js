@@ -44,7 +44,7 @@ const links = ["relatorio", "lento", "cancelar", "confirmado", "naoquero", "menu
 const site = http.createServer((req, res) => {
   if (req.url === "/") {
     res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Set-Cookie": "sessao=abc123; Path=/" });
-    return res.end(links + ' <a id="cdn" href="/redir/cdn.zip">cdn</a>' +
+    return res.end(links + ' <a id="cdn" href="/redir/cdn.zip">cdn</a> <a id="notas" href="/files/notas.txt">notas</a>' +
                    '<form id="formpost" method="post" action="/files/formulario.zip"><button id="postbtn">post</button></form>');
   }
   if (req.url === "/setcdn") { // the file server's own login cookie (a different site: localhost)
@@ -235,6 +235,15 @@ const sameAsBig = (file) => fs.existsSync(file) && fs.readFileSync(file).equals(
         appMethods.filter((m) => m.includes("formulario")).join(", "));
   await page.goto(SITE + "/");
 
+  // 3b'. A type not in the app's list (.txt): the browser keeps it, without re-downloading.
+  const n3 = (await all()).length;
+  await page.click("#notas");
+  await waitFor(async () => { const t = (await all()).find((d) => d.url.endsWith("/notas.txt")); return t && t.state === "complete"; }, 10000);
+  const notas = (await all()).find((d) => d.url.endsWith("/notas.txt"));
+  check("Tipo fora da lista (.txt) fica com o navegador", !!notas && notas.state === "complete" &&
+        (await all()).length === n3 + 1 && !appTasks().some((t) => (t.filename || "").includes("notas")),
+        appMethods.filter((m) => m.includes("notas")).length + " pedido(s) ao site");
+
   // 3c. A link that redirects to a signed address on another site with its own login cookie.
   const cdnPage = await ctx.newPage();
   await cdnPage.goto("http://localhost:8771/setcdn");
@@ -271,8 +280,9 @@ const sameAsBig = (file) => fs.existsSync(file) && fs.readFileSync(file).equals(
     check("Janela de qualidade do vídeo abriu", await waitFor(() => windows("^Baixar v").length > 0, 15000));
     await sleep(4000);
     await pressIn("^Baixar v", "Return");
-    check("Vídeo descarregado", await waitFor(() => fs.existsSync(DL) &&
-      fs.readdirSync(DL).some((f) => f.endsWith(".mp4") && fs.statSync(path.join(DL, f)).size > 10000), 40000));
+    const videoDir = path.join(DL, "Vídeos"); // category folder
+    check("Vídeo descarregado (na pasta Vídeos)", await waitFor(() => fs.existsSync(videoDir) &&
+      fs.readdirSync(videoDir).some((f) => f.endsWith(".mp4") && fs.statSync(path.join(videoDir, f)).size > 10000), 40000));
   }
 
   // 6. "Abrir Flow Downloads" and Ctrl+W.

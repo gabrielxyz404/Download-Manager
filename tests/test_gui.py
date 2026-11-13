@@ -456,6 +456,24 @@ class GuiTests(unittest.TestCase):
         self.wait_status(task, "Concluído")
         self.assertEqual(os.path.dirname(task.path), os.path.join(self.dl, "Compactados"))
 
+    def test_capture_types_window(self):
+        app = self.open_app()
+        dlg = self.gui.CaptureDialog(app)
+        dlg.types.delete("1.0", "end")
+        dlg.types.insert("1.0", "zip, .MKV  pdf")
+        dlg.sites.insert("1.0", "banco.pt\n")
+        dlg._save()
+        s = self.svc.settings
+        self.assertEqual(s.capture_types, ["zip", "mkv", "pdf"])
+        self.assertEqual(s.capture_skip_sites, ["banco.pt"])
+        self.assertIn('"banco.pt"', read_text(s.path))
+        dlg = self.gui.CaptureDialog(app)
+        dlg.all.set(True)
+        dlg._toggle()
+        self.assertEqual(str(dlg.types["state"]), "disabled")
+        dlg._save()
+        self.assertTrue(s.capture_all_types)
+
     # -------------------------------------------------------- other windows
     def test_site_grabber(self):
         app = self.open_app()

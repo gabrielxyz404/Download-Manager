@@ -26,6 +26,12 @@ class Settings:
         self.run_in_background = True
         self.background_hint_shown = False
         self.scheduler: dict = {}
+        # Browser downloads the app takes over: these types (like IDM), or all of them; never
+        # from these sites.
+        from .capture import DEFAULT_TYPES
+        self.capture_types = list(DEFAULT_TYPES)
+        self.capture_all_types = False
+        self.capture_skip_sites: list = []
         self.category_folders = True   # save each category in its own folder (Downloads/Vídeos...)
         self.categories: list = []     # rules + folders; empty = the defaults (categories.default_rules)
         try:

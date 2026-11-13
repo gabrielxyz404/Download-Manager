@@ -206,6 +206,11 @@ class Service:
                 self._req_cond.wait_for(lambda: self.requests[rid]["state"] != "waiting",
                                         timeout=REQUEST_WAIT_S)
                 return 200, {"ok": True, **{k: v for k, v in self.requests[rid].items() if k != "task"}}
+        if path == "/check":  # should the app take this browser download? (file types, sites)
+            from .capture import should_capture
+            return 200, {"ok": True, "capture": should_capture(
+                self.settings, str(data.get("url", "")), str(data.get("final_url", "")),
+                str(data.get("filename", "")), str(data.get("mime", "")), str(data.get("referrer", "")))}
         rid = str(data.get("rid", ""))
         self._restore_request(rid)
         task = self._task_for(rid) if rid in self.requests else None

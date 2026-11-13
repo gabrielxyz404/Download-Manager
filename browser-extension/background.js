@@ -243,6 +243,13 @@ chrome.downloads.onCreated.addListener(async (item) => {
   if (watched && watched.method !== "GET") return; // a form's POST: only the browser can repeat it
   if (!(await isEnabled())) return;
   if (!(await appAlive())) return; // app closed: let the browser handle it
+  // Ask before taking it: only the file types / sites chosen in the app (an older app that
+  // does not know this question answers nothing useful: then take it, as before).
+  const verdict = await postJson("/check", {
+    url, final_url: finalUrl, filename: item.filename ? item.filename.split(/[\\/]/).pop() : "",
+    mime: item.mime || "", referrer: item.referrer || "",
+  }, 2);
+  if (verdict && verdict.capture === false) return; // the browser simply carries on
 
   try {
     await chrome.downloads.cancel(item.id);

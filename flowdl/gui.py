@@ -733,6 +733,56 @@ class CategoryEditor(tk.Toplevel):
         self.destroy()
 
 
+class CaptureDialog(tk.Toplevel):
+    """Which browser downloads the app takes over."""
+
+    def __init__(self, app: "App"):
+        super().__init__(app)
+        self.app = app
+        app.attach_dialog(self)
+        self.title("Tipos apanhados do navegador")
+        s = app.settings
+        frm = ttk.Frame(self, padding=12)
+        frm.pack(fill="both", expand=True)
+        self.all = tk.BooleanVar(value=s.capture_all_types)
+        ttk.Checkbutton(frm, text="Apanhar todos os tipos de ficheiro", variable=self.all,
+                        command=self._toggle).pack(anchor="w")
+        ttk.Label(frm, text="Apanhar só estes tipos (os outros ficam com o navegador):").pack(anchor="w", pady=(8, 2))
+        self.types = tk.Text(frm, height=5, width=70, wrap="word")
+        self.types.pack(fill="x")
+        self.types.insert("1.0", " ".join(s.capture_types))
+        ttk.Button(frm, text="Repor a lista de origem", command=self._reset).pack(anchor="w", pady=(4, 0))
+        ttk.Label(frm, text="Nunca apanhar destes sites (um por linha, ex.: banco.pt ou *.exemplo.com):"
+                  ).pack(anchor="w", pady=(10, 2))
+        self.sites = tk.Text(frm, height=4, width=70)
+        self.sites.pack(fill="x")
+        self.sites.insert("1.0", "\n".join(s.capture_skip_sites))
+        btns = ttk.Frame(frm)
+        btns.pack(fill="x", pady=(10, 0))
+        ttk.Button(btns, text="Cancelar", command=self.destroy).pack(side="right")
+        ttk.Button(btns, text="Guardar", command=self._save).pack(side="right", padx=4)
+        self._toggle()
+
+    def _toggle(self) -> None:
+        self.types.configure(state="disabled" if self.all.get() else "normal")
+
+    def _reset(self) -> None:
+        from .capture import DEFAULT_TYPES
+        self.types.configure(state="normal")
+        self.types.delete("1.0", "end")
+        self.types.insert("1.0", " ".join(DEFAULT_TYPES))
+        self._toggle()
+
+    def _save(self) -> None:
+        import re as _re
+        s = self.app.settings
+        s.capture_all_types = bool(self.all.get())
+        s.capture_types = [t.lower().lstrip(".") for t in _re.split(r"[\s,;]+", self.types.get("1.0", "end")) if t.strip()]
+        s.capture_skip_sites = [x.strip() for x in self.sites.get("1.0", "end").splitlines() if x.strip()]
+        s.save()
+        self.destroy()
+
+
 class ShutdownCountdown(tk.Toplevel):
     def __init__(self, app: "App", seconds: int = 30):
         super().__init__(app)
@@ -923,6 +973,7 @@ class App(tk.Tk):
         opts.add_command(label="Downloads simultâneos...", command=self._max_active)
         opts.add_command(label="Pasta padrão...", command=self._choose_dir)
         opts.add_command(label="Categorias e pastas...", command=lambda: CategoriesDialog(self))
+        opts.add_command(label="Tipos apanhados do navegador...", command=lambda: CaptureDialog(self))
         menubar.add_cascade(label="Opções", menu=opts)
 
         helpm = tk.Menu(menubar, tearoff=False)
