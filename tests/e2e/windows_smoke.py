@@ -300,6 +300,38 @@ def main() -> int:
         check("Reinicia-se em modo leve outra vez", wait_for(lambda: snapshot() and snapshot() != before and ping(), 40),
               f"antes {before} depois {snapshot()}")
         from_browser("quarto.bin", "Depois de reiniciar")
+    # The browser can start the app when it is closed (native messaging): registered at start,
+    # and calling the program the way the browser does starts it in the background.
+    if sys.platform == "win32":
+        import winreg
+        try:
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                                r"Software\BraveSoftware\Brave-Browser\NativeMessagingHosts\com.flowdownloads.app") as k:
+                manifest_path = winreg.QueryValueEx(k, "")[0]
+            registered = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
+            ok = registered["allowed_origins"] == ["chrome-extension://iomfaojagjphjdphkipgejgebijmpfph/"]
+        except OSError as exc:
+            ok, registered = False, str(exc)
+        check("Registada no Brave/Chrome para o navegador a poder abrir", ok, str(registered)[:200])
+    for pid in app_pids(name):
+        try:
+            import psutil
+            psutil.Process(pid).kill()
+        except Exception:  # noqa: BLE001
+            pass
+    proc.kill()
+    wait_for(lambda: not ping(), 15)
+    host = subprocess.Popen(cmd + ["chrome-extension://iomfaojagjphjdphkipgejgebijmpfph/", "--parent-window=0"],
+                            env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+    try:
+        host.stdin.close()
+        host_ended = host.wait(30) is not None
+    except subprocess.TimeoutExpired:
+        host_ended = False
+        host.kill()
+    check("Chamada pelo navegador: abre a app e termina logo", host_ended and wait_for(ping, 60))
+    proc = subprocess.Popen([sys.executable, "-c", "pass"])  # (the started app is ended below)
+
     crash = cfg / "FlowDownloads" / "crash.log"
     check("Nenhum erro registado (crash.log)", not crash.exists(),
           crash.read_text(encoding="utf-8", errors="replace")[-2000:] if crash.exists() else "")

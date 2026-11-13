@@ -14,7 +14,7 @@ async function refresh() {
   $("capture").checked = !!st.enabled;
   $("dot").className = "dot " + (st.app ? "on" : "off");
   $("appState").textContent = st.app ? "aberto" : "fechado";
-  if (!st.app) show("Abra o Flow Downloads no computador para baixar.", "err");
+  if (!st.app) show("O Flow Downloads está fechado: clique em \"Abrir Flow Downloads\" (ou ele abre sozinho no próximo download).", "err");
   else if (st.extensionOk === false)
     show("⚠ Extensão desatualizada: abra brave://extensions e clique em ↻ (recarregar) no Flow Downloads.", "err");
 }
@@ -39,9 +39,10 @@ $("videoForm").addEventListener("submit", async (e) => {
 });
 
 $("open").addEventListener("click", async () => {
+  show("A abrir o Flow Downloads...");
   const res = await send({ type: "show" });
   if (res.ok) window.close();
-  else show("O Flow Downloads não está a correr. Abra-o no computador.", "err");
+  else show("Não consegui abrir o Flow Downloads. Abra-o pelo menu Iniciar.", "err");
 });
 
 $("capture").addEventListener("change", (e) => send({ type: "toggle", enabled: e.target.checked }));

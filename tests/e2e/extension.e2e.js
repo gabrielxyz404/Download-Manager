@@ -25,6 +25,10 @@ const results = [];
 function check(name, ok, detail = "") {
   results.push(ok);
   console.log(`${ok ? "✔" : "✘"} ${name}${detail ? " — " + detail : ""}`);
+  if (!ok && process.env.FLOWDL_DEBUG) { // diagnosis: the app writes where its threads are
+    spawnSync("pkill", ["-USR1", "-f", "flowdl.service import run"]);
+    spawnSync("pkill", ["-USR1", "-f", "Flow Downloads.pyw"]);
+  }
 }
 
 // ------------------------------------------------------------------ test web site
@@ -42,8 +46,20 @@ const appMethods = [];
 let browserUA = "", browserCH = "", onceUsed = false, pageUsed = false, slowStartUsed = false;
 const onceSeen = [], uaSeen = [];
 const links = ["relatorio", "lento", "cancelar", "confirmado", "naoquero", "menu", "off", "fechado",
-               "altclique", "proximo", "ignorado"]
-  .map((n) => `<a id="${n}" href="/${n === "lento" || n === "cancelar" ? "slow" : "files"}/${n}.zip">${n}</a>`).join(" ");
+               "altclique", "proximo", "ignorado", "abreapp"]
+  .map((n) => `<a id="${n}" href="/${["lento", "cancelar", "abreapp"].includes(n) ? "slow" : "files"}/${n}.zip">${n}</a>`).join(" ");
+// Files arrive at a real-internet pace (~4 MB/s), not instantly: a download the browser has
+// already finished is left with it (nothing to speed up), as it should be.
+function sendPaced(res, body) {
+  let i = 0;
+  const tick = () => {
+    if (res.destroyed) return;
+    if (i >= body.length) return res.end();
+    res.write(body.subarray(i, i + 65536)); i += 65536; setTimeout(tick, 15);
+  };
+  tick();
+}
+
 const site = http.createServer((req, res) => {
   if (req.url === "/") { // the browser's identity
     browserUA = req.headers["user-agent"] || "";
@@ -72,7 +88,7 @@ const site = http.createServer((req, res) => {
                 "Content-Disposition": 'attachment; filename="cdn.zip"' };
     if (m) h["Content-Range"] = `bytes ${start}-${end}/${BIG.length}`;
     res.writeHead(m ? 206 : 200, h);
-    return res.end(BIG.subarray(start, end + 1));
+    return sendPaced(res, BIG.subarray(start, end + 1));
   }
   if (req.url === "/video.html") {
     res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
@@ -157,7 +173,7 @@ const site = http.createServer((req, res) => {
                 "Content-Disposition": 'attachment; filename="protegido.zip"' };
     if (m) h["Content-Range"] = `bytes ${start}-${end}/${BIG.length}`;
     res.writeHead(m ? 206 : 200, h);
-    return res.end(BIG.subarray(start, end + 1));
+    return sendPaced(res, BIG.subarray(start, end + 1));
   }
   if (req.url.startsWith("/get?")) { // a link without the file name: only the server says it is a .zip
     const m = /bytes=(\d+)-(\d*)/.exec(req.headers.range || "");
@@ -166,7 +182,7 @@ const site = http.createServer((req, res) => {
                 "Content-Disposition": 'attachment; filename="pacote.zip"' };
     if (m) h["Content-Range"] = `bytes ${start}-${end}/${BIG.length}`;
     res.writeHead(m ? 206 : 200, h);
-    return res.end(BIG.subarray(start, end + 1));
+    return sendPaced(res, BIG.subarray(start, end + 1));
   }
   const slow = req.url.startsWith("/slow/");
   if (req.url.startsWith("/files/") || slow) {
@@ -181,7 +197,7 @@ const site = http.createServer((req, res) => {
     if (m) headers["Content-Range"] = `bytes ${start}-${end}/${BIG.length}`;
     res.writeHead(m ? 206 : 200, headers);
     const body = BIG.subarray(start, end + 1);
-    if (!slow) return res.end(body);
+    if (!slow) return sendPaced(res, body);
     let i = 0; // ~400 KB/s in total, so we can watch / pause / cancel it
     const tick = () => {
       if (res.destroyed) return;
@@ -219,6 +235,7 @@ async function startApp(settings) {
 async function stopApp() {
   if (app) { app.kill(); app = null; }
   spawnSync("pkill", ["-f", "flowdl.service import run"]);
+  spawnSync("pkill", ["-f", "Flow Downloads.pyw"]); // also one the browser started
   await waitFor(async () => !(await ping()), 5000);
 }
 function appTasks() {
@@ -551,6 +568,34 @@ const sameAsBig = (file) => fs.existsSync(file) && fs.readFileSync(file).equals(
         closedItem.state === "complete");
   p = await popup();
   check("Menu da extensão mostra a app fechada", (await p.textContent("#appState")) === "fechado");
+  await p.close();
+
+  // 10. Installed app registered with the browser (as the app does on Windows): the browser
+  // starts it when it is closed, and the download is still taken by the app.
+  const hostDir = path.join(WORK, "profile", "NativeMessagingHosts");
+  fs.mkdirSync(hostDir, { recursive: true });
+  const hostScript = path.join(WORK, "native-host.sh");
+  fs.writeFileSync(hostScript, `#!/bin/sh\nexport XDG_CONFIG_HOME="${CFG}" APPDATA="${CFG}"\n` +
+                               `exec "${APP_PY}" "${path.join(ROOT, "Flow Downloads.pyw")}" "$@"\n`, { mode: 0o755 });
+  fs.writeFileSync(path.join(hostDir, "com.flowdownloads.app.json"), JSON.stringify({
+    name: "com.flowdownloads.app", description: "Flow Downloads", path: hostScript, type: "stdio",
+    allowed_origins: [`chrome-extension://${extId}/`] }));
+  fs.writeFileSync(path.join(CFG, "FlowDownloads", "settings.json"),  // normal settings again (no confirmation)
+                   JSON.stringify({ dest_dir: DL, background_hint_shown: true }));
+  check("A extensão tem o ID fixo que a app autoriza", extId === "iomfaojagjphjdphkipgejgebijmpfph", extId);
+  ids = (await byUrl()).map((d) => d.id);
+  await page.click("#abreapp");
+  let viaApp = await newest(ids);
+  viaApp = viaApp && await finished(viaApp.id);
+  const lastNm = await (async () => { const q = await popup(); const t = await q.textContent("#last"); await q.close(); return t; })();
+  check("App fechada: o navegador abre-a sozinho e ela apanha o download", await ping() && !!viaApp &&
+        sameAsBig(viaApp.filename) && appTasks().some((t) => (t.url || "").endsWith("/abreapp.zip")),
+        `${viaApp ? viaApp.filename : "não"} | ${lastNm}`);
+  await stopApp();
+  p = await popup();
+  await p.click("#open");
+  check("Botão \"Abrir Flow Downloads\" abre a app fechada", await waitFor(ping, 20000));
+  await stopApp();
 
   await ctx.close();
   site.close();

@@ -548,11 +548,21 @@ def run(background: bool = False) -> None:
 
 def _run(background: bool) -> None:
     log("start", sys.executable, sys.argv)
+    if os.environ.get("FLOWDL_DEBUG") and hasattr(__import__("signal"), "SIGUSR1"):
+        # Diagnosis: "kill -USR1 <pid>" writes where every thread is (a stuck app tells why).
+        import faulthandler
+        import signal
+        faulthandler.register(signal.SIGUSR1, file=open(config_dir() / "stacks.log", "a"), all_threads=True)
     if _existing_instance(show=not background):
         log("already running")
         return
     svc = Service()
     svc.slim_enabled = True
+    try:  # let the browser start us when we are closed (Windows; quick, only writes changes)
+        from . import nativehost
+        nativehost.register()
+    except Exception as exc:  # noqa: BLE001 - never stop the app for this
+        log("native host registration failed:", exc)
     if svc.settings.browser_integration:
         log("bridge", "listening" if svc.start_bridge(retries=20) else "FAILED to listen")
     if svc.settings.auto_resume and svc.has_saved_active_downloads():
@@ -580,6 +590,7 @@ def _run(background: bool) -> None:
             # collector may do it later from a download thread, which Tkinter does not allow.
             import gc
             gc.collect()
+            gc.enable()  # the windows are gone: automatic clean-up is safe again (see gui.App)
             if svc.exit_requested or not svc.settings.run_in_background:
                 break
             if svc.can_slim_down():

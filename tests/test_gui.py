@@ -131,6 +131,8 @@ class GuiTests(unittest.TestCase):
             self.app = None
         import gc
         gc.collect()  # same as the real app does after closing a window
+        gc.enable()
+        self.assertFalse(gc.garbage)
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     def open_app(self, mode="main"):
@@ -440,6 +442,29 @@ class GuiTests(unittest.TestCase):
         pump(app, 0.5)
         self.assertNotIn(task, self.svc.manager.tasks)
         self.assertFalse(self._alive(win))
+
+    def test_window_objects_are_only_freed_in_the_window_thread(self):
+        """Regression: a download thread saving the list ran the automatic memory clean-up,
+        which freed a Tk variable of a closed window outside the Tk thread: both froze."""
+        import gc
+        app = self.open_app()
+        self.assertFalse(gc.isenabled())  # while windows exist: only the Tk thread cleans up
+        for _ in range(5):
+            dlg = self.gui.HostLimitsDialog(app)
+            dlg.destroy()  # leaves Tk objects in reference cycles
+        made_in_other_threads = []
+
+        def churn():  # what download threads do: lots of allocations
+            for _ in range(20000):
+                made_in_other_threads.append({"a": [1, 2, 3]})
+        threads = [threading.Thread(target=churn) for _ in range(4)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(10)
+            self.assertFalse(t.is_alive(), "a thread froze")
+        pump(app, 3.5)  # the periodic clean-up in the Tk thread runs
+        self.assertFalse(gc.isenabled())
 
     def test_quit_while_progress_window_is_open(self):
         """Regression: closing the app with a progress window open raised a Tk error

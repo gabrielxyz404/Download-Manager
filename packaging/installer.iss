@@ -47,6 +47,12 @@ Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppExe}"; Tasks: desktopico
 [Registry]
 ; Same entry the app uses for "Opções → Iniciar com o computador".
 Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "FlowDownloads"; ValueData: """{app}\{#AppExe}"" --background"; Flags: uninsdeletevalue; Tasks: autostart
+; The app registers itself so the browser can start it when it is closed (native messaging);
+; these only make sure the entries go away when the app is uninstalled.
+Root: HKCU; Subkey: "Software\Google\Chrome\NativeMessagingHosts\com.flowdownloads.app"; Flags: uninsdeletekey dontcreatekey
+Root: HKCU; Subkey: "Software\BraveSoftware\Brave-Browser\NativeMessagingHosts\com.flowdownloads.app"; Flags: uninsdeletekey dontcreatekey
+Root: HKCU; Subkey: "Software\Microsoft\Edge\NativeMessagingHosts\com.flowdownloads.app"; Flags: uninsdeletekey dontcreatekey
+Root: HKCU; Subkey: "Software\Chromium\NativeMessagingHosts\com.flowdownloads.app"; Flags: uninsdeletekey dontcreatekey
 
 [Run]
 Filename: "{app}\{#AppExe}"; Description: "Abrir o Flow Downloads"; Flags: nowait postinstall skipifsilent

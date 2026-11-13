@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gc
 import os
 import queue
 import subprocess
@@ -981,6 +982,13 @@ class App(tk.Tk):
         """``mode``: "main" shows the window; "dialog" only shows the browser's dialog;
         "countdown" only shows the shutdown countdown."""
         super().__init__()
+        # Window objects may only be freed in this (the Tk) thread. Python's automatic memory
+        # clean-up runs in whatever thread happens to allocate at that moment - e.g. a download
+        # saving its list - and freeing a Tk variable there deadlocks both threads (seen: the
+        # app froze after a window was closed). So while windows exist, the clean-up runs only
+        # here, every few seconds; it is switched back on when the windows are gone.
+        gc.disable()
+        self.after(3000, self._collect_garbage)
         self.withdraw()
         self.title("Flow Downloads")
         self.geometry("1100x580")
@@ -1420,6 +1428,13 @@ class App(tk.Tk):
             self.after(0, lambda: (messagebox.showinfo if result[0] else messagebox.showwarning)(
                 "Verificar checksum", f"{task.filename}\n\n{result[1]}", parent=self))
         threading.Thread(target=work, daemon=True).start()
+
+    def _collect_garbage(self) -> None:
+        gc.collect()
+        try:
+            self.after(3000, self._collect_garbage)
+        except tk.TclError:
+            pass
 
     def _copy_url(self) -> None:
         tasks = self._selected()

@@ -28,6 +28,41 @@ async function appAlive(tries = 4) {
   return false;
 }
 
+// The app is closed: ask the browser to start it (native messaging; the installed app
+// registers itself), then wait for it to answer. Never more than one start at a time.
+const HOST = "com.flowdownloads.app";
+let starting = null;
+
+function startApp(waitMs = 15000) {
+  if (!starting) {
+    starting = (async () => {
+      let missing = false; // the browser does not know the app (not installed / not registered)
+      try {
+        const port = chrome.runtime.connectNative(HOST);
+        port.onDisconnect.addListener(() => { // it ends right away once the app is started
+          const err = chrome.runtime.lastError;
+          if (err && /not found|forbidden|not allowed|n[ãa]o encontrado/i.test(err.message || "")) missing = true;
+        });
+        port.onMessage.addListener(() => {});
+      } catch {
+        return false;
+      }
+      const end = Date.now() + waitMs;
+      while (Date.now() < end && !missing) {
+        if (await pingOnce()) return true;
+        await sleep(400);
+      }
+      return false;
+    })().finally(() => setTimeout(() => { starting = null; }, 1000));
+  }
+  return starting;
+}
+
+async function appAliveOrStart() {
+  if (await appAlive()) return true;
+  return startApp();
+}
+
 async function pingOnce() {
   try {
     const ctrl = new AbortController();
@@ -355,6 +390,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       await updateBadge();
       sendResponse({ ok: true });
     } else if (msg.type === "show") {
+      if (!(await appAlive(1))) await startApp(); // closed: start it first
       sendResponse({ ok: await postApp("/show", {}) });
     } else if (msg.type === "video") {
       let cookie_jar = [];
@@ -370,6 +406,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
 chrome.contextMenus.onClicked.addListener(async (info, tab) => {
   const url = info.linkUrl || info.srcUrl;
   if (!url) return;
+  await appAliveOrStart();
   if (await sendToApp(url, "", info.pageUrl || (tab && tab.url) || "")) {
     await note(shortName(url), "enviado à app (botão direito)");
   } else {
@@ -401,7 +438,27 @@ async function handleDownload(item) {
     return note(label, "deixado ao navegador: veio de um formulário (" + watched.method + ")");
   }
   if (!(await isEnabled())) return note(label, "deixado ao navegador: a captura está desligada");
-  if (!(await appAlive())) return note(label, "deixado ao navegador: a app não respondeu");
+  // Pause (not cancel) the browser's download right away: it is only dropped once the app is
+  // really receiving the file. If the app cannot start, or will not take it, or the site
+  // refuses the app (a link valid only once, a login or a protection page...), the browser
+  // simply carries on from where it was: never worse than without the app.
+  const original = { id: item.id, url, label, paused: false };
+  try {
+    await chrome.downloads.pause(item.id);
+    original.paused = true;
+  } catch {}
+  const resumeOriginal = async () => {
+    if (original.paused) {
+      try { await chrome.downloads.resume(item.id); } catch {}
+    }
+  };
+  if (!(await appAlive())) {
+    // Closed: the browser starts it (it waits paused meanwhile, so nothing is lost or doubled).
+    if (!(await startApp())) {
+      await resumeOriginal();
+      return note(label, "deixado ao navegador: a app está fechada e não arrancou");
+    }
+  }
   // Ask before taking it: only the file types / sites chosen in the app (an older app that
   // does not know this question answers nothing useful: then take it, as before).
   const verdict = await postJson("/check", {
@@ -409,26 +466,20 @@ async function handleDownload(item) {
     mime: item.mime || "", referrer: item.referrer || "",
   }, 2);
   if (verdict && verdict.capture === false) {
+    await resumeOriginal();
     const why = verdict.reason || "tipo fora da lista da app ou site ignorado";
     return note(label, `deixado ao navegador: ${why}` + (why.startsWith("tipo") ? ` (${item.mime || "tipo desconhecido"})` : ""));
   }
   const checkProblem = verdict ? "" : lastFailure;
-
-  // Pause (not cancel) the browser's download: it is only dropped once the app is really
-  // receiving the file. If the site refuses the app (a link valid only once, a login or a
-  // protection page...), the browser simply carries on: never worse than without the app.
-  const original = { id: item.id, url, label, paused: false };
-  try {
-    await chrome.downloads.pause(item.id);
-    original.paused = true;
-  } catch {}
+  const [now] = await chrome.downloads.search({ id: item.id });
+  if (now && now.state === "complete") { // too small / too fast: the browser already has it
+    return note(label, "o navegador já o tinha terminado");
+  }
 
   const name = item.filename ? item.filename.split(/[\\/]/).pop() : "";
   const received = { size: item.totalBytes > 0 ? item.totalBytes : 0, type: item.mime || "" };
   if (!(await sendToApp(url, name, item.referrer || "", finalUrl, original, received))) {
-    if (original.paused) {
-      try { await chrome.downloads.resume(item.id); } catch {}
-    }
+    await resumeOriginal();
     return note(label, "o Brave baixou sozinho: não consegui enviar à app — " +
                 (lastFailure || checkProblem || "sem resposta"));
   }

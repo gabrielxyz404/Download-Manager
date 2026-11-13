@@ -1,14 +1,15 @@
 {
   "manifest_version": 3,
   "name": "Flow Downloads - Integração com o navegador",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "description": "Envia os downloads do navegador para o Flow Downloads (gerenciador de downloads).",
   "permissions": [
     "downloads",
     "contextMenus",
     "storage",
     "cookies",
-    "webRequest"
+    "webRequest",
+    "nativeMessaging"
   ],
   "host_permissions": [
     "<all_urls>"
@@ -43,5 +44,6 @@
       "run_at": "document_start",
       "all_frames": true
     }
-  ]
+  ],
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA66CYQSn8kiYvPU9y0MYhy0+CVA04EE77gOsoTzmsifo8MKQzZxIbMhbiom8hdD2sRgiQQGGSgndJQQ7hMQMURsk/hFpZGfkQFyC7fWii8hbzwyYgHnkUKq0fhlKK7TMHyGEMt5QDhvrKikm0hIyhlYVixKAiK3a68HkWAeDMspkJlsvXnIc59o4QiUCD0mT7SJunBWTH/N/FzmOTaoU8AfWVJuQq49bSon3alDE6zKm6rT7Wgo/9FuCU5TWYf84JRW1LEzEaUhPcMD4B+x5qo++ErO0DbpQRnMoAfD0EjZWeSYU1n2rfzpmZghKOxUgY6mC9dW5tGsJjrhOTUGpgtQIDAQAB"
 }
