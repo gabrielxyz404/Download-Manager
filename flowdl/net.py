@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import base64
 import http.client
+import os
 import socket
 import ssl
 import urllib.parse
@@ -119,6 +120,14 @@ class Connection:
                 sock.shutdown(socket.SHUT_RDWR)
             except OSError:
                 pass
+            if os.name == "nt":
+                # On Windows shutting the socket down may leave the other thread's read
+                # waiting; closing it does wake it (on POSIX we must not: the number could be
+                # reused by another connection while that thread still reads from it).
+                try:
+                    sock.close()
+                except OSError:
+                    pass
 
     def close(self) -> None:
         if self.conn is not None:

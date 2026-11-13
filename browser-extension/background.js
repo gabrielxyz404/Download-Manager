@@ -98,11 +98,19 @@ const shortName = (url, name) => (name || safeDecode(url.split("?")[0].split("/"
 const seen = new Map(); // url -> { method, cookie, time }
 const SEEN_MS = 60000;
 
+// Headers the app repeats exactly as the browser sent them (protected sites compare them).
+const BROWSER_HEADERS = ["accept", "sec-ch-ua", "sec-ch-ua-mobile", "sec-ch-ua-platform", "sec-fetch-dest",
+                         "sec-fetch-mode", "sec-fetch-site", "sec-fetch-user", "upgrade-insecure-requests", "dnt"];
+
 function remember(details) {
   const header = (name) => (details.requestHeaders || []).find((h) => h.name.toLowerCase() === name);
   const cookie = header("cookie"), ua = header("user-agent"), lang = header("accept-language");
+  const hdrs = {};
+  for (const h of details.requestHeaders || []) {
+    if (BROWSER_HEADERS.includes(h.name.toLowerCase()) && h.value) hdrs[h.name.toLowerCase()] = h.value;
+  }
   seen.set(details.url, { method: details.method, cookie: cookie ? cookie.value : null,
-                          ua: ua ? ua.value : null, lang: lang ? lang.value : null, time: Date.now() });
+                          ua: ua ? ua.value : null, lang: lang ? lang.value : null, hdrs, time: Date.now() });
   if (seen.size > 300) {
     const old = Date.now() - SEEN_MS;
     for (const [k, v] of seen) if (v.time < old || seen.size > 300) seen.delete(k);
@@ -156,6 +164,7 @@ async function sendToApp(url, filename, referrer, finalUrl = "", original = null
     // the browser's identity, exactly as sent to the site (Cloudflare & co. check it)
     user_agent: watched.ua || navigator.userAgent,
     accept_language: watched.lang || (navigator.languages || []).join(","),
+    browser_headers: watched.hdrs || {},
   });
   if (!res) return false;
   if (res.rid) showInBrowser(res.rid, original); // not awaited: may wait for the user's confirmation

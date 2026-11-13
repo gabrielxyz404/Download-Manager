@@ -59,6 +59,24 @@ def _header_value(value) -> str | None:
     return text
 
 
+# Other headers the browser sent with the download that the app repeats (protected sites
+# compare them). Nothing that changes what is asked (Range, Host, cookies...).
+BROWSER_HEADERS = ("accept", "sec-ch-ua", "sec-ch-ua-mobile", "sec-ch-ua-platform", "sec-fetch-dest",
+                   "sec-fetch-mode", "sec-fetch-site", "sec-fetch-user", "upgrade-insecure-requests", "dnt")
+
+
+def _browser_headers(value) -> dict:
+    if not isinstance(value, dict):
+        return {}
+    out = {}
+    for name, v in value.items():
+        name = str(name).lower()
+        clean = _header_value(v)
+        if name in BROWSER_HEADERS and clean:
+            out["-".join(p.capitalize() for p in name.split("-"))] = clean
+    return out
+
+
 def _download_item(data: dict) -> dict:
     url = str(data.get("url", ""))
     if not url.startswith(("http://", "https://", "ftp://")):
@@ -74,7 +92,8 @@ def _download_item(data: dict) -> dict:
             if isinstance(by_host, dict) else {},
             # the browser's own identity: sites behind Cloudflare & co. tie their cookies to it
             "user_agent": _header_value(data.get("user_agent")),
-            "accept_language": _header_value(data.get("accept_language"))}
+            "accept_language": _header_value(data.get("accept_language")),
+            "browser_headers": _browser_headers(data.get("browser_headers"))}
     if data.get("mirror"):
         # The extension wants to show this download in the browser too: it will ask about
         # this request id until the download starts (or is cancelled in the app).

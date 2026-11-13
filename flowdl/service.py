@@ -62,6 +62,7 @@ def browser_request(item: dict) -> tuple[dict, dict]:
         headers["User-Agent"] = item["user_agent"]
     if item.get("accept_language"):
         headers["Accept-Language"] = item["accept_language"]
+    headers.update(item.get("browser_headers") or {})
     cookies = dict(item.get("cookies_by_host") or {})
     if item.get("cookies") and not cookies:  # older extension: cookies of the link's site
         from .engine import host_of

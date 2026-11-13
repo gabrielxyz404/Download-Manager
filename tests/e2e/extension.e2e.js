@@ -39,12 +39,15 @@ const cookiesSeen = [];
 const redirSeen = [];
 const cdnSeen = [];
 const appMethods = [];
-let browserUA = "", onceUsed = false;
+let browserUA = "", browserCH = "", onceUsed = false;
 const onceSeen = [], uaSeen = [];
 const links = ["relatorio", "lento", "cancelar", "confirmado", "naoquero", "menu", "off", "fechado"]
   .map((n) => `<a id="${n}" href="/${n === "lento" || n === "cancelar" ? "slow" : "files"}/${n}.zip">${n}</a>`).join(" ");
 const site = http.createServer((req, res) => {
-  if (req.url === "/") browserUA = req.headers["user-agent"] || ""; // the browser's identity
+  if (req.url === "/") { // the browser's identity
+    browserUA = req.headers["user-agent"] || "";
+    browserCH = req.headers["sec-ch-ua"] || "";
+  }
   if (req.url === "/") {
     res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Set-Cookie": "sessao=abc123; Path=/" });
     return res.end(links + ' <a id="cdn" href="/redir/cdn.zip">cdn</a> <a id="notas" href="/files/notas.txt">notas</a> <a id="semnome" href="/get?id=7">semnome</a> <a id="acento" href="/files/Atualiza%E7%E3o_FC27.zip">acento</a> <a id="umavez" href="/once/mod_umavez.zip">umavez</a> <a id="cloudflare" href="/ua/protegido.zip">cloudflare</a>' +
@@ -105,7 +108,9 @@ const site = http.createServer((req, res) => {
   }
   if (req.url.startsWith("/ua/")) { // like Cloudflare: only the same browser identity gets the file
     uaSeen.push(req.headers["user-agent"] || "");
-    if ((req.headers["user-agent"] || "") !== browserUA) { res.writeHead(403); return res.end("verificação"); }
+    if ((req.headers["user-agent"] || "") !== browserUA || (req.headers["sec-ch-ua"] || "") !== browserCH) {
+      res.writeHead(403); return res.end("verificação");
+    }
     const m = /bytes=(\d+)-(\d*)/.exec(req.headers.range || "");
     const start = m ? +m[1] : 0, end = m && m[2] ? +m[2] : BIG.length - 1;
     const h = { "Content-Type": "application/zip", "Accept-Ranges": "bytes", "Content-Length": end - start + 1,
@@ -349,7 +354,7 @@ const sameAsBig = (file) => fs.existsSync(file) && fs.readFileSync(file).equals(
   prot = prot && await finished(prot.id);
   check("Site que exige a identidade do navegador (tipo Cloudflare): a app consegue",
         !!prot && sameAsBig(prot.filename) && appTasks().some((t) => (t.url || "").includes("/ua/")),
-        `${prot ? prot.filename : "não"} pedidos=${uaSeen.length} recusados=${uaSeen.filter((u) => u !== browserUA).length}`);
+        `${prot ? prot.filename : "não"} pedidos=${uaSeen.length} sec-ch-ua=${browserCH ? "sim" : "não"}`);
   await page.goto(SITE + "/");
 
   // 3c. A link that redirects to a signed address on another site with its own login cookie.

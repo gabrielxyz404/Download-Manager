@@ -113,5 +113,48 @@ class NetworkErrorTests(unittest.TestCase):
         self.assertEqual(task.status, Status.COMPLETED, task.error)
 
 
+class AbortTests(unittest.TestCase):
+    def test_abort_wakes_a_read_waiting_for_a_silent_server(self):
+        """A server that stops sending without closing: abort() from another thread must
+        wake the reading thread at once (on Windows as well as on Linux)."""
+        import socket as _socket
+        import threading as _threading
+        import time as _time
+        from flowdl import net as _net
+        srv = _socket.socket()
+        srv.bind(("127.0.0.1", 0))
+        srv.listen(1)
+        clients = []
+
+        def serve():
+            c, _ = srv.accept()
+            clients.append(c)
+            c.recv(4096)
+            c.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 1000000\r\n\r\n" + b"x" * 10)
+            _time.sleep(30)  # silent, connection left open
+        _threading.Thread(target=serve, daemon=True).start()
+        conn = _net.Connection(30)
+        result = {}
+
+        def read():
+            try:
+                resp = conn.get(f"http://127.0.0.1:{srv.getsockname()[1]}/f", {})
+                result["data"] = resp.read(1000000)
+            except Exception as exc:  # noqa: BLE001
+                result["error"] = exc
+            result["at"] = _time.monotonic()
+        t = _threading.Thread(target=read, daemon=True)
+        t.start()
+        _time.sleep(1.0)
+        cut = _time.monotonic()
+        conn.abort()
+        t.join(5)
+        self.assertFalse(t.is_alive(), "the read was not woken")
+        self.assertLess(result["at"] - cut, 3)
+        for c in clients:
+            c.close()
+        srv.close()
+
+
 if __name__ == "__main__":
     unittest.main()

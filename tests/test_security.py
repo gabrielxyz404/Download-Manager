@@ -211,6 +211,20 @@ class BrowserIdentityTests(unittest.TestCase):
         self.assertNotIn("User-Agent", browser_request(bad)[0])
         self.assertNotIn("User-Agent", browser_request(_download_item({"url": "https://a.com/x.zip"}))[0])
 
+    def test_other_browser_headers_only_from_the_list(self):
+        from flowdl.bridge import _download_item
+        from flowdl.service import browser_request
+        item = _download_item({"url": "https://a.com/x.zip", "browser_headers": {
+            "sec-ch-ua": '"Brave";v="142"', "sec-fetch-mode": "navigate", "accept": "text/html,*/*",
+            "range": "bytes=0-1", "host": "evil.com", "cookie": "a=1", "authorization": "Bearer x",
+            "sec-fetch-site": "same\r\nX-Evil: 1"}})
+        headers, _ = browser_request(item)
+        self.assertEqual(headers["Sec-Ch-Ua"], '"Brave";v="142"')
+        self.assertEqual(headers["Sec-Fetch-Mode"], "navigate")
+        self.assertEqual(headers["Accept"], "text/html,*/*")
+        for name in ("Range", "Host", "Cookie", "Authorization", "Sec-Fetch-Site"):
+            self.assertNotIn(name, headers)
+
 
 if __name__ == "__main__":
     unittest.main()
