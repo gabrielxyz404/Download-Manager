@@ -48,6 +48,16 @@ Como consegue isto:
 | Fila de downloads | ✅ número de downloads simultâneos configurável |
 | Capturar links copiados | ✅ link copiado aparece automaticamente na barra de URL |
 | HTTP / HTTPS / FTP | ✅ HTTP e HTTPS com várias conexões; FTP básico (1 conexão) |
+| Alt+clique | ✅ segurar **Alt** ao clicar num link deixa esse download com o navegador; no menu da extensão: "Capturar neste site" e "Próximo download fica no navegador" |
+| Abrir a app pelo navegador | ✅ se o Flow Downloads estiver fechado, o navegador abre-o sozinho no próximo download |
+| Checksum | ✅ campo "Checksum" ao adicionar (MD5/SHA-1/SHA-256/SHA-512) e "Verificar checksum..." no menu do botão direito |
+| Ao terminar um download | ✅ analisar com o antivírus do Windows, extrair `.zip`, correr um comando, abrir o ficheiro (**Opções → Ao terminar um download**) |
+| Quando todos terminarem | ✅ fechar o app, suspender ou desligar o PC (com contagem de 30 s que se pode cancelar) |
+| PC acordado | ✅ o Windows não adormece a meio de downloads |
+| Marca "veio da internet" | ✅ como um ficheiro gravado pelo navegador: o Windows avisa antes de abrir programas baixados |
+| Disco cheio | ✅ verifica o espaço antes de começar; se faltar, pausa com uma mensagem clara e continua com "Retomar" |
+| Limites por site | ✅ máximo de conexões para sites escolhidos (**Opções → Limites por site**); e a app lembra-se do que cada servidor aguenta |
+| Suporte a vídeos sempre atual | ✅ **Opções → Atualizar suporte a vídeos**: a versão mais recente do yt-dlp, verificada com o checksum oficial, sem reinstalar |
 
 ## Vídeos (YouTube, Instagram, TikTok, etc.)
 
@@ -112,6 +122,10 @@ cabeçalhos que sites protegidos, como os que usam Cloudflare, comparam). Só qu
 o ficheiro é que o download do navegador é trocado pelo da app. Se o site recusar a app — um link que só serve
 uma vez, uma página de proteção, um login — o navegador **continua o seu próprio download** de onde estava.
 
+**A app fechada?** O navegador abre-a sozinho (a app regista-se no Brave, Chrome, Edge e Chromium quando
+arranca, só para o teu utilizador). Enquanto ela arranca, o download do navegador fica em pausa; se não
+arrancar, o navegador continua.
+
 **O que aconteceu ao último download?** O menu da extensão mostra-o numa linha, por exemplo
 "baixado pela app ✔", "o Brave baixou sozinho: a app não conseguiu (HTTP 403)" ou "deixado ao navegador:
 veio de um formulário". Útil quando um site não funciona como esperado.
@@ -128,6 +142,8 @@ veio de um formulário". Útil quando um site não funciona como esperado.
 4. **Conexões reaproveitadas:** cada conexão fica aberta e vai pedindo pedaço atrás de pedaço (de ~2 s de
    dados cada), sem repetir o "aperto de mão" com o servidor. O primeiro pedido já traz o início do arquivo.
 5. Quando uma conexão termina, ela pega metade da maior parte que ainda falta — todas ficam ocupadas até o fim.
+   **Memória por servidor:** a app lembra-se de quantas conexões compensaram em cada servidor (e dos que
+   limitam), e o próximo download desse servidor começa logo aí em vez de testar de novo.
 6. **Sem ficar nos 99%:** uma conexão muito mais lenta que as outras é reaberta (pode cair num servidor
    mais rápido), e no fim as conexões rápidas assumem o que a mais lenta ainda tem por receber.
 7. **Sem paragens:** uma conexão que deixa de receber (o servidor ou a linha calou-se sem a fechar) é trocada
