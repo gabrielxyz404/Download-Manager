@@ -56,6 +56,8 @@ Root: HKCU; Subkey: "Software\Chromium\NativeMessagingHosts\com.flowdownloads.ap
 
 [Run]
 Filename: "{app}\{#AppExe}"; Description: "Abrir o Flow Downloads"; Flags: nowait postinstall skipifsilent
+; An update installed by the app itself (/UPDATE=1, silent): start it again in the background.
+Filename: "{app}\{#AppExe}"; Parameters: "--background"; Flags: nowait; Check: IsAppUpdate
 Filename: "{app}\browser-extension"; Description: "Abrir a pasta da extensão do navegador (para instalar no Brave)"; Flags: postinstall shellexec skipifsilent unchecked
 
 [UninstallRun]
@@ -63,3 +65,9 @@ Filename: "{cmd}"; Parameters: "/C taskkill /IM ""{#AppExe}"" /F"; Flags: runhid
 
 [UninstallDelete]
 Type: filesandordirs; Name: "{app}"
+
+[Code]
+function IsAppUpdate: Boolean;
+begin
+  Result := ExpandConstant('{param:UPDATE|0}') = '1';
+end;

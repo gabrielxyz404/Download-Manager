@@ -379,6 +379,24 @@ class GuiTests(unittest.TestCase):
             opened.assert_called_once_with(task.path)
             ran.assert_called_once()
 
+    def test_check_for_updates(self):
+        from flowdl import updater
+        app = self.open_app()
+        with mock.patch.object(updater, "check", return_value=(None, "Está na versão mais recente (0.8.0).")), \
+                mock.patch.object(self.gui.messagebox, "showinfo") as info:
+            app._check_updates()
+            pump(app, 2, lambda: info.called)
+        self.assertIn("mais recente", info.call_args[0][1])
+        newer = updater.Update("9.9.9", "https://x/FlowDownloads-Setup.exe", "https://x/SHA256SUMS.txt", "Novidades", "https://x/page")
+        with mock.patch.object(updater, "check", return_value=(newer, "Há uma versão nova: 9.9.9")), \
+                mock.patch.object(updater, "can_install", return_value=True), \
+                mock.patch.object(self.gui.messagebox, "askyesno", return_value=False) as ask, \
+                mock.patch.object(updater, "download") as dl:
+            app._check_updates()
+            pump(app, 2, lambda: ask.called)
+        self.assertIn("9.9.9", ask.call_args[0][1])
+        dl.assert_not_called()  # the user said no: nothing downloaded
+
     def test_video_window_without_ytdlp_offers_install(self):
         app = self.open_app()
         with mock.patch.object(self.gui.video, "available", return_value=False):

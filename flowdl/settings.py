@@ -21,6 +21,8 @@ class Settings:
         self.global_limit_kb = 0
         self.limit_on = True         # the global limit can be switched off/on from the tray icon
         self.show_tray = True        # icon next to the Windows clock
+        self.check_updates = True    # once a day, look for a new version (installed app only)
+        self.update_checked = 0.0    # when it last looked
         self.tray_notify = True      # Windows notification when a download finishes
         self.browser_integration = True
         self.confirm_browser = False  # browser downloads start at once, with a progress window

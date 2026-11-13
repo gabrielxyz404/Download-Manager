@@ -357,11 +357,18 @@ async function waitForApp(rid, original) {
 // The app could not download it: the browser's own download continues where it was.
 async function giveBack(original, reason) {
   waitingOriginals.delete(original.id);
+  const [now] = await chrome.downloads.search({ id: original.id });
+  if (now && now.state === "complete") { // the browser already finished it meanwhile: nothing to do
+    await note(original.label, "o Brave baixou sozinho: a app não conseguiu (" + reason + ")");
+    return;
+  }
   try {
-    if (original.paused) await chrome.downloads.resume(original.id);
+    if (original.paused || (now && now.paused)) await chrome.downloads.resume(original.id);
   } catch {
-    passThrough.add(original.url);
-    chrome.downloads.download({ url: original.url }); // could not resume: start it again
+    if (!now || now.state === "interrupted") { // only if it really stopped: start it again
+      passThrough.add(original.url);
+      chrome.downloads.download({ url: original.url });
+    }
   }
   await note(original.label, "o Brave baixou sozinho: a app não conseguiu (" + reason + ")");
 }

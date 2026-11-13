@@ -1154,6 +1154,7 @@ class App(tk.Tk):
         menubar.add_cascade(label="Opções", menu=opts)
 
         helpm = tk.Menu(menubar, tearoff=False)
+        helpm.add_command(label="Procurar atualizações...", command=self._check_updates)
         helpm.add_command(label="Como instalar a extensão do navegador", command=self._extension_help)
         helpm.add_command(label="Sobre", command=lambda: messagebox.showinfo(
             "Sobre", "Flow Downloads — gerenciador de downloads gratuito\n"
@@ -1400,6 +1401,62 @@ class App(tk.Tk):
             folder = os.path.dirname(tasks[0].path)  # e.g. the browser's folder
         if os.path.isdir(folder):
             open_path(folder)
+
+    def _check_updates(self) -> None:
+        """Ajuda → Procurar atualizações: check, ask, download (SHA-256 checked), install."""
+        from . import updater
+        self.status_var.set("A procurar atualizações...")
+        results: queue.Queue = queue.Queue()
+        threading.Thread(target=lambda: results.put(updater.check()), daemon=True).start()
+
+        def checked():
+            try:
+                update, message = results.get_nowait()
+            except queue.Empty:
+                self.after(300, checked)
+                return
+            self.status_var.set(message)
+            if update is None:
+                messagebox.showinfo("Atualizações", message, parent=self)
+                return
+            notes = ("\n\n" + update.notes[:600]) if update.notes else ""
+            if not updater.can_install():
+                if messagebox.askyesno("Atualizações", f"{message}{notes}\n\nAbrir a página da versão nova?", parent=self):
+                    import webbrowser
+                    webbrowser.open(update.page)
+                return
+            if not messagebox.askyesno("Atualizações", f"{message}{notes}\n\nAtualizar agora? O Flow Downloads "
+                                       "fecha por um momento e volta a abrir sozinho.", parent=self):
+                return
+            self._install_update(update)
+        self.after(300, checked)
+
+    def _install_update(self, update) -> None:
+        from . import updater
+        from .paths import config_dir
+        self.status_var.set(f"A descarregar a versão {update.version}...")
+        results: queue.Queue = queue.Queue()
+
+        def work():
+            try:
+                results.put(("ok", updater.download(update, str(config_dir() / "updates"))))
+            except (OSError, ValueError) as exc:
+                results.put(("err", str(exc)))
+        threading.Thread(target=work, daemon=True).start()
+
+        def done():
+            try:
+                kind, value = results.get_nowait()
+            except queue.Empty:
+                self.after(300, done)
+                return
+            if kind == "err":
+                self.status_var.set("A atualização falhou.")
+                messagebox.showerror("Atualizações", f"Não foi possível atualizar: {value}", parent=self)
+                return
+            updater.run_installer(value)
+            self.quit_all()  # the installer replaces the files and starts the app again
+        self.after(300, done)
 
     def _verify_checksum(self) -> None:
         tasks = [t for t in self._selected() if t.status == Status.COMPLETED and t.path and os.path.isfile(t.path)]

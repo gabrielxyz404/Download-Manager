@@ -3,4 +3,4 @@
 Kept empty on purpose: importing the package must stay cheap for the background service.
 """
 
-__version__ = "0.7.0"
+__version__ = "0.8.0"

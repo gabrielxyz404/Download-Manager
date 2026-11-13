@@ -19,6 +19,7 @@ import socket
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 
 from .bridge import DEFAULT_PORT, BrowserBridge
@@ -366,6 +367,28 @@ class Service:
                 for t in self._manager.tasks:
                     t.pause()
 
+    # ------------------------------------------------------------- updates
+    def check_updates_later(self, delay: float = 90) -> None:
+        """Installed app: at most once a day, look for a new version in the background and tell
+        the user next to the clock (installing is their choice: Ajuda → Procurar atualizações)."""
+        from .paths import FROZEN
+        if not (FROZEN and getattr(self.settings, "check_updates", True)):
+            return
+
+        def work():
+            from . import updater
+            if not updater.due(self.settings):
+                return
+            update, _message = updater.check()
+            self.settings.update_checked = time.time()
+            self.settings.save()
+            if update is not None and self.tray is not None:
+                self.tray.notify(f"Flow Downloads {update.version} disponível",
+                                 "Abra o Flow Downloads → Ajuda → Procurar atualizações.")
+        timer = threading.Timer(delay, work)
+        timer.daemon = True
+        timer.start()
+
     # ------------------------------------------------------------- tray icon
     def start_tray(self) -> bool:
         """Icon next to the Windows clock (Windows only; can be turned off in the settings)."""
@@ -649,6 +672,7 @@ def _run(background: bool) -> None:
         svc.start_tray()  # icon next to the Windows clock
     except Exception as exc:  # noqa: BLE001 - the app works without it
         log("tray failed:", exc)
+    svc.check_updates_later()
     if svc.settings.auto_resume and svc.has_saved_active_downloads():
         svc.manager.tick()  # interrupted downloads continue right away
     mode = None if background else "main"
