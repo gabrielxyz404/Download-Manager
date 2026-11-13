@@ -21,7 +21,7 @@ from .engine import Status, format_size, format_time
 from .limiter import GLOBAL_LIMITER
 from .manager import config_dir
 from .paths import FROZEN, install_dir
-from .scheduler import ACTIONS, shutdown_computer
+from .scheduler import ACTIONS, shutdown_computer, sleep_computer
 from .settings import DEFAULT_COLUMNS, Settings  # noqa: F401 (re-exported)
 from .video import VideoTask
 
@@ -507,15 +507,15 @@ class VideoDialog(tk.Toplevel):
 
     @staticmethod
     def install(app: "App", on_done=None) -> None:
-        if FROZEN:  # the installed app already includes it; updates come with new versions
-            messagebox.showinfo("Suporte a vídeos", "O suporte a vídeos já vem incluído no Flow Downloads.\n"
-                                "Para o atualizar, instale a versão mais recente do Flow Downloads.")
-            if on_done:
-                on_done(video.available())
-            return
         q: queue.Queue = queue.Queue()
-        app.status_var.set("Instalando/atualizando o yt-dlp...")
-        threading.Thread(target=lambda: q.put(video.install_yt_dlp()), daemon=True).start()
+        if FROZEN or video.available():
+            # The newest yt-dlp from its official releases (checksum checked), used from now on.
+            app.status_var.set("A procurar a versão mais recente do suporte a vídeos...")
+            work = video.update_yt_dlp
+        else:
+            app.status_var.set("Instalando o yt-dlp...")
+            work = video.install_yt_dlp
+        threading.Thread(target=lambda: q.put(work()), daemon=True).start()
 
         def poll():
             try:
@@ -523,16 +523,16 @@ class VideoDialog(tk.Toplevel):
             except queue.Empty:
                 app.after(300, poll)
                 return
-            if ok:
+            if ok and work is video.install_yt_dlp:
                 importlib.invalidate_caches()
                 try:
                     video.yt_dlp = importlib.import_module("yt_dlp")
                 except ImportError:
                     ok = False
             if ok:
-                app.status_var.set("Suporte a vídeos instalado ✔")
+                app.status_var.set(("✔ " + out) if work is video.update_yt_dlp else "Suporte a vídeos instalado ✔")
             else:
-                messagebox.showerror("Erro ao instalar", "Não consegui instalar o yt-dlp:\n\n" + out[-800:])
+                messagebox.showerror("Suporte a vídeos", "Não consegui atualizar o suporte a vídeos:\n\n" + out[-800:])
             if on_done:
                 on_done(ok)
 
@@ -944,10 +944,12 @@ class DuplicateDialog(tk.Toplevel):
 
 
 class ShutdownCountdown(tk.Toplevel):
-    def __init__(self, app: "App", seconds: int = 30):
+    def __init__(self, app: "App", seconds: int = 30, action: str | None = None):
         super().__init__(app)
         self.app, self.left = app, seconds
-        self.title("Desligar o computador")
+        self.action = action or app.service.scheduler.on_complete
+        self.sleeping = self.action == "sleep"
+        self.title("Suspender o computador" if self.sleeping else "Desligar o computador")
         self.attributes("-topmost", True)
         frm = ttk.Frame(self, padding=20)
         frm.pack()
@@ -958,10 +960,15 @@ class ShutdownCountdown(tk.Toplevel):
 
     def _tick(self) -> None:
         if self.left <= 0:
+            if self.sleeping:  # the app keeps running and is there when the computer wakes up
+                self.destroy()
+                sleep_computer()
+                return
             self.app.quit_all()
             shutdown_computer()
             return
-        self.msg.set(f"Downloads concluídos. O computador será desligado em {self.left} s.")
+        what = "suspenso" if self.sleeping else "desligado"
+        self.msg.set(f"Downloads concluídos. O computador será {what} em {self.left} s.")
         self.left -= 1
         self.after(1000, self._tick)
 
@@ -1128,7 +1135,7 @@ class App(tk.Tk):
         opts.add_checkbutton(label="Iniciar com o computador (em segundo plano)", variable=self.autostart_var,
                              command=self._toggle_autostart,
                              state="normal" if autostart.supported() else "disabled")
-        opts.add_command(label="Instalar/atualizar suporte a vídeos (yt-dlp)",
+        opts.add_command(label="Atualizar suporte a vídeos (yt-dlp)",
                          command=lambda: VideoDialog.install(self))
         opts.add_command(label="Downloads simultâneos...", command=self._max_active)
         opts.add_command(label="Pasta padrão...", command=self._choose_dir)

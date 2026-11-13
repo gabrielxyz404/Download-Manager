@@ -9,6 +9,7 @@ import sys
 ACTIONS = {
     "nothing": "Não fazer nada",
     "close": "Fechar o Flow Downloads",
+    "sleep": "Suspender o computador",
     "shutdown": "Desligar o computador",
 }
 
@@ -50,3 +51,14 @@ def shutdown_computer() -> None:
         subprocess.Popen(["osascript", "-e", 'tell app "System Events" to shut down'])
     else:
         subprocess.Popen(["systemctl", "poweroff"])
+
+
+def sleep_computer() -> None:
+    """Suspend (sleep): the downloads are done, the computer can rest."""
+    if sys.platform.startswith("win"):
+        import ctypes
+        ctypes.windll.powrprof.SetSuspendState(False, True, False)  # sleep, not hibernate
+    elif sys.platform == "darwin":
+        subprocess.Popen(["pmset", "sleepnow"])
+    else:
+        subprocess.Popen(["systemctl", "suspend"])

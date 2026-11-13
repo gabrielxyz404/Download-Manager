@@ -399,7 +399,7 @@ class Service:
             # Browser mode, but the browser has not started receiving: give it some time.
             self._later(NO_BROWSER_AFTER_S, self._keep_if_unclaimed, task)
         if task is not None and task.status == Status.COMPLETED and not self.busy():
-            return {"shutdown": "countdown", "close": "quit"}.get(self.scheduler.on_complete)
+            return {"shutdown": "countdown", "sleep": "countdown", "close": "quit"}.get(self.scheduler.on_complete)
         return None
 
     def accept_item(self, item: dict) -> bool:

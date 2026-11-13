@@ -179,5 +179,98 @@ class CookieAndResumeTests(unittest.TestCase):
         self.assertEqual(got[0]["cookie_jar"][0]["name"], "a")
 
 
+
+
+class VideoSupportUpdateTests(unittest.TestCase):
+    """The newest yt-dlp from its official releases, used without reinstalling the app."""
+
+    def setUp(self):
+        import hashlib
+        import http.server
+        import io
+        import pathlib
+        import threading
+        import zipfile
+        from unittest import mock
+        from flowdl import video
+        self.video = video
+        self.dir = tempfile.TemporaryDirectory()
+        self.files = {}
+
+        def zipapp(version):
+            buf = io.BytesIO()
+            buf.write(b"#!/usr/bin/env python3\n")
+            with zipfile.ZipFile(buf, "a") as z:
+                z.writestr("yt_dlp/__init__.py", "from . import version\n")
+                z.writestr("yt_dlp/version.py", f"__version__ = '{version}'\n")
+            return buf.getvalue()
+        self.zipapp = zipapp
+        self.hash = lambda data: hashlib.sha256(data).hexdigest()
+        files = self.files
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_GET(self):
+                body = files.get(self.path)
+                if body is None:
+                    self.send_error(404)
+                    return
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+        self.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        base = f"http://127.0.0.1:{self.server.server_address[1]}"
+        target = pathlib.Path(self.dir.name) / "yt-dlp.zip"
+        self.target = target
+        self.patches = [mock.patch.object(video, "UPDATE_URL", base + "/yt-dlp"),
+                        mock.patch.object(video, "SUMS_URL", base + "/SHA2-256SUMS"),
+                        mock.patch.object(video, "update_path", lambda: target),
+                        mock.patch.object(video, "current_version", lambda: "2026.1.1")]
+        for p in self.patches:
+            p.start()
+
+    def tearDown(self):
+        import sys
+        for p in self.patches:
+            p.stop()
+        sys.meta_path[:] = [f for f in sys.meta_path if f is not self.video._UpdatedFirst]
+        for name in [n for n in sys.modules if n == "yt_dlp" or n.startswith("yt_dlp.")]:
+            del sys.modules[name]  # the real one is imported again by whoever needs it
+        self.video.yt_dlp = None
+        self.server.shutdown()
+        self.dir.cleanup()
+
+    def serve(self, data, published_hash=None):
+        self.files["/yt-dlp"] = data
+        self.files["/SHA2-256SUMS"] = (f"{published_hash or self.hash(data)}  yt-dlp\n"
+                                       f"{'0' * 64}  yt-dlp.exe\n").encode()
+
+    def test_newer_version_is_used_without_reinstalling(self):
+        self.serve(self.zipapp("2099.12.31"))
+        ok, msg = self.video.update_yt_dlp()
+        self.assertTrue(ok, msg)
+        self.assertIn("2099.12.31", msg)
+        self.assertTrue(self.target.exists())
+        self.assertEqual(self.video._lib().version.__version__, "2099.12.31")  # in use right away
+
+    def test_file_that_does_not_match_the_official_checksum_is_refused(self):
+        self.serve(self.zipapp("2099.12.31"), published_hash="f" * 64)
+        ok, msg = self.video.update_yt_dlp()
+        self.assertFalse(ok)
+        self.assertIn("não confere", msg)
+        self.assertFalse(self.target.exists())  # never saved, never imported
+
+    def test_already_up_to_date(self):
+        self.serve(self.zipapp("2025.1.1"))
+        ok, msg = self.video.update_yt_dlp()
+        self.assertTrue(ok)
+        self.assertIn("mais recente", msg)
+        self.assertFalse(self.target.exists())
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -630,13 +630,30 @@ class GuiTests(unittest.TestCase):
         off.assert_not_called()
         self.assertFalse(self.svc.exit_requested)
 
+    def test_sleep_when_downloads_finish_keeps_the_app_running(self):
+        app = self.open_app()
+        with mock.patch.object(self.gui, "sleep_computer") as zz, \
+                mock.patch.object(self.gui, "shutdown_computer") as off:
+            cd = self.gui.ShutdownCountdown(app, seconds=1, action="sleep")
+            self.assertIn("suspenso", cd.msg.get())
+            pump(app, 2.5)
+        zz.assert_called_once()
+        off.assert_not_called()
+        self.assertFalse(self.svc.exit_requested)  # still there when the computer wakes up
+        self.assertEqual(self.svc.on_tick.__self__, self.svc)
+        self.svc.scheduler.on_complete = "sleep"
+        task = self.svc.manager.add(self.base + "/fim.bin", self.tmp, 2)
+        self.wait_status(task, "Concluído")
+        self.assertEqual(self.svc.on_tick(task), "countdown")
+
     def test_shutdown_after_all_downloads_finish(self):
         self.svc.scheduler.on_complete = "shutdown"
         app = self.open_app()
         with mock.patch.object(self.gui, "shutdown_computer") as off, \
                 mock.patch.object(self.gui.ShutdownCountdown, "__init__",
-                                  lambda s, a, seconds=30: (tk.Toplevel.__init__(s, a),
+                                  lambda s, a, seconds=30, action=None: (tk.Toplevel.__init__(s, a),
                                                             setattr(s, "app", a), setattr(s, "left", 1),
+                                                            setattr(s, "sleeping", False),
                                                             setattr(s, "msg", tk.StringVar()), s._tick())[0]):
             app.add_download(self.base + "/ultimo.bin", self.dl, 2)
             pump(app, 20, lambda: off.called)

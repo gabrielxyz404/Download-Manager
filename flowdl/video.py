@@ -24,9 +24,44 @@ from .engine import Status, sanitize_filename
 yt_dlp = None  # optional dependency, imported only when a video is requested (it costs ~25 MB)
 
 
+# Video sites change often and yt-dlp follows every week. The app can fetch the newest
+# yt-dlp from its official releases (checked against the SHA-256 the project publishes) and
+# use it instead of the one it was installed with: no reinstall needed.
+UPDATE_URL = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp"
+SUMS_URL = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/SHA2-256SUMS"
+
+
+def update_path():
+    from .paths import config_dir
+    return config_dir() / "yt-dlp.zip"
+
+
+class _UpdatedFirst:
+    """Import finder that looks for yt_dlp in the downloaded update before anywhere else.
+    (In the installed .exe the bundled copy would otherwise always win, whatever sys.path says.)"""
+
+    @staticmethod
+    def find_spec(name, path=None, target=None):
+        if name != "yt_dlp" and not name.startswith("yt_dlp."):
+            return None
+        import importlib.machinery
+        where = str(update_path())
+        if not os.path.isfile(where):
+            return None
+        return importlib.machinery.PathFinder.find_spec(name, path if path is not None else [where])
+
+
+def _use_update() -> None:
+    """A downloaded newer yt-dlp is used before the one the app was installed with."""
+    if os.path.isfile(str(update_path())) and not any(isinstance(f, _UpdatedFirst) or f is _UpdatedFirst
+                                                       for f in sys.meta_path):
+        sys.meta_path.insert(0, _UpdatedFirst)
+
+
 def available() -> bool:
     if yt_dlp is not None:
         return True
+    _use_update()
     import importlib.util
     importlib.invalidate_caches()
     return importlib.util.find_spec("yt_dlp") is not None
@@ -35,9 +70,77 @@ def available() -> bool:
 def _lib():
     global yt_dlp
     if yt_dlp is None:
+        _use_update()
         import yt_dlp as module  # type: ignore
         yt_dlp = module
     return yt_dlp
+
+
+def _version_key(v: str | None) -> tuple:
+    return tuple(int(p) for p in re.findall(r"\d+", v or ""))
+
+
+def current_version() -> str | None:
+    if not available():
+        return None
+    try:
+        return _lib().version.__version__
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _fetch(url: str, timeout: float = 60) -> bytes:
+    import urllib.request
+    from .engine import USER_AGENT
+    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return resp.read(64 * 1024 * 1024)
+
+
+def update_yt_dlp() -> tuple[bool, str]:
+    """Fetch the newest yt-dlp if it is newer than ours. Returns (ok, message)."""
+    import hashlib
+    import io
+    import zipfile
+    try:
+        sums = _fetch(SUMS_URL, 30).decode("utf-8", "replace")
+        want = next((line.split()[0].lower() for line in sums.splitlines()
+                     if line.split()[1:] == ["yt-dlp"]), None)
+        if not want:
+            return False, "não encontrei o checksum oficial do yt-dlp"
+        data = _fetch(UPDATE_URL)
+    except OSError as exc:
+        return False, f"sem ligação ao GitHub ({exc})"
+    if hashlib.sha256(data).hexdigest() != want:
+        return False, "o ficheiro descarregado não confere com o checksum oficial: não foi usado"
+    try:
+        with zipfile.ZipFile(io.BytesIO(data)) as z:
+            text = z.read("yt_dlp/version.py").decode("utf-8", "replace")
+    except (zipfile.BadZipFile, KeyError):
+        return False, "o ficheiro do yt-dlp não é o esperado: não foi usado"
+    m = re.search(r"__version__\s*=\s*['\"]([^'\"]+)", text)
+    new = m.group(1) if m else ""
+    have = current_version()
+    if have and _version_key(have) >= _version_key(new):
+        return True, f"o suporte a vídeos já está na versão mais recente ({have})"
+    path = update_path()
+    tmp = path.with_suffix(".tmp")
+    try:
+        tmp.write_bytes(data)
+        tmp.replace(path)
+    except OSError as exc:
+        return False, f"não consegui gravar a atualização ({exc})"
+    _reload()
+    return True, f"suporte a vídeos atualizado para a versão {new}"
+
+
+def _reload() -> None:
+    """Use the new yt-dlp from now on (drops the one already loaded)."""
+    global yt_dlp
+    for name in [n for n in sys.modules if n == "yt_dlp" or n.startswith("yt_dlp.")]:
+        del sys.modules[name]
+    yt_dlp = None
+    _use_update()
 
 
 def has_ffmpeg() -> bool:
