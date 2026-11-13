@@ -98,6 +98,19 @@ class DownloadManager:
         if self.on_change:
             self.on_change(task)
 
+    def find_duplicate(self, url: str, final_url: str | None = None):
+        """A download of the same link already in the list (the most recent one), or None.
+        The original link and the final address both count: signed addresses change every time."""
+        def norm(u):
+            return (u or "").strip().split("#", 1)[0]
+        keys = {norm(url)} | ({norm(final_url)} if final_url else set())
+        keys.discard("")
+        with self._lock:
+            for t in reversed(self.tasks):
+                if norm(t.url) in keys or (getattr(t, "_final_url", None) and norm(t._final_url) in keys):
+                    return t
+        return None
+
     def add_task(self, task, start: bool = True):
         """Add any task object (DownloadTask or video.VideoTask)."""
         task.on_done = self._task_done

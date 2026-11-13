@@ -196,6 +196,14 @@ const sameAsBig = (file) => fs.existsSync(file) && fs.readFileSync(file).equals(
   await waitFor(() => appTasks().some((t) => t.path === (item && item.filename)), 5000);
   check("Na lista da app, o download aponta para o ficheiro do navegador", appTasks().some((t) => t.path === (item && item.filename)));
 
+  // 1b. The same link again: the app asks (open the existing file / download again / cancel).
+  const before1b = (await all()).length;
+  await page.click("#relatorio");
+  check("Mesmo link outra vez: a app pergunta (download repetido)", await pressIn("^Download repetido$", "Escape"));
+  await sleep(2000);
+  check("…e ao cancelar nada novo aparece", (await all()).length === before1b &&
+        appTasks().filter((t) => (t.url || "").endsWith("/relatorio.zip")).length === 1);
+
   // 2. A slower download: progress window, pause / resume from the browser's list.
   ids = (await byUrl()).map((d) => d.id);
   await page.click("#lento");

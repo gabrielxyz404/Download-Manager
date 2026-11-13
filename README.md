@@ -40,7 +40,9 @@ Como consegue isto:
 | Limitador de velocidade | ✅ limite total e por download |
 | Agendador | ✅ iniciar/parar em horários e dias definidos; ao terminar, fechar o app ou desligar o PC |
 | Captura de sites (grabber) | ✅ lista vídeos, músicas, documentos etc. de uma página (e de páginas ligadas a ela) |
-| Categorias | ✅ Compactados, Documentos, Músicas, Programas, Vídeos, Imagens |
+| Categorias | ✅ Compactados, Documentos, Músicas, Programas, Vídeos, Imagens — cada uma com a sua pasta (`Downloads\Vídeos`...) e regras por tipo, endereço ou nome (**Opções → Categorias e pastas**) |
+| Tipos apanhados do navegador | ✅ como no IDM: só os tipos escolhidos (ou todos), e sites a ignorar (**Opções → Tipos apanhados do navegador**) |
+| Download repetido | ✅ ao adicionar um link que já está na lista: abrir / retomar o existente, ou baixar de novo |
 | Tema escuro | ✅ Exibir → Tema escuro |
 | Interface personalizável | ✅ Exibir → Colunas |
 | Fila de downloads | ✅ número de downloads simultâneos configurável |

@@ -310,6 +310,14 @@ class Service:
         if item.get("kind") == "video" or self.settings.confirm_browser:
             self.pending.append(item)
             return True
+        existing = self.manager.find_duplicate(item["url"], item.get("final_url"))
+        if existing is not None:  # ask: resume / open the existing one, or download again
+            self.pending.append({"kind": "duplicate", "item": item, "task": existing.id})
+            return True
+        return self.add_from_browser(item)
+
+    def add_from_browser(self, item: dict) -> bool:
+        """Start a download handed over by the browser. True if a window is needed."""
         headers, cookies = browser_request(item)
         task = self.manager.add(item["url"], self.settings.dest_dir, self.settings.connections,
                                 filename=item.get("filename"), headers=headers, cookies=cookies,

@@ -474,6 +474,67 @@ class GuiTests(unittest.TestCase):
         dlg._save()
         self.assertTrue(s.capture_all_types)
 
+    # ------------------------------------------------------------ duplicates
+    def test_same_link_twice_finished_open_or_again(self):
+        app = self.open_app()
+        app.url_var.set(self.base + "/repetido.bin")
+        app._quick_add()
+        first = self.svc.manager.tasks[0]
+        self.wait_status(first, "Concluído")
+        app.url_var.set(self.base + "/repetido.bin")
+        app._quick_add()
+        pump(app, 0.3)
+        dlg = dialogs(app, self.gui.DuplicateDialog)
+        self.assertEqual(len(dlg), 1)
+        self.assertEqual(len(self.svc.manager.tasks), 1)  # nothing added before the user decides
+        with mock.patch.object(self.gui, "open_path") as op:
+            dlg[0]._open()
+        op.assert_called_once_with(first.path)
+        app.url_var.set(self.base + "/repetido.bin")
+        app._quick_add()
+        pump(app, 0.3)
+        dialogs(app, self.gui.DuplicateDialog)[0]._new()
+        self.assertEqual(len(self.svc.manager.tasks), 2)  # "Baixar de novo"
+
+    def test_same_link_twice_unfinished_resume(self):
+        app = self.open_app()
+        app.add_download(self.base + "/ameio.bin", self.dl, 2, start=False)
+        existing = self.svc.manager.tasks[0]
+        dlg = self.gui.AddDialog(app, self.base + "/ameio.bin")
+        dlg._ok(True)
+        pump(app, 0.3)
+        dup = dialogs(app, self.gui.DuplicateDialog)
+        self.assertEqual(len(dup), 1)
+        dup[0]._resume()
+        self.wait_status(existing, "Concluído")
+        self.assertEqual(len(self.svc.manager.tasks), 1)
+
+    def test_browser_sends_a_link_already_in_the_list(self):
+        self.svc.settings.confirm_browser = False
+        app = self.open_app()
+        app.add_download(self.base + "/donavegador.bin", self.dl, 2, start=False)
+        existing = self.svc.manager.tasks[0]
+        item = {"url": self.base + "/donavegador.bin", "rid": "r1", "referrer": None, "cookies": None}
+        self.svc._set_request("r1", state="waiting")
+        self.assertTrue(self.svc.accept_item(item))
+        app._process_events()
+        pump(app, 0.3)
+        dup = dialogs(app, self.gui.DuplicateDialog)
+        self.assertEqual(len(dup), 1)
+        dup[0]._resume()
+        self.assertEqual(self.svc.requests["r1"]["state"], "started")  # the browser shows the existing one
+        self.assertEqual(self.svc.requests["r1"]["task"], existing.id)
+        self.wait_status(existing, "Concluído")
+        # cancelling the question: the extension stops waiting, nothing is added
+        self.svc._set_request("r2", state="waiting")
+        self.svc.accept_item({**item, "rid": "r2"})
+        app._process_events()
+        pump(app, 0.3)
+        dialogs(app, self.gui.DuplicateDialog)[0].destroy()
+        pump(app, 0.2)
+        self.assertEqual(self.svc.requests["r2"]["state"], "cancelled")
+        self.assertEqual(len(self.svc.manager.tasks), 1)
+
     # -------------------------------------------------------- other windows
     def test_site_grabber(self):
         app = self.open_app()

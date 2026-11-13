@@ -140,6 +140,24 @@ class AddDialog(tk.Toplevel):
         except (tk.TclError, ValueError):
             conns = 8
         same_link = url == self.url_original
+        if not getattr(self, "_dup_checked", False):
+            existing = self.app.manager.find_duplicate(url, self.final_url if same_link else None)
+            if existing is not None:
+                self._dup_checked = True
+                self.withdraw()
+
+                def again():
+                    self._ok(start)
+
+                def resume():
+                    self._decided = True
+                    self.app.service.bind_request(self.rid, existing)
+                    self.app.manager.resume(existing)
+                    self.destroy()
+
+                DuplicateDialog(self.app, existing, on_new=again, on_resume=resume,
+                                on_close=lambda: self.winfo_exists() and self.destroy())
+                return
         task = self.app.add_download(url, self.folder.get(), conns, start,
                                      self.name.get().strip() or None, self.headers,
                                      cookies=self.cookies, final_url=self.final_url if same_link else None,
@@ -783,6 +801,69 @@ class CaptureDialog(tk.Toplevel):
         self.destroy()
 
 
+class DuplicateDialog(tk.Toplevel):
+    """'This download is already in the list': resume / open it, or download again."""
+
+    def __init__(self, app: "App", existing, on_new, on_resume=None, on_close=None):
+        super().__init__(app)
+        self.app, self.task = app, existing
+        self.on_new, self.on_resume, self.on_close = on_new, on_resume, on_close
+        self._chosen = False
+        app.attach_dialog(self)
+        self.title("Download repetido")
+        self.resizable(False, False)
+        frm = ttk.Frame(self, padding=16)
+        frm.pack(fill="both", expand=True)
+        done = existing.status == Status.COMPLETED
+        has_file = done and existing.path and os.path.exists(existing.path)
+        name = existing.filename or existing.url
+        state = "já foi descarregado" if done else f"já está na lista ({existing.status.lower()}"
+        state += "" if done else f", {existing.progress * 100:.0f}%)"
+        ttk.Label(frm, text=f"Este download {state}:", font=("", 10, "bold")).pack(anchor="w")
+        ttk.Label(frm, text=name, wraplength=440).pack(anchor="w", pady=(2, 12))
+        btns = ttk.Frame(frm)
+        btns.pack(anchor="e")
+        if has_file:
+            first = ttk.Button(btns, text="Abrir o ficheiro", command=self._open)
+        elif not done:
+            first = ttk.Button(btns, text="Retomar o existente", command=self._resume)
+        else:
+            first = None  # finished, but the file is gone: only "download again" makes sense
+        if first:
+            first.pack(side="left", padx=4)
+        ttk.Button(btns, text="Baixar de novo", command=self._new).pack(side="left", padx=4)
+        ttk.Button(btns, text="Cancelar", command=self.destroy).pack(side="left", padx=4)
+        self.bind("<Return>", lambda _e: (first.invoke() if first else self._new()))
+        self.bind("<Escape>", lambda _e: self.destroy())
+        self.bind("<Destroy>", self._destroyed)
+        self.lift()
+        self.attributes("-topmost", True)
+        self.after(400, lambda: self.winfo_exists() and self.attributes("-topmost", False))
+        self.focus_force()
+
+    def _pick(self, action) -> None:
+        self._chosen = True
+        self.destroy()
+        if action:
+            action()
+
+    def _open(self) -> None:
+        open_path(self.task.path)
+        self._pick(None)
+        if self.on_close:
+            self.on_close()
+
+    def _resume(self) -> None:
+        self._pick(self.on_resume)
+
+    def _new(self) -> None:
+        self._pick(self.on_new)
+
+    def _destroyed(self, event) -> None:
+        if event.widget is self and not self._chosen and self.on_close:
+            self.on_close()
+
+
 class ShutdownCountdown(tk.Toplevel):
     def __init__(self, app: "App", seconds: int = 30):
         super().__init__(app)
@@ -1123,8 +1204,9 @@ class App(tk.Tk):
         if is_video_site(url):
             self.open_video_dialog(url)
         else:
-            self.add_download(url, self.settings.dest_dir, self.settings.connections,
-                              auto_folder=self.settings.category_folders)
+            self.ask_if_duplicate(url, None, lambda: self.add_download(
+                url, self.settings.dest_dir, self.settings.connections,
+                auto_folder=self.settings.category_folders))
 
     def open_video_dialog(self, url: str = "") -> None:
         url = url or self.url_var.get().strip()
@@ -1289,6 +1371,13 @@ class App(tk.Tk):
         svc.check_scheduler()
         while svc.pending:
             item = svc.pending.pop(0)
+            if item.get("kind") == "duplicate":
+                existing = next((t for t in self.manager.tasks if t.id == item["task"]), None)
+                if existing is None:
+                    svc.add_from_browser(item["item"])
+                else:
+                    self._browser_duplicate(item["item"], existing)
+                continue
             if item.get("kind") == "progress":
                 task = next((t for t in self.manager.tasks if t.id == item["task"]), None)
                 if task is not None:
@@ -1302,6 +1391,30 @@ class App(tk.Tk):
             AddDialog(self, item["url"], item.get("filename"), headers, title="Download do navegador",
                       cookies=cookies, final_url=item.get("final_url"),
                       rid=item.get("rid"))
+
+    def _browser_duplicate(self, item: dict, existing) -> None:
+        svc, rid = self.service, item.get("rid")
+
+        def new():
+            svc.add_from_browser(item)
+            self._process_events()  # shows its progress window
+
+        def resume():
+            svc.bind_request(rid, existing)  # the browser shows the existing download
+            self.manager.resume(existing)
+            if self.settings.show_progress_window:
+                ProgressWindow(self, existing)
+
+        DuplicateDialog(self, existing, on_new=new, on_resume=resume,
+                        on_close=lambda: svc.cancel_request(rid))
+
+    def ask_if_duplicate(self, url: str, final_url: str | None, proceed) -> None:
+        """Runs ``proceed()`` at once, or after the user chose "Baixar de novo"."""
+        existing = self.manager.find_duplicate(url, final_url)
+        if existing is None:
+            proceed()
+        else:
+            DuplicateDialog(self, existing, on_new=proceed, on_resume=lambda: self.manager.resume(existing))
 
     def _extension_help(self) -> None:
         folder = str(install_dir() / "browser-extension")
