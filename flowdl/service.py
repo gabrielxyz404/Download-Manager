@@ -277,6 +277,7 @@ class Service:
                 self.manager.resume(task)
             elif action == "cancel":  # cancelled in the browser's list
                 self.manager.remove(task, delete_files=True)
+                self.cancel_request(rid)  # a pending "has it started?" answers "cancelled"
                 self.events.put(("tick", None))
             return 200, {"ok": True}
         if path == "/mirror-done":  # the browser saved the file: drop our temporary copy

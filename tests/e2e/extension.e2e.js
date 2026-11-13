@@ -39,7 +39,7 @@ const cookiesSeen = [];
 const redirSeen = [];
 const cdnSeen = [];
 const appMethods = [];
-let browserUA = "", browserCH = "", onceUsed = false, pageUsed = false;
+let browserUA = "", browserCH = "", onceUsed = false, pageUsed = false, slowStartUsed = false;
 const onceSeen = [], uaSeen = [];
 const links = ["relatorio", "lento", "cancelar", "confirmado", "naoquero", "menu", "off", "fechado"]
   .map((n) => `<a id="${n}" href="/${n === "lento" || n === "cancelar" ? "slow" : "files"}/${n}.zip">${n}</a>`).join(" ");
@@ -50,7 +50,7 @@ const site = http.createServer((req, res) => {
   }
   if (req.url === "/") {
     res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Set-Cookie": "sessao=abc123; Path=/" });
-    return res.end(links + ' <a id="cdn" href="/redir/cdn.zip">cdn</a> <a id="notas" href="/files/notas.txt">notas</a> <a id="semnome" href="/get?id=7">semnome</a> <a id="acento" href="/files/Atualiza%E7%E3o_FC27.zip">acento</a> <a id="umavez" href="/once/mod_umavez.zip">umavez</a> <a id="cloudflare" href="/ua/protegido.zip">cloudflare</a> <a id="pagina" href="/page/patch.zip">pagina</a>' +
+    return res.end(links + ' <a id="cdn" href="/redir/cdn.zip">cdn</a> <a id="notas" href="/files/notas.txt">notas</a> <a id="semnome" href="/get?id=7">semnome</a> <a id="acento" href="/files/Atualiza%E7%E3o_FC27.zip">acento</a> <a id="umavez" href="/once/mod_umavez.zip">umavez</a> <a id="cloudflare" href="/ua/protegido.zip">cloudflare</a> <a id="pagina" href="/page/patch.zip">pagina</a> <a id="desisto" href="/slowstart/desisto.zip">desisto</a>' +
                    '<form id="formpost" method="post" action="/files/formulario.zip"><button id="postbtn">post</button></form>');
   }
   if (req.url === "/setcdn") { // the file server's own login cookie (a different site: localhost)
@@ -105,6 +105,24 @@ const site = http.createServer((req, res) => {
       res.write(BIG.subarray(i, Math.min(i + 65536, end + 1))); i += 65536; setTimeout(tick, 20);
     };
     return tick();
+  }
+  if (req.url.startsWith("/slowstart/")) { // answers the app only after 6 s (the browser's stays paused)
+    const first = !slowStartUsed;
+    slowStartUsed = true;
+    const send = () => {
+      if (res.destroyed) return;
+      const h = { "Content-Type": "application/zip", "Accept-Ranges": "bytes", "Content-Length": BIG.length,
+                  "Content-Disposition": 'attachment; filename="desisto.zip"' };
+      res.writeHead(200, h);
+      let i = 0;
+      const tick = () => {
+        if (res.destroyed) return;
+        if (i >= BIG.length) return res.end();
+        res.write(BIG.subarray(i, i + 65536)); i += 65536; setTimeout(tick, 40);
+      };
+      tick();
+    };
+    return first ? send() : setTimeout(send, 6000);
   }
   if (req.url.startsWith("/page/")) { // the file for the browser, a page ("wait 5 s...") for anyone else
     const m = /bytes=(\d+)-(\d*)/.exec(req.headers.range || "");
@@ -391,6 +409,20 @@ const sameAsBig = (file) => fs.existsSync(file) && fs.readFileSync(file).equals(
         !appTasks().some((t) => (t.url || "").includes("/page/")) &&
         !(fs.existsSync(DL) && fs.readdirSync(DL, { recursive: true }).some((f) => String(f).includes("patch"))),
         `${pag ? pag.state : "nenhum"} | ${last}`);
+  await page.goto(SITE + "/");
+
+  // 3i. Cancelled in the browser while the app is still checking: it must not come back.
+  await page.click("#desisto");
+  let orig = null;
+  await waitFor(async () => { orig = (await all()).find((d) => d.url.includes("/slowstart/")); return orig && orig.paused; }, 10000);
+  const pausedSeen = !!orig && orig.paused;
+  if (orig) await sw.evaluate((i) => new Promise((r) => chrome.downloads.cancel(i, r)), orig.id);
+  await sleep(9000); // longer than the app's 6 s wait for the site
+  const desisto = (await all()).filter((d) => d.url.includes("/slowstart/") || (d.filename || "").includes("desisto"));
+  check("Cancelado no navegador enquanto a app verificava: não volta a aparecer",
+        pausedSeen && desisto.every((d) => d.state !== "complete" && d.state !== "in_progress") &&
+        !appTasks().some((t) => (t.url || "").includes("/slowstart/")),
+        `pausado=${pausedSeen} ${desisto.map((d) => d.state).join(",")} app=${appTasks().filter((t) => (t.url || "").includes("/slowstart/")).length}`);
   await page.goto(SITE + "/");
 
   // 3c. A link that redirects to a signed address on another site with its own login cookie.

@@ -170,19 +170,37 @@ async function sendToApp(url, filename, referrer, finalUrl = "", original = null
     browser_type: received ? received.type : "",
   });
   if (!res) return false;
+  if (original) original.rid = res.rid;
   if (res.rid) showInBrowser(res.rid, original); // not awaited: may wait for the user's confirmation
   return true;
 }
 
+// The browser's own downloads paused while the app checks it can take them over.
+const waitingOriginals = new Map(); // download id -> original
+
 async function dropOriginal(original) {
   if (!original) return;
+  waitingOriginals.delete(original.id); // our own cancel below is not the user's
   try { await chrome.downloads.cancel(original.id); } catch {}
   try { await chrome.downloads.erase({ id: original.id }); } catch {}
 }
 
 async function showInBrowser(rid, original = null) {
+  if (original) waitingOriginals.set(original.id, original);
+  try {
+    await waitForApp(rid, original);
+  } finally {
+    if (original) waitingOriginals.delete(original.id);
+  }
+}
+
+async function waitForApp(rid, original) {
   for (let i = 0; i < 90; i++) { // up to ~30 min waiting for "Baixar agora" in the app
     chrome.runtime.getPlatformInfo(() => {}); // keeps this service worker awake while we wait
+    if (original && original.cancelled) { // cancelled in the browser meanwhile: the app stops too
+      await postApp("/control", { rid, action: "cancel" });
+      return;
+    }
     let st = null;
     try {
       const r = await fetch(`${APP}/request/${rid}`, { headers: HEADERS }); // answers within 20 s
@@ -194,6 +212,10 @@ async function showInBrowser(rid, original = null) {
     } catch {
       await sleep(1000);
       continue;
+    }
+    if (original && original.cancelled) {
+      await postApp("/control", { rid, action: "cancel" });
+      return;
     }
     if (st.state === "started") { // the app is receiving the file: the browser shows the app's copy
       await dropOriginal(original);
@@ -218,6 +240,7 @@ async function showInBrowser(rid, original = null) {
 
 // The app could not download it: the browser's own download continues where it was.
 async function giveBack(original, reason) {
+  waitingOriginals.delete(original.id);
   try {
     if (original.paused) await chrome.downloads.resume(original.id);
   } catch {
@@ -241,6 +264,14 @@ async function forgetMirror(downloadId) {
 // The browser's buttons control the app's download: pause, resume, cancel; when the
 // browser has saved the file, the app removes its temporary copy.
 chrome.downloads.onChanged.addListener(async (delta) => {
+  const waiting = waitingOriginals.get(delta.id);
+  if (waiting && delta.error && delta.error.current === "USER_CANCELED") {
+    waiting.cancelled = true; // the user cancelled while the app was checking: do not bring it back
+    waitingOriginals.delete(delta.id);
+    if (waiting.rid) await postApp("/control", { rid: waiting.rid, action: "cancel" });
+    await note(waiting.label, "cancelado no navegador");
+    return;
+  }
   const rid = await mirrorOf(delta.id);
   if (!rid) return;
   if (delta.state && delta.state.current === "complete") {
