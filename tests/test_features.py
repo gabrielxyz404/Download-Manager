@@ -122,6 +122,28 @@ class FeatureTests(unittest.TestCase):
             self.assertEqual(post(ok, {"url": "javascript:alert(1)"}), 400)
             self.assertEqual([g["url"] for g in got], ["https://a/b.zip"])
             self.assertEqual(got[0]["cookies"], "k=v")
+
+            # A browser may check first (preflight, incl. the local network check): answered
+            # for the extension only, never for a web page.
+            def options(origin):
+                req = urllib.request.Request(base + "/add", method="OPTIONS", headers={
+                    "Origin": origin, "Access-Control-Request-Method": "POST",
+                    "Access-Control-Request-Headers": "content-type,x-flowdl",
+                    "Access-Control-Request-Private-Network": "true"})
+                try:
+                    r = urllib.request.urlopen(req, timeout=5)
+                    return r.status, dict(r.headers)
+                except urllib.error.HTTPError as e:
+                    return e.code, dict(e.headers)
+            code, h = options("chrome-extension://abc")
+            self.assertEqual(code, 204)
+            self.assertEqual(h.get("Access-Control-Allow-Origin"), "chrome-extension://abc")
+            self.assertEqual(h.get("Access-Control-Allow-Private-Network"), "true")
+            self.assertIn("X-FlowDL", h.get("Access-Control-Allow-Headers", ""))
+            code, h = options("https://evil.example")
+            self.assertEqual(code, 403)
+            self.assertNotIn("Access-Control-Allow-Origin", h)
+            self.assertEqual(len(got), 1)  # a check never adds anything
         finally:
             bridge.stop()
 

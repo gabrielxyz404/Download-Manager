@@ -33,7 +33,7 @@ def extension_ok(headers: dict) -> bool:
     return version_tuple(headers.get("x-flowdl-ext")) >= version_tuple(MIN_EXTENSION_VERSION)
 MAX_HEADER = 64 * 1024
 MAX_BODY = 2_000_000
-REASONS = {200: "OK", 400: "Bad Request", 403: "Forbidden"}
+REASONS = {200: "OK", 204: "No Content", 400: "Bad Request", 403: "Forbidden"}
 
 
 def _video_item(data: dict) -> dict:
@@ -163,6 +163,7 @@ class BrowserBridge:
                 self._clients_cond.notify_all()
 
     def _client(self, conn: socket.socket) -> None:
+        cors = ""
         try:
             conn.settimeout(5)
             data = b""
@@ -180,6 +181,25 @@ class BrowserBridge:
                 if ":" in line:
                     k, v = line.split(":", 1)
                     headers[k.strip().lower()] = v.strip()
+            origin = headers.get("origin", "")
+            if not origin.startswith(("http://", "https://")):
+                # Only the extension (chrome-extension://...) is answered with these, never a
+                # web page. Browsers may check before a POST to this computer (a "preflight",
+                # including the private / local network check) and need to see them.
+                cors = (f"Access-Control-Allow-Origin: {origin}\r\nVary: Origin\r\n" if origin else "")
+            else:
+                cors = ""
+            if method == "OPTIONS":
+                allowed = cors and not origin.startswith(("http://", "https://"))
+                conn.sendall((f"HTTP/1.1 {204 if allowed else 403} {'No Content' if allowed else 'Forbidden'}\r\n"
+                              + (cors + "Access-Control-Allow-Methods: GET, POST\r\n"
+                                 "Access-Control-Allow-Headers: Content-Type, X-FlowDL, X-FlowDL-Ext\r\n"
+                                 "Access-Control-Allow-Private-Network: true\r\n"
+                                 "Access-Control-Allow-Local-Network: true\r\n"
+                                 "Access-Control-Max-Age: 600\r\n" if allowed else "")
+                              + "Content-Length: 0\r\nConnection: close\r\n\r\n").encode())
+                conn.close()
+                return
             if method == "GET" and path.startswith("/stream/") and self.on_stream:
                 # The token in the address is the key (the browser can't send our header).
                 self.on_stream(conn, path.split("?")[0], headers)  # closes the connection
@@ -196,7 +216,7 @@ class BrowserBridge:
             code, payload = 400, {"ok": False}
         try:
             out = json.dumps(payload).encode()
-            conn.sendall(f"HTTP/1.1 {code} {REASONS.get(code, '')}\r\nContent-Type: application/json\r\n"
+            conn.sendall(f"HTTP/1.1 {code} {REASONS.get(code, '')}\r\nContent-Type: application/json\r\n{cors}"
                          f"Content-Length: {len(out)}\r\nConnection: close\r\n\r\n".encode() + out)
         except OSError:
             pass

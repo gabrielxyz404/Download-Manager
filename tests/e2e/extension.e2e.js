@@ -205,6 +205,11 @@ const sameAsBig = (file) => fs.existsSync(file) && fs.readFileSync(file).equals(
   await waitFor(() => appTasks().some((t) => t.path === (item && item.filename)), 5000);
   check("Na lista da app, o download aponta para o ficheiro do navegador", appTasks().some((t) => t.path === (item && item.filename)));
 
+  let pp = await popup();
+  let last = await pp.textContent("#last");
+  check("O popup diz o que aconteceu ao último download", /relatorio\.zip.*enviado à app/.test(last), last);
+  await pp.close();
+
   // 1b. The same link again: the app asks (open the existing file / download again / cancel).
   const before1b = (await all()).length;
   await page.click("#relatorio");
@@ -260,6 +265,11 @@ const sameAsBig = (file) => fs.existsSync(file) && fs.readFileSync(file).equals(
   check("Tipo fora da lista (.txt) fica com o navegador", !!notas && notas.state === "complete" &&
         (await all()).length === n3 + 1 && !appTasks().some((t) => (t.filename || "").includes("notas")),
         appMethods.filter((m) => m.includes("notas")).length + " pedido(s) ao site");
+
+  pp = await popup();
+  last = await pp.textContent("#last");
+  check("…e porque é que um download ficou com o navegador", /notas\.txt.*tipo fora da lista/.test(last), last);
+  await pp.close();
 
   // 3b''. A link whose address has no file name (/get?id=7): only the server says "pacote.zip".
   ids = (await byUrl()).map((d) => d.id);

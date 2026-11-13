@@ -46,4 +46,16 @@ $("open").addEventListener("click", async () => {
 
 $("capture").addEventListener("change", (e) => send({ type: "toggle", enabled: e.target.checked }));
 
+async function lastDownload() {
+  const { lastEvent } = await chrome.storage.local.get("lastEvent");
+  if (!lastEvent) {
+    $("last").textContent = "Último download: a extensão ainda não viu nenhum.";
+    return;
+  }
+  const mins = Math.round((Date.now() - lastEvent.at) / 60000);
+  const when = mins < 1 ? "agora mesmo" : `há ${mins} min`;
+  $("last").textContent = `Último download (${when}): ${lastEvent.name} — ${lastEvent.text}`;
+}
+
 refresh();
+lastDownload();

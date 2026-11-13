@@ -56,6 +56,8 @@ async function postApp(path, payload, tries = 4) {
   return false;
 }
 
+let lastFailure = ""; // why the last request to the app failed (shown in the popup)
+
 async function postJson(path, payload, tries = 4) {
   for (let i = 0; i < tries; i++) {
     try {
@@ -64,13 +66,24 @@ async function postJson(path, payload, tries = 4) {
         headers: { ...HEADERS, "Content-Type": "application/json" },
         body: JSON.stringify(payload),
       });
+      lastFailure = r.ok ? "" : `a app respondeu ${r.status} a ${path}`;
       return r.ok ? await r.json() : null;
-    } catch {
+    } catch (e) {
+      lastFailure = `pedido ${path} falhou: ${e && e.message ? e.message : e}`;
       if (i < tries - 1) await sleep(350);
     }
   }
   return null;
 }
+
+// What happened to the last download the extension saw, shown in the popup: when something
+// does not work on a user's computer, this says where it stopped.
+async function note(name, text) {
+  try {
+    await chrome.storage.local.set({ lastEvent: { at: Date.now(), name: name || "", text } });
+  } catch {}
+}
+const shortName = (url, name) => name || decodeURIComponent((url.split("?")[0].split("/").pop() || url)).slice(0, 80);
 
 // ------------------------------------------------------------------ watched requests
 // What the browser really sent: its method (a form's POST cannot be repeated by the app) and
@@ -185,12 +198,20 @@ chrome.downloads.onChanged.addListener(async (delta) => {
   }
 });
 
-chrome.runtime.onInstalled.addListener(() => {
-  chrome.contextMenus.create({
-    id: "flowdl-download",
-    title: "Baixar com Flow Downloads",
-    contexts: ["link", "image", "video", "audio"],
+// The right-click entry. Made again each time the extension starts (not only when it is
+// installed), so it is there even if the browser lost it, e.g. after the files were updated.
+function setupMenu() {
+  chrome.contextMenus.removeAll(() => {
+    chrome.contextMenus.create({
+      id: "flowdl-download",
+      title: "Baixar com Flow Downloads",
+      contexts: ["link", "image", "video", "audio"],
+    }, () => void chrome.runtime.lastError);
   });
+}
+setupMenu();
+chrome.runtime.onInstalled.addListener(() => {
+  setupMenu();
   updateBadge();
 });
 chrome.runtime.onStartup.addListener(updateBadge);
@@ -228,8 +249,10 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
 chrome.contextMenus.onClicked.addListener(async (info, tab) => {
   const url = info.linkUrl || info.srcUrl;
   if (!url) return;
-  if (!(await sendToApp(url, "", info.pageUrl || (tab && tab.url) || ""))) {
-    console.warn("Flow Downloads não está aberto.");
+  if (await sendToApp(url, "", info.pageUrl || (tab && tab.url) || "")) {
+    await note(shortName(url), "enviado à app (botão direito)");
+  } else {
+    await note(shortName(url), "botão direito: não consegui enviar à app — " + (lastFailure || "app fechada"));
   }
 });
 
@@ -237,19 +260,27 @@ chrome.downloads.onCreated.addListener(async (item) => {
   const url = item.url; // the link the download started from
   const finalUrl = item.finalUrl || item.url; // where it led after redirects
   if (finalUrl.startsWith(APP) || url.startsWith(APP)) return; // the browser's copy of an app download
-  if (!/^(https?|ftp):/i.test(finalUrl)) return; // blob:, data: etc. stay in the browser
+  const label = shortName(finalUrl, item.filename ? item.filename.split(/[\\/]/).pop() : "");
+  if (!/^(https?|ftp):/i.test(finalUrl)) {
+    return note(label, "deixado ao navegador: o ficheiro foi criado pela própria página (" + finalUrl.split(":")[0] + ":)");
+  }
   if (passThrough.delete(url) || passThrough.delete(finalUrl)) return;
   const watched = seenFor(url) || seenFor(finalUrl);
-  if (watched && watched.method !== "GET") return; // a form's POST: only the browser can repeat it
-  if (!(await isEnabled())) return;
-  if (!(await appAlive())) return; // app closed: let the browser handle it
+  if (watched && watched.method !== "GET") {
+    return note(label, "deixado ao navegador: veio de um formulário (" + watched.method + ")");
+  }
+  if (!(await isEnabled())) return note(label, "deixado ao navegador: a captura está desligada");
+  if (!(await appAlive())) return note(label, "deixado ao navegador: a app não respondeu");
   // Ask before taking it: only the file types / sites chosen in the app (an older app that
   // does not know this question answers nothing useful: then take it, as before).
   const verdict = await postJson("/check", {
     url, final_url: finalUrl, filename: item.filename ? item.filename.split(/[\\/]/).pop() : "",
     mime: item.mime || "", referrer: item.referrer || "",
   }, 2);
-  if (verdict && verdict.capture === false) return; // the browser simply carries on
+  if (verdict && verdict.capture === false) {
+    return note(label, `deixado ao navegador: tipo fora da lista da app (${item.mime || "tipo desconhecido"}) ou site ignorado`);
+  }
+  const checkProblem = verdict ? "" : lastFailure;
 
   try {
     await chrome.downloads.cancel(item.id);
@@ -260,5 +291,8 @@ chrome.downloads.onCreated.addListener(async (item) => {
   if (!(await sendToApp(url, name, item.referrer || "", finalUrl))) {
     passThrough.add(url);
     chrome.downloads.download({ url }); // fall back to the browser
+    return note(label, "devolvido ao navegador: não consegui enviar à app — " +
+                (lastFailure || checkProblem || "sem resposta"));
   }
+  await note(label, "enviado à app ✔");
 });
