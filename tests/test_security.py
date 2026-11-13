@@ -170,8 +170,6 @@ class SecurityTests(unittest.TestCase):
         self.assertEqual(vault.unprotect("lixo", {}), {})
 
 
-if __name__ == "__main__":
-    unittest.main()
 
 
 class RefusedLinkTests(unittest.TestCase):
@@ -197,3 +195,22 @@ class RefusedLinkTests(unittest.TestCase):
             FileHost.delay = 0.0
             files.shutdown()
             site.shutdown()
+
+
+class BrowserIdentityTests(unittest.TestCase):
+    def test_browser_identity_is_passed_on_safely(self):
+        from flowdl.bridge import _download_item
+        from flowdl.service import browser_request
+        ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/142.0 Safari/537.36"
+        item = _download_item({"url": "https://a.com/x.zip", "user_agent": ua, "accept_language": "pt-BR,pt"})
+        headers, _ = browser_request(item)
+        self.assertEqual(headers["User-Agent"], ua)
+        self.assertEqual(headers["Accept-Language"], "pt-BR,pt")
+        # nothing that could smuggle another header in
+        bad = _download_item({"url": "https://a.com/x.zip", "user_agent": "x\r\nCookie: roubado=1"})
+        self.assertNotIn("User-Agent", browser_request(bad)[0])
+        self.assertNotIn("User-Agent", browser_request(_download_item({"url": "https://a.com/x.zip"}))[0])
+
+
+if __name__ == "__main__":
+    unittest.main()

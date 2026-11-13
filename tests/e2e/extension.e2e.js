@@ -39,12 +39,15 @@ const cookiesSeen = [];
 const redirSeen = [];
 const cdnSeen = [];
 const appMethods = [];
+let browserUA = "", onceUsed = false;
+const onceSeen = [], uaSeen = [];
 const links = ["relatorio", "lento", "cancelar", "confirmado", "naoquero", "menu", "off", "fechado"]
   .map((n) => `<a id="${n}" href="/${n === "lento" || n === "cancelar" ? "slow" : "files"}/${n}.zip">${n}</a>`).join(" ");
 const site = http.createServer((req, res) => {
+  if (req.url === "/") browserUA = req.headers["user-agent"] || ""; // the browser's identity
   if (req.url === "/") {
     res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Set-Cookie": "sessao=abc123; Path=/" });
-    return res.end(links + ' <a id="cdn" href="/redir/cdn.zip">cdn</a> <a id="notas" href="/files/notas.txt">notas</a> <a id="semnome" href="/get?id=7">semnome</a> <a id="acento" href="/files/Atualiza%E7%E3o_FC27.zip">acento</a>' +
+    return res.end(links + ' <a id="cdn" href="/redir/cdn.zip">cdn</a> <a id="notas" href="/files/notas.txt">notas</a> <a id="semnome" href="/get?id=7">semnome</a> <a id="acento" href="/files/Atualiza%E7%E3o_FC27.zip">acento</a> <a id="umavez" href="/once/mod_umavez.zip">umavez</a> <a id="cloudflare" href="/ua/protegido.zip">cloudflare</a>' +
                    '<form id="formpost" method="post" action="/files/formulario.zip"><button id="postbtn">post</button></form>');
   }
   if (req.url === "/setcdn") { // the file server's own login cookie (a different site: localhost)
@@ -75,6 +78,41 @@ const site = http.createServer((req, res) => {
   if (req.url === "/clip.mp4" && clip) {
     res.writeHead(200, { "Content-Type": "video/mp4", "Content-Length": clip.length });
     return res.end(clip);
+  }
+  if (req.url.startsWith("/once/")) { // a link valid only once (signed for one request)
+    onceSeen.push(req.headers["user-agent"] || "");
+    const first = !onceUsed;
+    onceUsed = true;
+    if (!first && !(req.headers.range || "").startsWith("bytes=")) { res.writeHead(403); return res.end("link expirado"); }
+    if (!first) { // the browser resuming its own download: same visitor, range continues
+      const m = /bytes=(\d+)-(\d*)/.exec(req.headers.range || "");
+      if (!m || (req.headers["user-agent"] || "") !== browserUA) { res.writeHead(403); return res.end("link expirado"); }
+    }
+    const m = /bytes=(\d+)-(\d*)/.exec(req.headers.range || "");
+    const start = m ? +m[1] : 0, end = BIG.length - 1;
+    if (!first && start === 0) { res.writeHead(403); return res.end("link expirado"); } // the app's check
+    const h = { "Content-Type": "application/zip", "Accept-Ranges": "bytes", "Content-Length": end - start + 1,
+                "Content-Disposition": 'attachment; filename="mod_umavez.zip"' };
+    if (m) h["Content-Range"] = `bytes ${start}-${end}/${BIG.length}`;
+    res.writeHead(m ? 206 : 200, h);
+    let i = start; // slow enough that the browser is still downloading when the app is asked
+    const tick = () => {
+      if (res.destroyed) return;
+      if (i > end) return res.end();
+      res.write(BIG.subarray(i, Math.min(i + 65536, end + 1))); i += 65536; setTimeout(tick, 20);
+    };
+    return tick();
+  }
+  if (req.url.startsWith("/ua/")) { // like Cloudflare: only the same browser identity gets the file
+    uaSeen.push(req.headers["user-agent"] || "");
+    if ((req.headers["user-agent"] || "") !== browserUA) { res.writeHead(403); return res.end("verificação"); }
+    const m = /bytes=(\d+)-(\d*)/.exec(req.headers.range || "");
+    const start = m ? +m[1] : 0, end = m && m[2] ? +m[2] : BIG.length - 1;
+    const h = { "Content-Type": "application/zip", "Accept-Ranges": "bytes", "Content-Length": end - start + 1,
+                "Content-Disposition": 'attachment; filename="protegido.zip"' };
+    if (m) h["Content-Range"] = `bytes ${start}-${end}/${BIG.length}`;
+    res.writeHead(m ? 206 : 200, h);
+    return res.end(BIG.subarray(start, end + 1));
   }
   if (req.url.startsWith("/get?")) { // a link without the file name: only the server says it is a .zip
     const m = /bytes=(\d+)-(\d*)/.exec(req.headers.range || "");
@@ -207,7 +245,7 @@ const sameAsBig = (file) => fs.existsSync(file) && fs.readFileSync(file).equals(
 
   let pp = await popup();
   let last = await pp.textContent("#last");
-  check("O popup diz o que aconteceu ao último download", /relatorio\.zip.*enviado à app/.test(last), last);
+  check("O popup diz o que aconteceu ao último download", /relatorio\.zip.*(baixado pela app|enviado à app)/.test(last), last);
   await pp.close();
 
   // 1b. The same link again: the app asks (open the existing file / download again / cancel).
@@ -287,6 +325,31 @@ const sameAsBig = (file) => fs.existsSync(file) && fs.readFileSync(file).equals(
   acento = acento && await finished(acento.id);
   check("Link com acentos à antiga (%E7): a app apanha", !!acento && sameAsBig(acento.filename) &&
         appTasks().some((t) => (t.url || "").includes("Atualiza%E7%E3o")), acento ? acento.filename : "não apanhou");
+  await page.goto(SITE + "/");
+
+  // 3f. A link valid only once: the app is refused, so the browser keeps (and finishes) its own.
+  let n3f = (await all()).length;
+  await page.click("#umavez");
+  let umavez = null;
+  await waitFor(async () => { umavez = (await all()).find((d) => d.url.includes("/once/")); return umavez && umavez.state === "complete"; }, 30000);
+  pp = await popup();
+  last = await pp.textContent("#last");
+  await pp.close();
+  check("Link que só serve uma vez: o Brave termina o seu próprio download, intacto",
+        !!umavez && umavez.state === "complete" && sameAsBig(umavez.filename) &&
+        !appTasks().some((t) => (t.url || "").includes("/once/")),
+        umavez ? `${umavez.state} ${umavez.error || ""} ${umavez.bytesReceived}/${umavez.totalBytes}` : "nenhum");
+  check("…e o popup explica porquê", /mod_umavez\.zip.*Brave baixou sozinho/.test(last), last);
+  await page.goto(SITE + "/");
+
+  // 3g. Like Cloudflare: the site only serves the same browser identity (User-Agent).
+  ids = (await byUrl()).map((d) => d.id);
+  await page.click("#cloudflare");
+  let prot = await newest(ids);
+  prot = prot && await finished(prot.id);
+  check("Site que exige a identidade do navegador (tipo Cloudflare): a app consegue",
+        !!prot && sameAsBig(prot.filename) && appTasks().some((t) => (t.url || "").includes("/ua/")),
+        `${prot ? prot.filename : "não"} pedidos=${uaSeen.length} recusados=${uaSeen.filter((u) => u !== browserUA).length}`);
   await page.goto(SITE + "/");
 
   // 3c. A link that redirects to a signed address on another site with its own login cookie.

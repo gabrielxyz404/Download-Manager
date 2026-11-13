@@ -51,6 +51,14 @@ def _video_item(data: dict) -> dict:
             "media": media[:30], "cookie_jar": jar[:300]}
 
 
+def _header_value(value) -> str | None:
+    """A header value from the extension: one line of printable text, or nothing."""
+    text = str(value or "").strip()
+    if not text or len(text) > 512 or any(c in text for c in "\r\n\0"):
+        return None
+    return text
+
+
 def _download_item(data: dict) -> dict:
     url = str(data.get("url", ""))
     if not url.startswith(("http://", "https://", "ftp://")):
@@ -63,7 +71,10 @@ def _download_item(data: dict) -> dict:
             "final_url": final if final.startswith(("http://", "https://")) else None,
             # the Cookie header the browser sent to each site, as observed by the extension
             "cookies_by_host": {str(k).lower(): str(v) for k, v in by_host.items() if v}
-            if isinstance(by_host, dict) else {}}
+            if isinstance(by_host, dict) else {},
+            # the browser's own identity: sites behind Cloudflare & co. tie their cookies to it
+            "user_agent": _header_value(data.get("user_agent")),
+            "accept_language": _header_value(data.get("accept_language"))}
     if data.get("mirror"):
         # The extension wants to show this download in the browser too: it will ask about
         # this request id until the download starts (or is cancelled in the app).

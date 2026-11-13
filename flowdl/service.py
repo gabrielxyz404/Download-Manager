@@ -58,6 +58,10 @@ ROOT = Path(__file__).resolve().parent.parent
 def browser_request(item: dict) -> tuple[dict, dict]:
     """Headers and per-site cookies for a download handed over by the browser."""
     headers = {"Referer": item["referrer"]} if item.get("referrer") else {}
+    if item.get("user_agent"):  # exactly the browser's, so the site sees the same visitor
+        headers["User-Agent"] = item["user_agent"]
+    if item.get("accept_language"):
+        headers["Accept-Language"] = item["accept_language"]
     cookies = dict(item.get("cookies_by_host") or {})
     if item.get("cookies") and not cookies:  # older extension: cookies of the link's site
         from .engine import host_of
@@ -190,6 +194,33 @@ class Service:
                                                    "stream": f"/stream/{t.stream_token}"})
                 return
 
+    def _verdict(self, task) -> str | None:
+        """Has the app really got this download going? "ok", None (not known yet) or the
+        reason it could not (the site refused it before sending anything)."""
+        if task is None:
+            return "ok"
+        if task.downloaded > 0 or task.status in (Status.COMPLETED, Status.PAUSED):
+            return "ok"
+        if task.status == Status.QUEUED and not task.is_running():
+            # Waiting for a free slot (the user's limit of simultaneous downloads): it will
+            # start later, so the browser hands it over now as it always did.
+            running = sum(1 for t in self.manager.tasks if t.is_running())
+            if running >= self.manager.max_active:
+                return "ok"
+        if task.status == Status.ERROR:
+            return task.error or "erro"
+        return None
+
+    def _give_back(self, rid: str, reason: str) -> None:
+        """The site refused the app (single-use link, login, protection page...): drop our
+        copy and tell the extension, which lets the browser carry on with its own download."""
+        task = self._task_for(rid)
+        log("give back", rid, reason)
+        if task is not None:
+            self.manager.remove(task, delete_files=True)
+            self.events.put(("tick", None))
+        self._set_request(rid, state="failed", error=reason)
+
     def _task_for(self, rid: str):
         tid = self.requests.get(rid, {}).get("task")
         return next((t for t in self.manager.tasks if t.id == tid), None) if tid else None
@@ -205,7 +236,28 @@ class Service:
                     return 404, {"ok": False}
                 self._req_cond.wait_for(lambda: self.requests[rid]["state"] != "waiting",
                                         timeout=REQUEST_WAIT_S)
-                return 200, {"ok": True, **{k: v for k, v in self.requests[rid].items() if k != "task"}}
+            # "started" only once the site has really sent us data: until then the browser
+            # keeps its own download paused, and gets it back if the site refuses us.
+            import time
+            deadline = time.monotonic() + REQUEST_WAIT_S
+            while True:
+                with self._req_cond:
+                    req = dict(self.requests[rid])
+                if req.get("state") != "started":
+                    break
+                verdict = self._verdict(self._task_for(rid))
+                if verdict == "ok":
+                    break
+                if verdict is not None:  # the site refused the app
+                    self._give_back(rid, verdict)
+                    with self._req_cond:
+                        req = dict(self.requests[rid])
+                    break
+                if time.monotonic() > deadline:
+                    req = {**req, "state": "waiting"}  # ask again
+                    break
+                time.sleep(0.2)
+            return 200, {"ok": True, **{k: v for k, v in req.items() if k != "task"}}
         if path == "/check":  # should the app take this browser download? (file types, sites)
             from .capture import should_capture
             return 200, {"ok": True, "capture": should_capture(

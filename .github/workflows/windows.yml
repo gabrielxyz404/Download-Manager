@@ -9,7 +9,7 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 40
     env:
-      APP_VERSION: "0.5.3"
+      APP_VERSION: "0.6.0"
     steps:
       - uses: actions/checkout@v4
 

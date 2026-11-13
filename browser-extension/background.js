@@ -99,8 +99,10 @@ const seen = new Map(); // url -> { method, cookie, time }
 const SEEN_MS = 60000;
 
 function remember(details) {
-  const cookie = (details.requestHeaders || []).find((h) => h.name.toLowerCase() === "cookie");
-  seen.set(details.url, { method: details.method, cookie: cookie ? cookie.value : null, time: Date.now() });
+  const header = (name) => (details.requestHeaders || []).find((h) => h.name.toLowerCase() === name);
+  const cookie = header("cookie"), ua = header("user-agent"), lang = header("accept-language");
+  seen.set(details.url, { method: details.method, cookie: cookie ? cookie.value : null,
+                          ua: ua ? ua.value : null, lang: lang ? lang.value : null, time: Date.now() });
   if (seen.size > 300) {
     const old = Date.now() - SEEN_MS;
     for (const [k, v] of seen) if (v.time < old || seen.size > 300) seen.delete(k);
@@ -143,38 +145,74 @@ async function cookiesByHost(urls) {
 // the same download in its list (it receives the bytes from the app as they arrive).
 // ``url`` is the link the download started from; ``finalUrl`` where it led (often a
 // short-lived signed address): the app uses the latter, and the link to get a fresh one.
-async function sendToApp(url, filename, referrer, finalUrl = "") {
+// ``original``: the browser's own download of this file, paused while the app checks that
+// the site lets it download (null when there is none, e.g. the right-click menu).
+async function sendToApp(url, filename, referrer, finalUrl = "", original = null) {
   const cookies_by_host = await cookiesByHost([url, finalUrl || url]);
+  const watched = seenFor(finalUrl || url) || seenFor(url) || {};
   const res = await postJson("/add", {
     url, final_url: finalUrl && finalUrl !== url ? finalUrl : "", filename, referrer,
     cookies_by_host, mirror: true,
+    // the browser's identity, exactly as sent to the site (Cloudflare & co. check it)
+    user_agent: watched.ua || navigator.userAgent,
+    accept_language: watched.lang || (navigator.languages || []).join(","),
   });
   if (!res) return false;
-  if (res.rid) showInBrowser(res.rid); // not awaited: may wait for the user's confirmation
+  if (res.rid) showInBrowser(res.rid, original); // not awaited: may wait for the user's confirmation
   return true;
 }
 
-async function showInBrowser(rid) {
+async function dropOriginal(original) {
+  if (!original) return;
+  try { await chrome.downloads.cancel(original.id); } catch {}
+  try { await chrome.downloads.erase({ id: original.id }); } catch {}
+}
+
+async function showInBrowser(rid, original = null) {
   for (let i = 0; i < 90; i++) { // up to ~30 min waiting for "Baixar agora" in the app
     chrome.runtime.getPlatformInfo(() => {}); // keeps this service worker awake while we wait
     let st = null;
     try {
       const r = await fetch(`${APP}/request/${rid}`, { headers: HEADERS }); // answers within 20 s
-      if (!r.ok) return;
+      if (!r.ok) {
+        if (original) await giveBack(original, `a app respondeu ${r.status}`);
+        return;
+      }
       st = await r.json();
     } catch {
       await sleep(1000);
       continue;
     }
-    if (st.state === "started") {
+    if (st.state === "started") { // the app is receiving the file: the browser shows the app's copy
+      await dropOriginal(original);
       const id = await chrome.downloads.download({ url: APP + st.stream, conflictAction: "uniquify" });
       const { mirrors = {} } = await chrome.storage.session.get("mirrors");
       mirrors[id] = rid;
       await chrome.storage.session.set({ mirrors });
+      if (original) await note(original.label, "baixado pela app ✔");
       return;
     }
-    if (st.state !== "waiting") return; // cancelled, or "download later" (app only)
+    if (st.state === "failed") { // the site refused the app: the browser carries on by itself
+      if (original) await giveBack(original, st.error || "o site recusou");
+      return;
+    }
+    if (st.state !== "waiting") { // cancelled in the app, or "download later" (app only)
+      await dropOriginal(original);
+      return;
+    }
   }
+  if (original) await giveBack(original, "a app não começou a tempo");
+}
+
+// The app could not download it: the browser's own download continues where it was.
+async function giveBack(original, reason) {
+  try {
+    if (original.paused) await chrome.downloads.resume(original.id);
+  } catch {
+    passThrough.add(original.url);
+    chrome.downloads.download({ url: original.url }); // could not resume: start it again
+  }
+  await note(original.label, "o Brave baixou sozinho: a app não conseguiu (" + reason + ")");
 }
 
 async function mirrorOf(downloadId) {
@@ -297,17 +335,22 @@ async function handleDownload(item) {
   }
   const checkProblem = verdict ? "" : lastFailure;
 
+  // Pause (not cancel) the browser's download: it is only dropped once the app is really
+  // receiving the file. If the site refuses the app (a link valid only once, a login or a
+  // protection page...), the browser simply carries on: never worse than without the app.
+  const original = { id: item.id, url, label, paused: false };
   try {
-    await chrome.downloads.cancel(item.id);
-    await chrome.downloads.erase({ id: item.id });
+    await chrome.downloads.pause(item.id);
+    original.paused = true;
   } catch {}
 
   const name = item.filename ? item.filename.split(/[\\/]/).pop() : "";
-  if (!(await sendToApp(url, name, item.referrer || "", finalUrl))) {
-    passThrough.add(url);
-    chrome.downloads.download({ url }); // fall back to the browser
-    return note(label, "devolvido ao navegador: não consegui enviar à app — " +
+  if (!(await sendToApp(url, name, item.referrer || "", finalUrl, original))) {
+    if (original.paused) {
+      try { await chrome.downloads.resume(item.id); } catch {}
+    }
+    return note(label, "o Brave baixou sozinho: não consegui enviar à app — " +
                 (lastFailure || checkProblem || "sem resposta"));
   }
-  await note(label, "enviado à app ✔");
+  await note(label, "enviado à app, a confirmar…");
 }
