@@ -318,6 +318,7 @@ class DownloadTask:
         self._worker_error: str | None = None
         self._answer_time = 0.0  # how long the server takes to start answering a request
         self._disk_problem: DiskProblem | None = None
+        self._naps = threading.Event()  # set: connections stop waiting (pause / file complete)
         self._refreshes = 0  # fresh addresses obtained for an expired link
         self._same_refusals = 0  # refusals of an address that the original link still leads to
         self._progress_at_same = -1
@@ -393,6 +394,7 @@ class DownloadTask:
         if self.is_running() or self.status == Status.COMPLETED:
             return
         self._stop.clear()
+        self._naps.clear()
         self.error = None
         self._worker_error = None
         self._disk_problem = None
@@ -400,9 +402,15 @@ class DownloadTask:
         self._thread = threading.Thread(target=self._run, name=f"dl-{self.id}", daemon=True)
         self._thread.start()
 
+    def _nap(self, seconds: float) -> None:
+        """A connection waiting before it tries again. Woken at once on pause, or when the
+        file is complete (it must not keep the finished download waiting)."""
+        self._naps.wait(seconds)
+
     def pause(self) -> None:
         if self.is_running():
             self._stop.set()
+            self._naps.set()
         elif self.status in (Status.QUEUED, Status.CONNECTING):
             self.status = Status.PAUSED
 
@@ -861,6 +869,8 @@ class DownloadTask:
                     if new_seg is None:
                         break
                     spawn(new_seg)
+            if all(s.remaining == 0 for s in self.segments):
+                self._naps.set()  # complete: no connection may keep it waiting
             if time.monotonic() - last_save > 2.0:
                 self._checkpoint(sync_fd)
                 last_save = time.monotonic()
@@ -1143,7 +1153,7 @@ class DownloadTask:
                         if code in TRANSIENT_CODES and wait is not None:
                             # The server said when to come back: do exactly that, without using
                             # up a retry or concluding it limits connections.
-                            self._stop.wait(min(wait, MAX_RETRY_AFTER))
+                            self._nap(min(wait, MAX_RETRY_AFTER))
                             continue
                         if (code in LIMIT_CODES or refused) and not w.got_data and self._active_workers > 1:
                             # The server does not want one more connection from us. It may still
@@ -1152,7 +1162,7 @@ class DownloadTask:
                             # connection will take it) instead of failing.
                             refusals += 1
                             if refusals == 1:
-                                self._stop.wait(1.0)
+                                self._nap(1.0)
                                 continue
                             self._limit_hit = max(self._limit_hit, self._streaming)
                             return
@@ -1164,7 +1174,7 @@ class DownloadTask:
                             # beyond their limit: treat it as that limit.
                             refusals += 1
                             if refusals == 1:
-                                self._stop.wait(1.0)
+                                self._nap(1.0)
                                 continue
                             self._limit_hit = max(self._limit_hit, self._streaming)
                             return
@@ -1176,7 +1186,7 @@ class DownloadTask:
                             try:
                                 if self._refresh_url(req_url):  # same address, still good
                                     refusals += 1
-                                    self._stop.wait(min(3.0, 0.5 * refusals))
+                                    self._nap(min(3.0, 0.5 * refusals))
                                 continue
                             except FileChanged:
                                 raise
@@ -1193,7 +1203,7 @@ class DownloadTask:
                         retries += 1
                         if retries > MAX_RETRIES:
                             raise RuntimeError(f"Falha na conexão: {exc}") from exc
-                        self._stop.wait(min(2 ** retries, 30))
+                        self._nap(min(2 ** retries, 30))
         except FileChanged:
             self._file_changed = True  # the download loop starts over with the new version
         except DiskProblem as exc:
