@@ -84,6 +84,10 @@ def is_cert_error(exc: BaseException) -> bool:
     return False
 
 
+class _Finished(Exception):
+    """A late connection found the download already finished: it just leaves."""
+
+
 class DiskProblem(Exception):
     """The disk, not the network: full, no permission, folder gone. The download pauses with a
     plain message (its progress is kept) instead of being retried as a network error."""
@@ -250,6 +254,7 @@ class _Worker:
         self.accepted = resp is not None  # the server accepted a request on this connection
         self.started = self.last_swap = self.last_data = time.monotonic()
         self.quiet_swaps = 0  # replaced for silence with no data in between (backs off)
+        self.rescued_at = 0.0  # when its piece was last handed to a fresh connection
         self.answering = False  # the server has started answering the current request
         self.alive = True
         self.got_data = False
@@ -766,7 +771,15 @@ class DownloadTask:
 
         threads: list[threading.Thread] = []
         last_save = time.monotonic()
+        complete_since = None
         sync_fd = os.open(self._part_path, os.O_RDWR | getattr(os, "O_BINARY", 0))
+        # One file handle shared by all connections (writes take turns; the disk is far faster
+        # than the network). The download can then end the moment every byte is there, without
+        # waiting for a straggling connection: on Windows a file still open in another thread
+        # cannot be renamed, which kept finished downloads waiting.
+        self._fh = open(self._part_path, "r+b", buffering=0)
+        self._fh_lock = threading.Lock()
+        self._rescued: list = []
         self._workers = []
 
         def spawn(seg: Segment, conn=None, resp=None) -> None:
@@ -863,6 +876,8 @@ class DownloadTask:
             best_speed = max(best_speed, self._recent_speed(3.0))
             if not self._stop.is_set():
                 self._replace_slow_connections(now)
+                while self._rescued:  # pieces taken from stuck connections: a fresh one each
+                    spawn(self._rescued.pop())
                 # Dynamic segmentation: keep `target` connections busy.
                 while self._active_workers < target:
                     new_seg = self._split_largest()
@@ -876,7 +891,15 @@ class DownloadTask:
                 last_save = time.monotonic()
             if not any(t.is_alive() for t in threads):
                 break
+            if all(s.remaining == 0 for s in self.segments):
+                complete_since = complete_since or time.monotonic()
+                if time.monotonic() - complete_since > 1.0:
+                    break  # every byte is here: do not wait for a connection that is stuck
+            else:
+                complete_since = None
 
+        with self._fh_lock:
+            self._fh.close()  # a straggler that wakes up later finds it closed and just leaves
         self.downloaded = sum(s.pos - s.start for s in self.segments)
         self._checkpoint(sync_fd)
         os.close(sync_fd)
@@ -1033,7 +1056,23 @@ class DownloadTask:
             if not w.answering:
                 base = max(base, 3 * self._answer_time)
             limit = min(base * 2 ** w.quiet_swaps, TIMEOUT)
-            if now - w.last_data > limit and now - w.last_swap > limit and not w.reconnect:
+            quiet = now - w.last_data
+            if quiet > base and now - w.rescued_at > base:
+                # Hand what it still has to receive to a fresh connection now, whether or not
+                # the stuck one wakes up (on Windows it may not until its timeout). If it does
+                # wake, its piece is empty and it simply takes other work. No back-off here:
+                # the piece must keep moving even when this connection is not cut again yet.
+                with seg.lock:
+                    rest = Segment(seg.pos, seg.end) if seg.remaining > 0 else None
+                    if rest is not None:
+                        seg.end = seg.pos - 1
+                if rest is not None:
+                    w.rescued_at = now
+                    with self._lock:
+                        self._rescued.append(self._add_segment(rest))
+            if quiet > limit and now - w.last_swap > limit and not w.reconnect:
+                # Cut it and reconnect (waiting twice as long each time it brings nothing, so a
+                # server that is merely slow to answer is not hammered).
                 w.reconnect = True
                 w.last_data = now
                 w.quiet_swaps += 1
@@ -1060,7 +1099,8 @@ class DownloadTask:
         try:
             # Unbuffered: every chunk goes straight to the operating system, so nothing
             # sits in a Python buffer that would be lost if the app is killed.
-            with open(self._part_path, "r+b", buffering=0) as f:
+            f = self._fh
+            if True:
                 while not self._stop.is_set():
                     if seg.remaining == 0 and resp is None:
                         seg.active = False
@@ -1105,11 +1145,14 @@ class DownloadTask:
                                 last = min(seg.end, seg.inflight_end)
                                 n = max(0, min(len(chunk), last - seg.pos + 1))
                                 if n:
-                                    try:
-                                        f.seek(seg.pos)
-                                        f.write(chunk[:n])
-                                    except OSError as exc:
-                                        raise _disk(exc, self._part_path) from exc
+                                    with self._fh_lock:
+                                        if f.closed:  # the download already ended without us
+                                            raise _Finished()
+                                        try:
+                                            f.seek(seg.pos)
+                                            f.write(chunk[:n])
+                                        except OSError as exc:
+                                            raise _disk(exc, self._part_path) from exc
                                     seg.pos += n
                                 request_done = seg.pos > last
                             w.count(n)
@@ -1208,6 +1251,8 @@ class DownloadTask:
             self._file_changed = True  # the download loop starts over with the new version
         except DiskProblem as exc:
             self._disk_problem = exc
+        except _Finished:
+            pass
         except Exception as exc:  # noqa: BLE001
             self._worker_error = str(exc) or exc.__class__.__name__
         finally:

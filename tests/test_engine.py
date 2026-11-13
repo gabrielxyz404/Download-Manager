@@ -281,6 +281,31 @@ class StallTests(unittest.TestCase):
             server.shutdown()
             tmp.cleanup()
 
+    def test_finishes_even_if_a_stuck_connection_cannot_be_woken(self):
+        """Seen on Windows: every byte was there, but one stuck connection could not be woken
+        and the download waited for it until its 30 s timeout. It must end at once anyway."""
+        from unittest import mock
+        from flowdl import net
+        ThreadingHTTPServer.request_queue_size = 64
+        server = ThreadingHTTPServer(("127.0.0.1", 0), StalledServer)
+        server.daemon_threads = True
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        tmp = tempfile.TemporaryDirectory()
+        try:
+            with mock.patch.object(net.Connection, "abort", lambda self: None):  # cannot be woken
+                task = DownloadTask(f"http://127.0.0.1:{server.server_address[1]}/f.bin", tmp.name, 8)
+                t0 = time.monotonic()
+                task.start()
+                task.wait(60)
+                took = time.monotonic() - t0
+            self.assertEqual(task.status, Status.COMPLETED, task.error)
+            with open(task.path, "rb") as f:
+                self.assertEqual(hashlib.sha256(f.read()).digest(), hashlib.sha256(BIG).digest())
+            self.assertLess(took, 25, f"{took:.0f}s")
+        finally:
+            server.shutdown()
+            tmp.cleanup()
+
     def test_browser_list_download_keeps_up_from_the_start(self):
         """Downloads shown in the browser's list: the browser can only receive the file from
         its start. Before, connections spread over the whole file and the browser showed a
