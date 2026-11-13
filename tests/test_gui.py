@@ -315,7 +315,8 @@ class GuiTests(unittest.TestCase):
         task = self.svc.manager.tasks[0]
         task.wait(30)
         self.assertEqual(task.status, "Concluído", task.error)
-        self.assertEqual(task.headers, {"Referer": "https://site/", "Cookie": "s=1"})
+        self.assertEqual(task.headers, {"Referer": "https://site/"})
+        self.assertEqual(task.cookies, {"127.0.0.1": "s=1"})  # login cookies are kept per site
 
     @staticmethod
     def _alive(app):

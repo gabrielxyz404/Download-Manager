@@ -36,12 +36,36 @@ if (spawnSync("ffmpeg", ["-loglevel", "error", "-y", "-f", "lavfi", "-i", "tests
   "-shortest", clipPath]).status === 0) clip = fs.readFileSync(clipPath);
 
 const cookiesSeen = [];
+const redirSeen = [];
+const cdnSeen = [];
+const appMethods = [];
 const links = ["relatorio", "lento", "cancelar", "confirmado", "naoquero", "menu", "off", "fechado"]
   .map((n) => `<a id="${n}" href="/${n === "lento" || n === "cancelar" ? "slow" : "files"}/${n}.zip">${n}</a>`).join(" ");
 const site = http.createServer((req, res) => {
   if (req.url === "/") {
     res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Set-Cookie": "sessao=abc123; Path=/" });
-    return res.end(links);
+    return res.end(links + ' <a id="cdn" href="/redir/cdn.zip">cdn</a>' +
+                   '<form id="formpost" method="post" action="/files/formulario.zip"><button id="postbtn">post</button></form>');
+  }
+  if (req.url === "/setcdn") { // the file server's own login cookie (a different site: localhost)
+    res.writeHead(200, { "Content-Type": "text/html", "Set-Cookie": "cdn=1; Path=/" });
+    return res.end("ok");
+  }
+  if (req.url.startsWith("/redir/")) { // the site's link leads to a signed address on another site
+    redirSeen.push(req.headers.cookie || "");
+    res.writeHead(302, { Location: `http://localhost:8771/cdnfiles/cdn.zip?token=${Date.now()}` });
+    return res.end();
+  }
+  if (req.url.startsWith("/cdnfiles/")) {
+    cdnSeen.push(req.headers.cookie || "");
+    if (!(req.headers.cookie || "").includes("cdn=1")) { res.writeHead(403); return res.end("login cdn"); }
+    const m = /bytes=(\d+)-(\d*)/.exec(req.headers.range || "");
+    const start = m ? +m[1] : 0, end = m && m[2] ? +m[2] : BIG.length - 1;
+    const h = { "Content-Type": "application/zip", "Accept-Ranges": "bytes", "Content-Length": end - start + 1,
+                "Content-Disposition": 'attachment; filename="cdn.zip"' };
+    if (m) h["Content-Range"] = `bytes ${start}-${end}/${BIG.length}`;
+    res.writeHead(m ? 206 : 200, h);
+    return res.end(BIG.subarray(start, end + 1));
   }
   if (req.url === "/video.html") {
     res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
@@ -55,6 +79,7 @@ const site = http.createServer((req, res) => {
   const slow = req.url.startsWith("/slow/");
   if (req.url.startsWith("/files/") || slow) {
     cookiesSeen.push(req.headers.cookie || "");
+    appMethods.push(req.method + " " + req.url);
     if (!(req.headers.cookie || "").includes("sessao=abc123")) { res.writeHead(403); return res.end("login"); }
     const name = req.url.split("/").pop();
     const m = /bytes=(\d+)-(\d*)/.exec(req.headers.range || "");
@@ -198,6 +223,33 @@ const sameAsBig = (file) => fs.existsSync(file) && fs.readFileSync(file).equals(
   check("Cancelar no navegador cancela na app", await waitFor(() => !appTasks().some((t) => t.filename === "cancelar.zip"), 8000));
   check("…e apaga a cópia temporária", await waitFor(() => leftovers().length === 0, 5000), leftovers().join(","));
   await waitFor(() => windows("cancelar.zip").length === 0, 5000);
+
+  // 3b. A form (POST) download: only the browser can repeat it, so it stays in the browser.
+  const n2 = (await all()).length;
+  await page.click("#postbtn");
+  await waitFor(async () => (await all()).length > n2, 10000);
+  const posted = (await all()).find((d) => d.url.endsWith("/formulario.zip"));
+  await waitFor(async () => { const l = await all(); const p2 = l.find((d) => d.url.endsWith("/formulario.zip")); return p2 && p2.state === "complete"; }, 10000);
+  check("Download de formulário (POST) fica com o navegador", !!posted && !posted.url.startsWith(APP) &&
+        !appTasks().some((t) => (t.filename || "").includes("formulario")),
+        appMethods.filter((m) => m.includes("formulario")).join(", "));
+  await page.goto(SITE + "/");
+
+  // 3c. A link that redirects to a signed address on another site with its own login cookie.
+  const cdnPage = await ctx.newPage();
+  await cdnPage.goto("http://localhost:8771/setcdn");
+  await cdnPage.close();
+  ids = (await byUrl()).map((d) => d.id);
+  await page.click("#cdn");
+  item = await newest(ids);
+  item = item && await finished(item.id);
+  check("Link que redireciona para outro site: termina, ficheiro inteiro", !!item && sameAsBig(item.filename));
+  check("Cada site recebeu só os seus cookies", redirSeen.length > 0 && redirSeen.every((c) => c.includes("sessao=abc123")) &&
+        cdnSeen.length > 0 && cdnSeen.every((c) => c.includes("cdn=1") && !c.includes("sessao")),
+        `link: ${redirSeen.length} pedidos, servidor de ficheiros: ${cdnSeen.length} pedidos`);
+  const cdnTask = appTasks().find((t) => t.url.includes("/redir/cdn.zip"));
+  check("A app guardou o link original e o endereço final", !!cdnTask && (cdnTask.final_url || "").includes("/cdnfiles/"),
+        cdnTask ? `${cdnTask.url} → ${cdnTask.final_url}` : "não encontrado");
 
   // 4. Right-click menu "Baixar com Flow Downloads" (same code the menu calls).
   ids = (await byUrl()).map((d) => d.id);

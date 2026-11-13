@@ -15,6 +15,8 @@ async function refresh() {
   $("dot").className = "dot " + (st.app ? "on" : "off");
   $("appState").textContent = st.app ? "aberto" : "fechado";
   if (!st.app) show("Abra o Flow Downloads no computador para baixar.", "err");
+  else if (st.extensionOk === false)
+    show("⚠ Extensão desatualizada: abra brave://extensions e clique em ↻ (recarregar) no Flow Downloads.", "err");
 }
 
 $("videoForm").addEventListener("submit", async (e) => {

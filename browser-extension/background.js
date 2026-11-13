@@ -1,7 +1,8 @@
 // Flow Downloads browser integration: hands browser downloads over to the Flow Downloads app,
 // which must be running (it listens on 127.0.0.1:17890).
 const APP = "http://127.0.0.1:17890";
-const HEADERS = { "X-FlowDL": "1" };
+// Every request says which extension version is talking, so the app can ask for an update.
+const HEADERS = { "X-FlowDL": "1", "X-FlowDL-Ext": chrome.runtime.getManifest().version };
 const passThrough = new Set(); // URLs we let the browser download itself
 
 async function isEnabled() {
@@ -71,15 +72,63 @@ async function postJson(path, payload, tries = 4) {
   return null;
 }
 
+// ------------------------------------------------------------------ watched requests
+// What the browser really sent: its method (a form's POST cannot be repeated by the app) and
+// the Cookie header each site actually got. Kept for a minute, in memory only.
+const seen = new Map(); // url -> { method, cookie, time }
+const SEEN_MS = 60000;
+
+function remember(details) {
+  const cookie = (details.requestHeaders || []).find((h) => h.name.toLowerCase() === "cookie");
+  seen.set(details.url, { method: details.method, cookie: cookie ? cookie.value : null, time: Date.now() });
+  if (seen.size > 300) {
+    const old = Date.now() - SEEN_MS;
+    for (const [k, v] of seen) if (v.time < old || seen.size > 300) seen.delete(k);
+  }
+}
+
+chrome.webRequest.onSendHeaders.addListener(
+  remember,
+  { urls: ["<all_urls>"], types: ["main_frame", "sub_frame", "other", "xmlhttprequest"] },
+  ["requestHeaders", "extraHeaders"] // extraHeaders: needed to see the Cookie header
+);
+
+function seenFor(url) {
+  const r = seen.get(url);
+  return r && Date.now() - r.time < SEEN_MS ? r : null;
+}
+
+const hostOf = (url) => { try { return new URL(url).hostname.toLowerCase(); } catch { return ""; } };
+
+// The Cookie header for each site involved: the link's site and the site it led to.
+async function cookiesByHost(urls) {
+  const out = {};
+  for (const u of urls) {
+    const host = hostOf(u);
+    if (!host || out[host]) continue;
+    const r = seenFor(u);
+    if (r && r.cookie !== null) {
+      out[host] = r.cookie; // exactly what the browser sent
+      continue;
+    }
+    try { // not watched (e.g. the extension was asleep): ask the browser's cookie store
+      const list = await chrome.cookies.getAll({ url: u });
+      if (list.length) out[host] = list.map((c) => `${c.name}=${c.value}`).join("; ");
+    } catch {}
+  }
+  return out;
+}
+
 // Hand a download to the app. It downloads with many connections; the browser then shows
 // the same download in its list (it receives the bytes from the app as they arrive).
-async function sendToApp(url, filename, referrer) {
-  let cookies = "";
-  try {
-    const list = await chrome.cookies.getAll({ url });
-    cookies = list.map((c) => `${c.name}=${c.value}`).join("; ");
-  } catch {}
-  const res = await postJson("/add", { url, filename, referrer, cookies, mirror: true });
+// ``url`` is the link the download started from; ``finalUrl`` where it led (often a
+// short-lived signed address): the app uses the latter, and the link to get a fresh one.
+async function sendToApp(url, filename, referrer, finalUrl = "") {
+  const cookies_by_host = await cookiesByHost([url, finalUrl || url]);
+  const res = await postJson("/add", {
+    url, final_url: finalUrl && finalUrl !== url ? finalUrl : "", filename, referrer,
+    cookies_by_host, mirror: true,
+  });
   if (!res) return false;
   if (res.rid) showInBrowser(res.rid); // not awaited: may wait for the user's confirmation
   return true;
@@ -150,7 +199,15 @@ chrome.runtime.onStartup.addListener(updateBadge);
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   (async () => {
     if (msg.type === "status") {
-      sendResponse({ enabled: await isEnabled(), app: await appAlive(2) });
+      const app = await appAlive(2);
+      let extensionOk = true;
+      if (app) {
+        try {
+          const r = await fetch(APP + "/ping", { headers: HEADERS });
+          extensionOk = (await r.json()).extension_ok !== false;
+        } catch {}
+      }
+      sendResponse({ enabled: await isEnabled(), app, extensionOk });
     } else if (msg.type === "toggle") {
       await chrome.storage.local.set({ enabled: !!msg.enabled });
       await updateBadge();
@@ -177,10 +234,13 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
 });
 
 chrome.downloads.onCreated.addListener(async (item) => {
-  const url = item.finalUrl || item.url;
-  if (url.startsWith(APP)) return; // the browser's copy of a download the app is doing
-  if (!/^(https?|ftp):/i.test(url)) return; // blob:, data: etc. stay in the browser
-  if (passThrough.delete(url)) return;
+  const url = item.url; // the link the download started from
+  const finalUrl = item.finalUrl || item.url; // where it led after redirects
+  if (finalUrl.startsWith(APP) || url.startsWith(APP)) return; // the browser's copy of an app download
+  if (!/^(https?|ftp):/i.test(finalUrl)) return; // blob:, data: etc. stay in the browser
+  if (passThrough.delete(url) || passThrough.delete(finalUrl)) return;
+  const watched = seenFor(url) || seenFor(finalUrl);
+  if (watched && watched.method !== "GET") return; // a form's POST: only the browser can repeat it
   if (!(await isEnabled())) return;
   if (!(await appAlive())) return; // app closed: let the browser handle it
 
@@ -190,7 +250,7 @@ chrome.downloads.onCreated.addListener(async (item) => {
   } catch {}
 
   const name = item.filename ? item.filename.split(/[\\/]/).pop() : "";
-  if (!(await sendToApp(url, name, item.referrer || ""))) {
+  if (!(await sendToApp(url, name, item.referrer || "", finalUrl))) {
     passThrough.add(url);
     chrome.downloads.download({ url }); // fall back to the browser
   }

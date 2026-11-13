@@ -1,13 +1,14 @@
 {
   "manifest_version": 3,
   "name": "Flow Downloads - Integração com o navegador",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "Envia os downloads do navegador para o Flow Downloads (gerenciador de downloads).",
   "permissions": [
     "downloads",
     "contextMenus",
     "storage",
-    "cookies"
+    "cookies",
+    "webRequest"
   ],
   "host_permissions": [
     "<all_urls>"

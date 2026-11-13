@@ -83,6 +83,7 @@ class Service:
         self.requests: dict[str, dict] = {}  # request id from the extension -> state
         self._req_cond = threading.Condition()
         self.active_streams = 0
+        self.extension_outdated = False  # an old extension talked to us: suggest updating it
         self._next_schedule_check = 0.0
 
     # ------------------------------------------------------- lazy manager
@@ -145,6 +146,8 @@ class Service:
         always finds it, even if the main thread is still busy."""
         if item.get("rid"):
             self._set_request(item["rid"], state="waiting")
+        if item.get("extension_ok") is False:
+            self.extension_outdated = True
         self.events.put(("item", item))
 
     # ------------------------------------------------- browser download list

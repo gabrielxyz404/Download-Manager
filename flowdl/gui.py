@@ -653,6 +653,9 @@ class App(tk.Tk):
 
     # --------------------------------------------------------- window life
     def show_window(self) -> None:
+        if getattr(self.service, "extension_outdated", False):
+            self.status_var.set("⚠ A extensão do navegador está desatualizada: abra brave://extensions "
+                                "e clique em ↻ (recarregar) no Flow Downloads.")
         self.deiconify()
         self.lift()
         self.focus_force()

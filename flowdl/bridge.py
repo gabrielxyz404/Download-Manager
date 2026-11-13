@@ -16,6 +16,21 @@ import threading
 from typing import Callable
 
 DEFAULT_PORT = 17890
+# The oldest extension that understands this app (original + final link, per-site cookies,
+# form downloads left to the browser, the download shown in the browser's list).
+MIN_EXTENSION_VERSION = "0.5.0"
+
+
+def version_tuple(text: str | None) -> tuple:
+    try:
+        return tuple(int(p) for p in (text or "").split("-")[0].split("."))
+    except ValueError:
+        return ()
+
+
+def extension_ok(headers: dict) -> bool:
+    """Extensions before 0.5.0 send no version: those count as too old."""
+    return version_tuple(headers.get("x-flowdl-ext")) >= version_tuple(MIN_EXTENSION_VERSION)
 MAX_HEADER = 64 * 1024
 MAX_BODY = 2_000_000
 REASONS = {200: "OK", 400: "Bad Request", 403: "Forbidden"}
@@ -62,7 +77,9 @@ def handle_request(method: str, path: str, headers: dict, body: bytes,
     if origin.startswith(("http://", "https://")) or headers.get("x-flowdl") != "1":
         return 403, {"ok": False}
     if method == "GET" and path == "/ping":
-        return 200, {"app": "flowdl", "ok": True}
+        from . import __version__
+        return 200, {"app": "flowdl", "ok": True, "version": __version__,
+                     "extension_ok": extension_ok(headers), "min_extension": MIN_EXTENSION_VERSION}
     if api is not None and (path.startswith("/request/") or path in ("/control", "/mirror-done")):
         try:
             data = json.loads(body or b"{}") if method == "POST" else {}
@@ -79,6 +96,7 @@ def handle_request(method: str, path: str, headers: dict, body: bytes,
             item = _video_item(data) if path == "/video" else _download_item(data)
     except (ValueError, TypeError, AttributeError) as exc:
         return 400, {"ok": False, "error": str(exc)}
+    item["extension_ok"] = extension_ok(headers)  # lets the app suggest an update
     on_add(item)
     return 200, {"ok": True, **({"rid": item["rid"]} if "rid" in item else {})}
 

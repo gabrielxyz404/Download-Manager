@@ -133,6 +133,21 @@ enche a sua internet.
 
 Se o servidor não aceita partes, o download é feito com uma conexão só (e não pode ser retomado).
 
+## Segurança e fiabilidade
+
+- **Cookies de login só vão para o site certo**, como num navegador: depois de um redirecionamento
+  para outro site, os teus cookies e palavras-passe não seguem.
+- **Cookies protegidos no disco**: encriptados com a proteção do próprio Windows (DPAPI); noutros
+  sistemas o ficheiro só é legível pelo teu utilizador.
+- **Nunca mistura versões**: se o ficheiro mudar no servidor entre uma pausa e o retomar, o
+  download recomeça com a versão nova (If-Range), em vez de juntar bocados das duas.
+- **Links que expiram** (GitHub, armazenamento na nuvem): a app guarda o link original e pede um
+  endereço novo sempre que o temporário expira.
+- **Downloads de formulários** (POST) ficam com o navegador, que é o único que os sabe repetir.
+- **Certificado HTTPS inválido**: avisa logo, com uma mensagem clara.
+- **Servidor ocupado** ("tente daqui a X segundos"): espera exatamente o que o servidor pede.
+- **A extensão diz a sua versão**: se estiver desatualizada, a app e o menu da extensão avisam.
+
 ## Testes
 
 ```bash
