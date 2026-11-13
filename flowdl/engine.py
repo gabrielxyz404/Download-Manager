@@ -68,6 +68,7 @@ CERT_ERROR = ("O certificado de segurança (HTTPS) deste site não é válido ou
 TRANSIENT_CODES = (408, 425, 429, 500, 502, 503, 504)  # worth asking again
 MAX_RETRY_AFTER = 120  # never wait longer than this for a server's "try again in N s"
 FIRST_TRIES = 4
+MAX_FRUITLESS_REFRESHES = 3  # fresh addresses in a row with no progress at all: give up
 
 
 def is_cert_error(exc: BaseException) -> bool:
@@ -281,6 +282,8 @@ class DownloadTask:
         # link the user/browser started from, is asked again for a fresh one when that happens.
         self._final_url: str | None = final_url if final_url and final_url != url else None
         self._refresh_lock = threading.Lock()
+        self._progress_at_refresh = -1
+        self._fruitless_refreshes = 0
         self.validator: str | None = None  # this version of the file (see validator_of)
         self._file_changed = False
         self.restarted_changed = False  # the file changed on the server and we started over
@@ -577,6 +580,14 @@ class DownloadTask:
         with self._refresh_lock:
             if self._current_url() != failed_url:
                 return  # another connection already got a fresh address
+            done = sum(s.pos - s.start for s in self.segments)
+            if done > self._progress_at_refresh:
+                self._fruitless_refreshes = 0  # the last fresh address was useful
+            else:
+                self._fruitless_refreshes += 1
+                if self._fruitless_refreshes > MAX_FRUITLESS_REFRESHES:
+                    raise RuntimeError("O link deixou de funcionar (o site recusa novos endereços)")
+            self._progress_at_refresh = done
             info = probe(self.url, self.headers, self.cookies)
             if info["size"] != self.size or (self.validator and info["validator"]
                                              and info["validator"] != self.validator):
@@ -833,7 +844,6 @@ class DownloadTask:
     def _worker(self, w: "_Worker") -> None:
         retries = 0
         refusals = 0
-        refreshed_without_data = False  # asked for a fresh address and got nothing since
         req_url = self.url
         conn = w.conn or net.Connection(TIMEOUT)
         resp = w.resp
@@ -884,7 +894,6 @@ class DownloadTask:
                                 request_done = seg.pos > last
                             w.count(n)
                             retries = 0
-                            refreshed_without_data = False
                             if not w.got_data:
                                 w.got_data = True
                                 with self._lock:
@@ -931,15 +940,19 @@ class DownloadTask:
                             return
                         if code in (401, 403, 410) and req_url != self._current_url():
                             continue  # another connection already replaced the expired address
-                        if code in (401, 403, 410) and not refreshed_without_data:
-                            refreshed_without_data = True  # the address probably expired
+                        if code in (401, 403, 410):
+                            # The address probably expired: get a fresh one (the whole download
+                            # gives up only after several fresh addresses brought no progress).
                             try:
                                 self._refresh_url(req_url)
                                 continue
                             except FileChanged:
                                 raise
-                            except Exception:  # noqa: BLE001
-                                pass
+                            except Exception as refresh_error:  # noqa: BLE001
+                                msg = str(refresh_error)
+                                if "deixou de funcionar" not in msg:
+                                    msg = f"O link deixou de funcionar ({msg or exc})"
+                                raise RuntimeError(msg) from exc
                         if code == 416:  # the range is gone: the file got smaller, i.e. it changed
                             self._file_changed = True
                             raise FileChanged()

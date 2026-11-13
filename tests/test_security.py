@@ -24,6 +24,7 @@ class FileHost(BaseHTTPRequestHandler):
     seen = []
     tokens = {}
     uses = 10 ** 9
+    delay = 0.0
 
     def log_message(self, *a):
         pass
@@ -50,7 +51,11 @@ class FileHost(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         try:
-            self.wfile.write(body)
+            for i in range(0, len(body), 64 * 1024):
+                self.wfile.write(body[i:i + 64 * 1024])
+                if cls.delay:
+                    import time
+                    time.sleep(cls.delay)
         except OSError:
             pass
 
@@ -100,7 +105,7 @@ class SecurityTests(unittest.TestCase):
 
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
-        FileHost.seen, FileHost.tokens, FileHost.uses = [], {}, 10 ** 9
+        FileHost.seen, FileHost.tokens, FileHost.uses, FileHost.delay = [], {}, 10 ** 9, 0.0
         LinkSite.seen, LinkSite.counter = [], 0
 
     def run_task(self, task):
@@ -167,3 +172,25 @@ class SecurityTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RefusedLinkTests(unittest.TestCase):
+    def test_gives_up_when_fresh_addresses_never_work(self):
+        """No endless loop: if every fresh address is refused, the download stops with a message."""
+        files, site = serve(FileHost), serve(LinkSite)
+        LinkSite.file_port = files.server_address[1]
+        FileHost.seen, FileHost.tokens, FileHost.uses, FileHost.delay = [], {}, 10 ** 9, 0.05
+        try:
+            task = DownloadTask(f"http://127.0.0.1:{site.server_address[1]}/d", tempfile.mkdtemp(), 4)
+            task.start()
+            import time
+            time.sleep(0.5)
+            FileHost.uses = 0  # from now on every address is refused
+            FileHost.tokens = {k: 0 for k in FileHost.tokens}
+            task.wait(60)
+            self.assertEqual(task.status, Status.ERROR)
+            self.assertIn("deixou de funcionar", task.error)
+        finally:
+            FileHost.delay = 0.0
+            files.shutdown()
+            site.shutdown()
