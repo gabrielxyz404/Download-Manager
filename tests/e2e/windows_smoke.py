@@ -81,6 +81,40 @@ def app_procs(name: str) -> list[tuple[int, float]]:
     return [(pid, t) for pid, t, _ in out]
 
 
+def visible_windows(pids: list[int]) -> list[str]:
+    """Titles of the visible windows of these processes (None if this system can't tell)."""
+    if sys.platform == "win32":
+        import ctypes
+        from ctypes import wintypes
+        user32 = ctypes.windll.user32
+        titles: list[str] = []
+
+        @ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+        def each(hwnd, _):
+            pid = wintypes.DWORD()
+            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+            if pid.value in pids and user32.IsWindowVisible(hwnd):
+                buf = ctypes.create_unicode_buffer(256)
+                user32.GetWindowTextW(hwnd, buf, 256)
+                if buf.value:
+                    titles.append(buf.value)
+            return True
+        user32.EnumWindows(each, 0)
+        return titles
+    try:
+        found = []  # Tk does not record the process id on X11: look the windows up by title
+        if pids:
+            r = subprocess.run(["xdotool", "search", "--onlyvisible", "--name", "Flow Downloads|terceiro|quarto"],
+                               capture_output=True, text=True, timeout=5)
+            for wid in r.stdout.split():
+                n = subprocess.run(["xdotool", "getwindowname", wid], capture_output=True, text=True, timeout=5)
+                if n.stdout.strip():
+                    found.append(n.stdout.strip())
+        return found
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
 def app_pids(name: str) -> list[int]:
     return [pid for pid, _ in app_procs(name)]
 
@@ -108,7 +142,11 @@ def main() -> int:
 
         def copyfile(self, src, dst):
             try:
-                super().copyfile(src, dst)
+                if "terceiro" not in self.path and "quarto" not in self.path:
+                    return super().copyfile(src, dst)
+                while chunk := src.read(256 * 1024):  # slow (~4 MB/s): time to see the window
+                    dst.write(chunk)
+                    time.sleep(0.06)
             except OSError:
                 pass
 
@@ -197,6 +235,75 @@ def main() -> int:
     else:
         print("(psutil em falta: verificações de processo ignoradas)")
     check("Continua a responder ao navegador", wait_for(ping, 10))
+
+    # Second part: the settings a new user has (progress window on), and the exact steps the
+    # browser extension takes for a .zip behind a link without the name (/get?id=7 style).
+    for pid in app_pids(name):
+        try:
+            import psutil
+            psutil.Process(pid).kill()
+        except Exception:  # noqa: BLE001
+            pass
+    proc.kill()
+    wait_for(lambda: not ping(), 15)
+    (cfg / "FlowDownloads" / "settings.json").write_text(json.dumps({
+        "dest_dir": str(dl), "background_hint_shown": True}))  # everything else: defaults
+    proc = subprocess.Popen(cmd + ["--background"], env=env)
+    check("Arranca com as definições de origem", wait_for(ping, 60))
+    def from_browser(fname: str, label: str) -> None:
+        """The exact steps of the browser extension for one download."""
+        (site / fname).write_bytes(data)
+        code, body = call("POST", "/check", {"url": base + "/" + fname, "final_url": base + "/" + fname,
+                                             "filename": "", "mime": "application/x-zip-compressed"})
+        check(f"{label}: a extensão pergunta e a app aceita", code == 200 and json.loads(body).get("capture") is True,
+              body.decode(errors="replace"))
+        code, body = call("POST", "/add", {"url": base + "/" + fname, "mirror": True})
+        rid = json.loads(body).get("rid") if code == 200 else None
+        state = {}
+
+        def started():
+            c, b = call("GET", f"/request/{rid}")
+            state.update(json.loads(b) if c == 200 else {})
+            return state.get("state") == "started"
+        check(f"{label}: começa sem precisar de confirmação", bool(rid) and wait_for(started, 60), str(state))
+        titles = []
+
+        def window_open():
+            titles[:] = visible_windows(app_pids(name)) or []
+            return bool(titles)
+        if visible_windows([]) is None:
+            print("(não dá para ver janelas neste sistema: verificação da janela ignorada)")
+        else:
+            check(f"{label}: abre a janela de progresso", wait_for(window_open, 30), ", ".join(titles))
+        code, streamed = call("GET", state["stream"], timeout=60) if state.get("stream") else (0, b"")
+        check(f"{label}: o navegador recebe o ficheiro igual", code == 200 and hashlib.sha256(streamed).hexdigest() == sha,
+              f"{len(streamed)} bytes")
+        if rid:
+            call("POST", "/mirror-done", {"rid": rid, "path": str(work / ("browser-" + fname))})
+        if visible_windows([]) is not None:
+            check(f"{label}: a janela fecha-se no fim", wait_for(lambda: not visible_windows(app_pids(name)), 30),
+                  ", ".join(visible_windows(app_pids(name)) or []))
+
+    from_browser("terceiro.bin", "Acabada de abrir")
+    if app_pids(name):  # then it restarts in its slim form; the next download reaches the new process
+        import psutil
+
+        def snapshot():  # Windows: a new process; Linux: the same one with a new command line
+            out = []
+            for pid in app_pids(name):
+                try:
+                    out.append((pid, " ".join(psutil.Process(pid).cmdline())))
+                except psutil.Error:
+                    pass
+            return out
+        before = snapshot()
+        check("Reinicia-se em modo leve outra vez", wait_for(lambda: snapshot() and snapshot() != before and ping(), 40),
+              f"antes {before} depois {snapshot()}")
+        from_browser("quarto.bin", "Depois de reiniciar")
+    crash = cfg / "FlowDownloads" / "crash.log"
+    check("Nenhum erro registado (crash.log)", not crash.exists(),
+          crash.read_text(encoding="utf-8", errors="replace")[-2000:] if crash.exists() else "")
+    check("Continua a responder depois", wait_for(ping, 10))
 
     for pid in app_pids(name):
         try:
