@@ -313,6 +313,8 @@ def main() -> int:
         except OSError as exc:
             ok, registered = False, str(exc)
         check("Registada no Brave/Chrome para o navegador a poder abrir", ok, str(registered)[:200])
+        import ctypes
+        check("Ícone ao lado do relógio", wait_for(lambda: bool(ctypes.windll.user32.FindWindowW("FlowDownloadsTray", None)), 15))
     for pid in app_pids(name):
         try:
             import psutil

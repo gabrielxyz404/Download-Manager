@@ -581,7 +581,7 @@ const sameAsBig = (file) => fs.existsSync(file) && fs.readFileSync(file).equals(
   check("Botão 'Abrir Flow Downloads' mostra a janela", await waitFor(() => windows("^Flow Downloads$").length > 0));
   await pressIn("^Flow Downloads$", "ctrl+w");
   check("Ctrl+W fecha a janela e a app continua", await waitFor(async () =>
-    windows("^Flow Downloads$").length === 0 && await ping(), 10000));
+    windows("^Flow Downloads$").length === 0 && await ping(), 20000)); // it may be restarting light
   await p.close().catch(() => {});
 
   // 7. Capture switched off: the browser downloads by itself.

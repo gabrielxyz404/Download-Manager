@@ -1497,6 +1497,13 @@ class App(tk.Tk):
             elif kind == "item":
                 if svc.accept_item(data) and data.get("kind") == "show":
                     self.show_window()
+            elif kind == "tray":  # the icon next to the clock
+                what = svc.tray_action(data)
+                if what == "show":
+                    self.show_window()
+                elif what == "quit":
+                    self.quit_all()
+                    return
             elif kind == "quit":
                 self.quit_all()
                 return

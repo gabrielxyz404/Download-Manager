@@ -78,7 +78,8 @@ class Service:
         if manager is not None:
             self._attach(manager)
         self.scheduler = Scheduler(self.settings.scheduler)
-        GLOBAL_LIMITER.rate = self.settings.global_limit_kb * 1024
+        GLOBAL_LIMITER.rate = self.settings.global_limit_kb * 1024 if getattr(self.settings, "limit_on", True) else 0
+        self.tray = None  # icon next to the Windows clock (see start_tray)
         self.port = port
         self.bridge: BrowserBridge | None = None
         self.pending: list[dict] = []  # browser requests waiting for a window
@@ -365,6 +366,74 @@ class Service:
                 for t in self._manager.tasks:
                     t.pause()
 
+    # ------------------------------------------------------------- tray icon
+    def start_tray(self) -> bool:
+        """Icon next to the Windows clock (Windows only; can be turned off in the settings)."""
+        if self.tray is not None or not getattr(self.settings, "show_tray", True):
+            return False
+        from . import tray
+        if not tray.supported():
+            return False
+        from .paths import install_dir
+        icon = install_dir() / "flowdl" / "icon.ico"
+        if not icon.exists():
+            icon = Path(__file__).with_name("icon.ico")
+        t = tray.Tray(lambda action: self.events.put(("tray", action)), self.tray_status,
+                      self.tray_menu_state, str(icon))
+        if t.start():
+            self.tray = t
+            return True
+        return False
+
+    def stop_tray(self) -> None:
+        if self.tray is not None:
+            self.tray.stop()
+            self.tray = None
+
+    def tray_status(self) -> str:
+        if self._manager is None:
+            return "Flow Downloads — à espera de downloads"
+        from .engine import format_size
+        running = [t for t in self._manager.tasks if t.is_running()]
+        if not running:
+            return "Flow Downloads — à espera de downloads"
+        speed = sum(t.speed for t in running)
+        n = len(running)
+        return f"Flow Downloads — {n} a baixar · {format_size(speed)}/s"
+
+    def tray_menu_state(self) -> dict:
+        tasks = self._manager.tasks if self._manager is not None else []
+        return {"running": any(t.is_running() or t.status == Status.QUEUED for t in tasks),
+                "paused": any(t.status in (Status.PAUSED, Status.ERROR) for t in tasks),
+                "limit_kb": self.settings.global_limit_kb, "limit_on": GLOBAL_LIMITER.rate > 0}
+
+    def tray_action(self, action: str) -> str | None:
+        """What the tray menu asked. Returns "show" / "quit" for the caller (window or not)."""
+        if action in ("show", "quit"):
+            return action
+        if action == "pause_all":
+            self.manager.pause_all()
+        elif action == "resume_all":
+            self.manager.resume_all()
+        elif action == "limit" and self.settings.global_limit_kb:
+            self.settings.limit_on = GLOBAL_LIMITER.rate == 0
+            GLOBAL_LIMITER.rate = self.settings.global_limit_kb * 1024 if self.settings.limit_on else 0
+            self.settings.save()
+        return None
+
+    def tray_notify_done(self, task) -> None:
+        """A Windows notification when a download finishes (or fails)."""
+        if self.tray is None or not getattr(self.settings, "tray_notify", True) or task is None:
+            return
+        name = getattr(task, "filename", None) or "download"
+        if task.status == Status.COMPLETED and not getattr(task, "notified", False):
+            task.notified = True
+            check = getattr(task, "check", "")
+            self.tray.notify("Download concluído", name + (f"\n{check}" if check else ""))
+        elif task.status == Status.ERROR and not getattr(task, "notified", False):
+            task.notified = True
+            self.tray.notify("O download falhou", f"{name}\n{task.error or ''}", warning=True)
+
     def after_download(self, task) -> None:
         """A download's file is in its final place: checksum, antivirus, extract, command, open
         (whatever was chosen), in a background thread. Once per download."""
@@ -394,6 +463,7 @@ class Service:
         return the 'when all downloads finish' action ("countdown" / "quit")."""
         self.manager.tick()
         self.after_download(task)
+        self.tray_notify_done(task)
         if (task is not None and task.status == Status.COMPLETED and getattr(task, "awaiting_browser", False)
                 and not getattr(task, "stream_attached", False)):
             # Browser mode, but the browser has not started receiving: give it some time.
@@ -468,11 +538,19 @@ class Service:
                 log("item", data.get("kind") or data.get("url"))
                 if self.accept_item(data):
                     return "main" if data.get("kind") == "show" else "dialog"
+            elif kind == "tray":
+                what = self.tray_action(data)
+                if what == "show":
+                    return "main"
+                if what == "quit":
+                    self.exit_requested = True
+                    return None
             elif kind == "quit":
                 return None
         return None
 
     def shutdown(self) -> None:
+        self.stop_tray()
         self.settings.scheduler = self.scheduler.to_dict()
         self.settings.save()
         self.stop_bridge()
@@ -484,10 +562,12 @@ class Service:
         Returns False (and keeps running) if something arrived at the last moment."""
         had_bridge = self.bridge is not None
         self.stop_bridge()  # no new requests; requests already received finish first
+        self.stop_tray()  # the new process shows its own
         if not self.events.empty() or not self.can_slim_down():
             log("restart cancelled: something arrived")
             if had_bridge:
                 self.start_bridge(retries=10)
+            self.start_tray()
             return False
         log("restart to free memory")
         self.shutdown()
@@ -565,6 +645,10 @@ def _run(background: bool) -> None:
         log("native host registration failed:", exc)
     if svc.settings.browser_integration:
         log("bridge", "listening" if svc.start_bridge(retries=20) else "FAILED to listen")
+    try:
+        svc.start_tray()  # icon next to the Windows clock
+    except Exception as exc:  # noqa: BLE001 - the app works without it
+        log("tray failed:", exc)
     if svc.settings.auto_resume and svc.has_saved_active_downloads():
         svc.manager.tick()  # interrupted downloads continue right away
     mode = None if background else "main"
