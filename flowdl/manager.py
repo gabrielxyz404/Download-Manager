@@ -30,8 +30,11 @@ class DownloadManager:
         self._signature: tuple = ()
         self.folder_rules = None  # (base folder, category rules) -> category folders, or None
         self.on_change = None  # set by the service: called when a download stops/finishes
+        self.host_limits: dict = {}  # user's max connections per site ("lento.com": 2)
         self.keep_awake = True      # Windows must not go to sleep in the middle of downloads
         self.mark_internet = True   # finished files carry Windows' "came from the internet" mark
+        from .hostmemory import HostMemory
+        self.host_memory = HostMemory(self.db_path.with_name("hosts.json"))
         from .system import Awake
         self._awake = Awake(lambda: self.keep_awake and any(t.is_running() for t in list(self.tasks)))
         self.load(auto_resume)
@@ -122,6 +125,11 @@ class DownloadManager:
         task.on_change = self._task_changed
         if hasattr(task, "mark_internet"):
             task.mark_internet = self.mark_internet
+            task.host_memory = self.host_memory
+            from .hostmemory import limit_for
+            limit = limit_for(self.host_limits, task.url)
+            if limit:
+                task.connections = min(task.connections, limit)
         if not start:
             task.status = Status.PAUSED
         with self._lock:

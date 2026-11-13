@@ -105,6 +105,7 @@ class Service:
         self._manager = manager
         manager.on_change = lambda task: self.events.put(("tick", task))
         manager.keep_awake = getattr(self.settings, "keep_awake", True)
+        manager.host_limits = dict(getattr(self.settings, "host_limits", {}) or {})
         manager.mark_internet = getattr(self.settings, "mark_internet", True)
         self.apply_category_settings()
 

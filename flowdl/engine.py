@@ -50,6 +50,7 @@ MAX_REQUEST = 32 * 1024 * 1024  # ...and 32 MB, on a connection that stays open
 START_CONNECTIONS = 2     # adaptive mode starts small (4 for big files)...
 START_CONNECTIONS_BIG = 4
 BIG_FILE = 64 * 1024 * 1024
+MEMORY_MIN_SIZE = 8 * 1024 * 1024  # downloads at least this big teach us about their server
 RAMP_INTERVAL = 2.0       # ...measures the speed every 2 s...
 RAMP_MIN_GAIN = 1.15      # ...and doubles the connections while that gives 15%+ more speed
 LIMIT_CODES = (429, 503)  # "too many requests / busy": the server limits connections per user
@@ -342,6 +343,8 @@ class DownloadTask:
         self.mirror = False
         self.expect: dict | None = None  # what the browser received (size, type), when taken over
         self.mark_internet = True  # Windows "came from the internet" mark on the finished file
+        self.host_memory = None    # HostMemory: what each server taught us (set by the manager)
+        self._settled_at = 0
         self.stream_token: str | None = None
         self.rid: str | None = None  # the extension's request id for this download
         self.awaiting_browser = False  # finished here, waiting for the browser to take it
@@ -774,6 +777,16 @@ class DownloadTask:
         recheck_at = 0.0
         self.connection_note = "testando velocidade" if ramping else ""
         self.server_limit = None
+        known = self.host_memory.get(host_of(self._current_url())) if self.host_memory else None
+        if known:
+            # This server taught us before: start where it paid off (and within its limit),
+            # still measuring and adapting from there.
+            if known.get("limit"):
+                cap = min(cap, known["limit"])
+            target = max(target, min(cap, known.get("conns", target)))
+            ramping = target < cap
+            self.connection_note = f"começa com {target} (conhecido)" if not ramping else "testando velocidade"
+        self._settled_at = 0
         limit_refreshes = self._refreshes
 
         if first is not None:
@@ -819,6 +832,7 @@ class DownloadTask:
                         self.connection_note = ""
                 else:
                     ramping = False  # more connections did not make it faster
+                    self._settled_at = self._active_workers
                     self.connection_note = f"{self._active_workers} conexões bastam"
                     recheck_at = now + RECHECK_INTERVAL
             elif (not ramping and self.server_limit is None and target < cap
@@ -849,6 +863,10 @@ class DownloadTask:
         self.downloaded = sum(s.pos - s.start for s in self.segments)
         self._checkpoint(sync_fd)
         os.close(sync_fd)
+        if self.host_memory and all(s.remaining == 0 for s in self.segments) and self.size >= MEMORY_MIN_SIZE:
+            # Remember for next time (only downloads long enough to have measured something).
+            learned = self.server_limit or self._settled_at or target
+            self.host_memory.put(host_of(self._current_url()), learned, self.server_limit)
         self._workers = []
         if self._file_changed:
             raise FileChanged()

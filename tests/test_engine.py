@@ -311,6 +311,53 @@ class StallTests(unittest.TestCase):
             tmp.cleanup()
 
 
+class HostMemoryTests(unittest.TestCase):
+    def test_remember_and_forget(self):
+        from flowdl.hostmemory import HostMemory
+        import pathlib
+        with tempfile.TemporaryDirectory() as d:
+            path = pathlib.Path(d) / "hosts.json"
+            mem = HostMemory(path)
+            self.assertIsNone(mem.get("exemplo.com"))
+            mem.put("Exemplo.com", 8, None)
+            mem.put("lento.com", 2, 2)
+            again = HostMemory(path)  # read back from disk
+            self.assertEqual(again.get("exemplo.com")["conns"], 8)
+            self.assertEqual(again.get("lento.com")["limit"], 2)
+            again._load()["exemplo.com"]["time"] -= 31 * 24 * 3600
+            self.assertIsNone(again.get("exemplo.com"))  # a month later: test again
+            path.write_text("estragado")
+            self.assertIsNone(HostMemory(path).get("lento.com"))  # a damaged file is just ignored
+
+    def test_second_download_from_the_same_server_starts_where_it_paid_off(self):
+        from flowdl.hostmemory import HostMemory
+        import pathlib
+        server = ThreadingHTTPServer(("127.0.0.1", 0), AdaptiveServer)
+        server.daemon_threads = True
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                mem = HostMemory(pathlib.Path(d) / "hosts.json")
+                AdaptiveServer.mode, AdaptiveServer.size = "per_connection", 12 * 1024 * 1024
+                AdaptiveServer.active = AdaptiveServer.peak = AdaptiveServer.refused = 0
+                notes = []
+                for i in range(2):
+                    task = DownloadTask(f"http://127.0.0.1:{server.server_address[1]}/m{i}.bin", d, 8)
+                    task.host_memory = mem
+                    task.start()
+                    seen = set()
+                    while task.is_running():
+                        seen.add(task.connection_note)
+                        time.sleep(0.05)
+                    self.assertEqual(task.status, Status.COMPLETED, task.error)
+                    notes.append(seen)
+                self.assertIn("testando velocidade", notes[0])
+                self.assertEqual(mem.get("127.0.0.1")["conns"], 8)
+                self.assertTrue(any("começa com 8" in (n or "") for n in notes[1]), notes[1])
+        finally:
+            server.shutdown()
+
+
 if __name__ == "__main__":
     unittest.main()
 

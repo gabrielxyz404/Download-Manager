@@ -474,6 +474,16 @@ class GuiTests(unittest.TestCase):
         dlg._save()
         self.assertTrue(s.capture_all_types)
 
+    def test_host_limits_window(self):
+        app = self.open_app()
+        dlg = self.gui.HostLimitsDialog(app)
+        dlg.text.insert("1.0", "www.lento.com = 2\nisto não é válido\n")
+        dlg._save()
+        self.assertEqual(self.svc.settings.host_limits, {"lento.com": 2})
+        self.assertEqual(self.svc.manager.host_limits, {"lento.com": 2})
+        task = self.svc.manager.add("https://cdn.lento.com/a.zip", self.tmp, 8, start=False)
+        self.assertEqual(task.connections, 2)
+
     # ------------------------------------------------------------ duplicates
     def test_same_link_twice_finished_open_or_again(self):
         app = self.open_app()

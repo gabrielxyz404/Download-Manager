@@ -32,6 +32,7 @@ class Settings:
         self.capture_types = list(DEFAULT_TYPES)
         self.capture_all_types = False
         self.capture_skip_sites: list = []
+        self.host_limits: dict = {}  # max connections per site, e.g. {"lento.com": 2}
         self.keep_awake = True       # no sleep while downloading (Windows)
         self.mark_internet = True    # Windows warns before running a downloaded program, as with the browser
         self.category_folders = True   # save each category in its own folder (Downloads/Vídeos...)

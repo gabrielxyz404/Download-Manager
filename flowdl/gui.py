@@ -753,6 +753,35 @@ class CategoryEditor(tk.Toplevel):
         self.destroy()
 
 
+class HostLimitsDialog(tk.Toplevel):
+    """Max connections for chosen sites (some only accept a few, or block who opens many)."""
+
+    def __init__(self, app: "App"):
+        super().__init__(app)
+        self.app = app
+        app.attach_dialog(self)
+        self.title("Limites por site")
+        frm = ttk.Frame(self, padding=12)
+        frm.pack(fill="both", expand=True)
+        ttk.Label(frm, text="Máximo de ligações por site, um por linha (ex.: lento.com = 2).\n"
+                            "Os outros sites usam o teste de velocidade automático.").pack(anchor="w")
+        self.text = tk.Text(frm, height=8, width=50)
+        self.text.pack(fill="both", expand=True, pady=(6, 0))
+        self.text.insert("1.0", "\n".join(f"{h} = {n}" for h, n in app.settings.host_limits.items()))
+        btns = ttk.Frame(frm)
+        btns.pack(fill="x", pady=(10, 0))
+        ttk.Button(btns, text="Cancelar", command=self.destroy).pack(side="right")
+        ttk.Button(btns, text="Guardar", command=self._save).pack(side="right", padx=4)
+
+    def _save(self) -> None:
+        from .hostmemory import parse_limits
+        limits = parse_limits(self.text.get("1.0", "end"))
+        self.app.settings.host_limits = limits
+        self.app.settings.save()
+        self.app.manager.host_limits = dict(limits)
+        self.destroy()
+
+
 class CaptureDialog(tk.Toplevel):
     """Which browser downloads the app takes over."""
 
@@ -1057,6 +1086,7 @@ class App(tk.Tk):
         opts.add_command(label="Pasta padrão...", command=self._choose_dir)
         opts.add_command(label="Categorias e pastas...", command=lambda: CategoriesDialog(self))
         opts.add_command(label="Tipos apanhados do navegador...", command=lambda: CaptureDialog(self))
+        opts.add_command(label="Limites por site...", command=lambda: HostLimitsDialog(self))
         menubar.add_cascade(label="Opções", menu=opts)
 
         helpm = tk.Menu(menubar, tearoff=False)
