@@ -258,6 +258,7 @@ class _Worker:
         self.quiet_swaps = 0  # replaced for silence with no data in between (backs off)
         self.rescued_at = 0.0  # when its piece was last handed to a fresh connection
         self.retired = False  # its piece went to a fresh connection: leave instead of taking more
+        self.rescuer = False  # it was opened to take a stuck connection's piece
         self.answering = False  # the server has started answering the current request
         self.alive = True
         self.got_data = False
@@ -332,6 +333,7 @@ class DownloadTask:
         self._progress_at_same = -1
         self._limit_hit = 0  # >0: the server refused a connection; value = connections it accepts
         self._streaming = 0  # connections currently receiving data
+        self._last_rx = 0.0  # when any connection last received data
         self._wake = threading.Event()  # set when a connection finishes: react at once
         self.server_limit: int | None = None  # connections the server accepts, when it refuses more
         self.connection_note = ""  # shown in the list: speed test / limit found
@@ -804,12 +806,13 @@ class DownloadTask:
         self.server_addresses = len(ips)
         turn = [1]  # the first connection (the initial request) is already on the first address
 
-        def spawn(seg: Segment, conn=None, resp=None) -> None:
+        def spawn(seg: Segment, conn=None, resp=None, rescuer: bool = False) -> None:
             if conn is None and len(ips) > 1 and host_of(self._current_url()) == (parts.hostname or "").lower():
                 conn = net.Connection(TIMEOUT)
                 conn.address = ((parts.hostname or "").lower(), ips[turn[0] % len(ips)])
                 turn[0] += 1
             w = _Worker(seg, conn, resp)
+            w.rescuer = rescuer
             with self._lock:
                 self._active_workers += 1
                 self._workers.append(w)
@@ -903,7 +906,7 @@ class DownloadTask:
             if not self._stop.is_set():
                 self._replace_slow_connections(now, target)
                 while self._rescued:  # pieces taken from stuck connections: a fresh one each
-                    spawn(self._rescued.pop())
+                    spawn(self._rescued.pop(), rescuer=True)
                 # Dynamic segmentation: keep `target` connections busy.
                 while self._active_workers < target:
                     new_seg = self._split_largest()
@@ -1071,7 +1074,9 @@ class DownloadTask:
         # A fresh connection would get stuck too (rescuing then multiplied the connections, up
         # to hundreds at 0 B/s): only cut-and-reconnect, with back-off. When only a few
         # connections are left with work (the end of the download), rescuing them is right.
-        outage = receiving == 0 and len(busy) >= max(2, target or self.connections)
+        silent_for = now - self._last_rx if self._last_rx else 0.0
+        outage = receiving == 0 and (len(busy) >= max(2, target or self.connections)
+                                     or (len(busy) >= 2 and silent_for > STALL_SECONDS))
         for w, seg in busy:
             if seg.remaining == 0 and not w.reconnect and now - w.last_data > 1.0:
                 # Its piece was finished by another connection (end-game help) while it waits
@@ -1093,7 +1098,10 @@ class DownloadTask:
             with self._lock:
                 working = sum(1 for x in self._workers if x.alive and not x.retired)
                 alive = sum(1 for x in self._workers if x.alive)
+            # A rescuer that never received anything is not rescued in turn (only reconnected,
+            # with back-off): otherwise every silent spell added a new generation of connections.
             if (quiet > base and now - w.rescued_at > base and not outage and not w.retired
+                    and not (w.rescuer and not w.got_data)
                     and working < self.connections + RESCUE_EXTRA
                     and alive < 2 * self.connections + RESCUE_EXTRA):  # stuck ones still leaving
                 # Hand what it still has to receive to a fresh connection now, whether or not
@@ -1197,6 +1205,7 @@ class DownloadTask:
                                     seg.pos += n
                                 request_done = seg.pos > last
                             w.count(n)
+                            self._last_rx = w.last_data
                             retries = 0
                             if not w.got_data:
                                 w.got_data = True
