@@ -1,5 +1,9 @@
 # Novidades do Flow Downloads
 
+## 0.9.1
+
+- **Corrigido: centenas de ligações a 0 B/s.** Quando o servidor (ou a internet) parava de enviar para todas as ligações ao mesmo tempo, a app abria uma ligação nova por cada parte parada; as novas também paravam, e o número dobrava a cada poucos segundos (visto: 280, depois 400). Agora, numa paragem geral, a app só volta a ligar as que já tem (esperando cada vez mais); e nunca passa do máximo escolhido + 2 (mais as paradas que ainda estão a fechar). Num teste com 45 s sem dados: antes 101 ligações abertas no servidor e a subir; agora no máximo 17, e o download continua quando o servidor volta.
+
 ## 0.9.0
 
 - **Visual novo, só preto e branco** (claro ou escuro). O botão **◐** troca num clique; **Automático** segue o Windows.

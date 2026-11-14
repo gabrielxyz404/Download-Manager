@@ -64,6 +64,8 @@ STALL_ALONE_SECONDS = 4.0 # ...or for this long while the other connections are 
 ENDGAME_MIN_PIECE = 32 * 1024   # near the end, help connections that still need...
 ENDGAME_MIN_ETA = 1.5           # ...more than 1.5 s to finish their piece
 TIMEOUT = 30
+RESCUE_EXTRA = 2          # a stuck piece may add this many connections over the maximum (while
+                          # the stuck ones, which leave once they wake, are at most the maximum)
 
 
 CERT_ERROR = ("O certificado de segurança (HTTPS) deste site não é válido ou não é de confiança. "
@@ -255,6 +257,7 @@ class _Worker:
         self.started = self.last_swap = self.last_data = time.monotonic()
         self.quiet_swaps = 0  # replaced for silence with no data in between (backs off)
         self.rescued_at = 0.0  # when its piece was last handed to a fresh connection
+        self.retired = False  # its piece went to a fresh connection: leave instead of taking more
         self.answering = False  # the server has started answering the current request
         self.alive = True
         self.got_data = False
@@ -898,7 +901,7 @@ class DownloadTask:
                     self.connection_note = "testando velocidade"
             best_speed = max(best_speed, self._recent_speed(3.0))
             if not self._stop.is_set():
-                self._replace_slow_connections(now)
+                self._replace_slow_connections(now, target)
                 while self._rescued:  # pieces taken from stuck connections: a fresh one each
                     spawn(self._rescued.pop())
                 # Dynamic segmentation: keep `target` connections busy.
@@ -1052,7 +1055,7 @@ class DownloadTask:
         self.segments.sort(key=lambda s: s.start)
         return new
 
-    def _replace_slow_connections(self, now: float) -> None:
+    def _replace_slow_connections(self, now: float, target: int | None = None) -> None:
         """A connection much slower than the others is often stuck on a slow server node.
         Ask it to reconnect (a new connection may land on a faster one)."""
         with self._lock:
@@ -1064,6 +1067,11 @@ class DownloadTask:
             # (worker, its piece) read once: a worker may drop its piece at any moment
             busy = [(w, w.seg) for w in self._workers if w.alive and w.seg is not None and w.seg.active]
         receiving = sum(1 for w, _ in busy if now - w.last_data < 1.0)
+        # Everyone has work and nobody receives: the line or the server stopped for all of us.
+        # A fresh connection would get stuck too (rescuing then multiplied the connections, up
+        # to hundreds at 0 B/s): only cut-and-reconnect, with back-off. When only a few
+        # connections are left with work (the end of the download), rescuing them is right.
+        outage = receiving == 0 and len(busy) >= max(2, target or self.connections)
         for w, seg in busy:
             if seg.remaining == 0 and not w.reconnect and now - w.last_data > 1.0:
                 # Its piece was finished by another connection (end-game help) while it waits
@@ -1080,7 +1088,14 @@ class DownloadTask:
                 base = max(base, 3 * self._answer_time)
             limit = min(base * 2 ** w.quiet_swaps, TIMEOUT)
             quiet = now - w.last_data
-            if quiet > base and now - w.rescued_at > base:
+            # Rescue only outside an outage and within the maximum + RESCUE_EXTRA (and as many
+            # stuck ones still leaving): never more connections than that.
+            with self._lock:
+                working = sum(1 for x in self._workers if x.alive and not x.retired)
+                alive = sum(1 for x in self._workers if x.alive)
+            if (quiet > base and now - w.rescued_at > base and not outage and not w.retired
+                    and working < self.connections + RESCUE_EXTRA
+                    and alive < 2 * self.connections + RESCUE_EXTRA):  # stuck ones still leaving
                 # Hand what it still has to receive to a fresh connection now, whether or not
                 # the stuck one wakes up (on Windows it may not until its timeout). If it does
                 # wake, its piece is empty and it simply takes other work. No back-off here:
@@ -1091,6 +1106,7 @@ class DownloadTask:
                         seg.end = seg.pos - 1
                 if rest is not None:
                     w.rescued_at = now
+                    w.retired = True  # when it wakes, it leaves: its replacement took its place
                     with self._lock:
                         self._rescued.append(self._add_segment(rest))
             if quiet > limit and now - w.last_swap > limit and not w.reconnect:
@@ -1127,6 +1143,8 @@ class DownloadTask:
                 while not self._stop.is_set():
                     if seg.remaining == 0 and resp is None:
                         seg.active = False
+                        if w.retired:
+                            break  # its piece went to a fresh connection: do not add one more
                         seg = w.seg = self._split_largest()  # keep the connection, take new work
                         if seg is None:
                             break

@@ -252,6 +252,72 @@ class StalledServer(BaseHTTPRequestHandler):
             pass
 
 
+class OutageServer(BaseHTTPRequestHandler):
+    """After ~1 MB, the server (or the line) goes silent for EVERY connection for a while,
+    new requests included, then comes back - what froze a 2 GB download at 0 B/s while the
+    app opened hundreds of connections (each stuck one "rescued" by a new one that got stuck
+    too). Counts the connections that are open at the same time."""
+    protocol_version = "HTTP/1.1"
+    outage = 20.0
+    outage_from = None  # set when the first MB was sent
+    sent = 0
+    open_now = peak = 0
+    lock = threading.Lock()
+
+    def log_message(self, *a):
+        pass
+
+    @classmethod
+    def reset(cls):
+        cls.outage_from, cls.sent, cls.open_now, cls.peak = None, 0, 0, 0
+
+    @classmethod
+    def wait_if_out(cls):
+        while True:
+            with cls.lock:
+                t0 = cls.outage_from
+            if t0 is None or time.monotonic() - t0 >= cls.outage:
+                return
+            time.sleep(0.2)
+
+    def handle(self):
+        cls = OutageServer
+        with cls.lock:
+            cls.open_now += 1
+            cls.peak = max(cls.peak, cls.open_now)
+        try:
+            super().handle()
+        finally:
+            with cls.lock:
+                cls.open_now -= 1
+
+    def do_GET(self):
+        cls = OutageServer
+        data = BIG
+        cls.wait_if_out()
+        m = re.match(r"bytes=(\d+)-(\d*)", self.headers.get("Range", ""))
+        start = int(m.group(1)) if m else 0
+        end = int(m.group(2)) if m and m.group(2) else len(data) - 1
+        self.send_response(206 if m else 200)
+        if m:
+            self.send_header("Content-Range", f"bytes {start}-{end}/{len(data)}")
+        self.send_header("Content-Length", str(end - start + 1))
+        self.send_header("Accept-Ranges", "bytes")
+        self.end_headers()
+        try:
+            for i in range(start, end + 1, 64 * 1024):
+                cls.wait_if_out()
+                piece = data[i:min(i + 64 * 1024, end + 1)]
+                self.wfile.write(piece)
+                time.sleep(len(piece) / 1_000_000)
+                with cls.lock:
+                    cls.sent += len(piece)
+                    if cls.outage_from is None and cls.sent > 1_000_000:
+                        cls.outage_from = time.monotonic()
+        except OSError:
+            pass
+
+
 class StallTests(unittest.TestCase):
     def test_connections_that_go_silent_are_replaced_quickly(self):
         ThreadingHTTPServer.request_queue_size = 64
@@ -277,6 +343,43 @@ class StallTests(unittest.TestCase):
             # for a connection whose piece another one had finished).
             self.assertLess(took, 30, f"{took:.0f}s {timeline}")
             self.assertGreater(task.reconnections, 0)
+        finally:
+            server.shutdown()
+            tmp.cleanup()
+
+    def test_outage_for_every_connection_does_not_multiply_connections(self):
+        """Seen on a user's PC (thinkbroadband 2 GB): the download stopped at 0 B/s showing 280,
+        then 400 connections. When EVERY connection goes silent, handing each stuck piece to a
+        new connection only adds connections that get stuck too, doubling every few seconds.
+        The number of connections must stay near the maximum, and the download must go on
+        when the server comes back. (Stuck connections that cannot be woken, as on Windows.)"""
+        from unittest import mock
+        from flowdl import net
+        OutageServer.reset()
+        ThreadingHTTPServer.request_queue_size = 256
+        server = ThreadingHTTPServer(("127.0.0.1", 0), OutageServer)
+        server.daemon_threads = True
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        tmp = tempfile.TemporaryDirectory()
+        try:
+            with mock.patch.object(net.Connection, "abort", lambda self: None):
+                task = DownloadTask(f"http://127.0.0.1:{server.server_address[1]}/f.bin", tmp.name, 8)
+                t0 = time.monotonic()
+                task.start()
+                peak, timeline = 0, []
+                while task.is_running() and time.monotonic() - t0 < 120:
+                    time.sleep(0.5)
+                    peak = max(peak, task.active_connections)
+                    timeline.append((round(time.monotonic() - t0), task.active_connections,
+                                     round(task.downloaded / 1e6, 1)))
+                task.wait(5)
+            self.assertEqual(task.status, Status.COMPLETED, f"{task.error} {timeline}")
+            with open(task.path, "rb") as f:
+                self.assertEqual(hashlib.sha256(f.read()).digest(), hashlib.sha256(BIG).digest())
+            self.assertLessEqual(peak, 12, timeline)  # 8 + a few being replaced, never hundreds
+            # open at the server: 8 working + 2 extra + stuck ones still leaving (2 x 8 + 2);
+            # before the fix it passed 100 in 45 s and kept growing
+            self.assertLessEqual(OutageServer.peak, 18, f"servidor: {OutageServer.peak} {timeline}")
         finally:
             server.shutdown()
             tmp.cleanup()
