@@ -1,5 +1,10 @@
 # Novidades do Flow Downloads
 
+## 0.9.2
+
+- **Quanto demorou:** o painel de um download concluído mostra o tempo que levou, quando chegou o primeiro byte e a velocidade média e máxima; durante o download, a velocidade máxima também aparece. Útil para comparar com o navegador.
+- Ligações a 0 B/s: também quando as ligações novas nunca chegam a receber nada, a app já não abre mais (ficam no máximo escolhido + 2).
+
 ## 0.9.1
 
 - **Corrigido: centenas de ligações a 0 B/s.** Quando o servidor (ou a internet) parava de enviar para todas as ligações ao mesmo tempo, a app abria uma ligação nova por cada parte parada; as novas também paravam, e o número dobrava a cada poucos segundos (visto: 280, depois 400). Agora, numa paragem geral, a app só volta a ligar as que já tem (esperando cada vez mais); e nunca passa do máximo escolhido + 2 (mais as paradas que ainda estão a fechar). Num teste com 45 s sem dados: antes 101 ligações abertas no servidor e a subir; agora no máximo 17, e o download continua quando o servidor volta.

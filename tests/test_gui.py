@@ -389,6 +389,15 @@ class GuiTests(unittest.TestCase):
         pump(app, 3, lambda: str(panel.primary["text"]) == "Abrir")
         self.assertEqual(str(panel.primary["text"]), "Abrir")
         self.assertFalse(panel.map_box.winfo_ismapped())
+        # measured, to compare with the browser: how long it took, average / best speed
+        labels = {str(k["text"]): str(v["text"]) for k, v in panel.rows if k.winfo_ismapped()}
+        self.assertIn("Demorou", labels)
+        self.assertIn("1.º byte", labels["Demorou"])
+        self.assertIn("média", labels["Velocidade"])
+        self.assertGreater(task.active_seconds, 0.5)
+        again = type(task).from_dict(task.to_dict())  # kept in the list
+        self.assertAlmostEqual(again.active_seconds, task.active_seconds, places=1)
+        self.assertEqual(again.first_byte_after, task.first_byte_after)
         task.status, task.error = "Erro", "HTTP 403: Forbidden"  # how an expired link looks
         pump(app, 3, lambda: str(panel.second["text"]) == "Atualizar link")
         self.assertEqual(str(panel.second["text"]), "Atualizar link")

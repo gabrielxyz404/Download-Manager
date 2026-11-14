@@ -1127,12 +1127,22 @@ class DetailsPanel(ttk.Frame):
             elif getattr(t, "connection_note", ""):
                 conns += f" · {t.connection_note}"
             limit = f" (limite {format_size(t.speed_limit)}/s)" if t.speed_limit else ""
-            rows = [("Baixado", got), ("Velocidade", f"{format_size(t.speed)}/s{limit}"),
+            peak = f" (máx {format_size(t.peak_speed)}/s)" if getattr(t, "peak_speed", 0) and not limit else ""
+            rows = [("Baixado", got), ("Velocidade", f"{format_size(t.speed)}/s{limit}{peak}"),
                     ("Falta", format_time(t.eta)), ("Ligações", conns), ("Guardar em", folder)]
             buttons = [("॥ Pausar", app._pause), ("Abrir pasta", app._open_folder), ("✕", app._remove)]
         elif st == Status.COMPLETED:
-            rows = [("Tamanho", size),
-                    ("Adicionado", time.strftime("%d/%m/%Y %H:%M", time.localtime(t.added_at)))]
+            took = getattr(t, "active_seconds", 0.0)
+            rows = [("Tamanho", size)]
+            if took >= 0.5:
+                first = getattr(t, "first_byte_after", None)
+                rows.append(("Demorou", format_time(took) + (f" (1.º byte aos {first:.1f} s)" if first else "")))
+                speeds = f"média {format_size((t.size or t.downloaded) / took)}/s"
+                if getattr(t, "peak_speed", 0):
+                    speeds += f" · máx {format_size(t.peak_speed)}/s"
+                rows.append(("Velocidade", speeds))
+            else:
+                rows.append(("Adicionado", time.strftime("%d/%m/%Y %H:%M", time.localtime(t.added_at))))
             if getattr(t, "check", ""):
                 rows.append(("Verificação", t.check))
             rows.append(("Guardado em", folder))

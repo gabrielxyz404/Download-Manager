@@ -356,6 +356,12 @@ class DownloadTask:
         self.mark_internet = True  # Windows "came from the internet" mark on the finished file
         self.expected_hash: str | None = None  # checksum the user gave: verified when it finishes
         self.check = ""  # what the end-of-download actions found (checksum, antivirus...)
+        # Measured, shown in the details panel (and kept): to compare with the browser
+        self.active_seconds = 0.0    # time spent downloading (all sessions together)
+        self.peak_speed = 0.0        # best speed over ~3 s
+        self.first_byte_after = None  # seconds from the start to the first byte (last session)
+        self._run_started = 0.0
+        self._run_from = 0
         self.after_ran = False
         self.host_memory = None    # HostMemory: what each server taught us (set by the manager)
         self.server_addresses = 0  # how many addresses the server has (connections are spread)
@@ -440,6 +446,8 @@ class DownloadTask:
             "mirror": self.mirror, "stream_token": self.stream_token, "rid": self.rid,
             "awaiting_browser": self.awaiting_browser,
             "expected_hash": self.expected_hash, "check": self.check,
+            "active_seconds": round(self.active_seconds, 2), "peak_speed": round(self.peak_speed),
+            "first_byte_after": self.first_byte_after,
         }
 
     @classmethod
@@ -457,6 +465,9 @@ class DownloadTask:
         t.awaiting_browser = d.get("awaiting_browser", False)
         t.expected_hash = d.get("expected_hash")
         t.check = d.get("check", "")
+        t.active_seconds = d.get("active_seconds", 0.0)
+        t.peak_speed = d.get("peak_speed", 0.0)
+        t.first_byte_after = d.get("first_byte_after")
         t.after_ran = d.get("status") == Status.COMPLETED  # never again for an old download
         status = d.get("status", Status.PAUSED)
         if status == Status.COMPLETED:
@@ -529,6 +540,9 @@ class DownloadTask:
             pass
 
     def _run(self) -> None:
+        self._run_started = time.monotonic()
+        self._run_from = self.downloaded
+        self.first_byte_after = None
         try:
             for attempt in (1, 2):
                 try:
@@ -561,6 +575,7 @@ class DownloadTask:
                 self.status = Status.ERROR
         finally:
             self.speed = 0.0
+            self.active_seconds += time.monotonic() - self._run_started
             self._save_state()
             if self.on_done:
                 self.on_done(self)
@@ -1340,6 +1355,10 @@ class DownloadTask:
             self._samples.popleft()
         t0, b0 = self._samples[0]
         self.speed = (self.downloaded - b0) / (now - t0) if now > t0 else 0.0
+        if now - t0 >= 2.0:  # a full window: no start-up spikes
+            self.peak_speed = max(self.peak_speed, self.speed)
+        if self.first_byte_after is None and self.downloaded > self._run_from:
+            self.first_byte_after = now - self._run_started
 
     def available_prefix(self) -> int:
         """How many bytes from the start of the file are already downloaded, with no gap
