@@ -69,6 +69,16 @@ class ServiceTrayTests(unittest.TestCase):
         failed = FakeTask(Status.ERROR, name="x.iso", error="HTTP 404")
         self.svc.tray_notify_done(failed)
         self.assertTrue(self.svc.tray.notify.call_args[1].get("warning"))
+        # Shown in the browser's list: "done" only once the browser has the file (found in an
+        # audit: it was announced while the browser was still receiving it)
+        self.svc.tray.reset_mock()
+        mirrored = FakeTask(Status.COMPLETED, name="mod.zip")
+        mirrored.awaiting_browser = True
+        self.svc.tray_notify_done(mirrored)
+        self.svc.tray.notify.assert_not_called()
+        mirrored.awaiting_browser = False
+        self.svc.tray_notify_done(mirrored)
+        self.svc.tray.notify.assert_called_once()
 
     def test_background_loop_handles_the_icon(self):
         self.svc.events.put(("tray", "show"))

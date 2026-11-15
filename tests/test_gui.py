@@ -364,6 +364,21 @@ class GuiTests(unittest.TestCase):
         finally:
             self.svc.settings.filter_style = "side"
 
+    def test_browser_requests_are_handled_at_once(self):
+        """With the window open, a download from the browser waited for the next redraw of the
+        list (up to 1.5 s when nothing was downloading) - the browser's own download stays
+        paused meanwhile."""
+        app = self.open_app()
+        pump(app, 2)  # idle: the list redraws only every 1.5 s
+        seen = []
+        real = app._process_events
+        with mock.patch.object(app, "_process_events", lambda: (seen.append(time.monotonic()), real())):
+            t0 = time.monotonic()
+            self.svc.events.put(("tick", None))
+            pump(app, 1.0, lambda: bool(seen))
+        self.assertTrue(seen)
+        self.assertLess(seen[0] - t0, 0.4)
+
     def test_details_panel(self):
         Handler.delay = 0.2
         app = self.open_app()
@@ -405,6 +420,13 @@ class GuiTests(unittest.TestCase):
         self.assertEqual(str(panel.second["text"]), "Atualizar link")
         self.assertIn("expirado", panel.rows[2][1]["text"])
         task.status, task.error = "Concluído", None
+        # a narrow window: the list keeps its room, the panel steps aside (and comes back)
+        app.geometry("880x600")
+        pump(app, 0.5, lambda: not panel.winfo_ismapped())
+        self.assertFalse(panel.winfo_ismapped())
+        app.geometry("1240x640")
+        pump(app, 0.5, lambda: panel.winfo_ismapped())
+        self.assertTrue(panel.winfo_ismapped())
         # the panel can be hidden
         self.svc.settings.show_details = False
         app._layout()

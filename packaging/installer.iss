@@ -84,9 +84,8 @@ begin
     RegDeleteValue(HKEY_CURRENT_USER, 'Software\Microsoft\Windows\CurrentVersion\Run', 'FlowDownloads');
     { The download list (with site logins), settings and logs: the user decides. }
     if (not UninstallSilent) and DirExists(ExpandConstant('{userappdata}\FlowDownloads')) and
-       (MsgBox('Apagar também a lista de downloads, as configurações e os registos do Flow Downloads?' +
-               #13#10#13#10 + 'Os ficheiros que baixou ficam onde estão.',
-               mbConfirmation, MB_YESNO or MB_DEFBUTTON2) = IDYES) then
+       (MsgBox('Apagar também a lista de downloads, as configurações e os registos do Flow Downloads?' + #13#10#13#10 +
+               'Os ficheiros que baixou ficam onde estão.', mbConfirmation, MB_YESNO or MB_DEFBUTTON2) = IDYES) then
       DelTree(ExpandConstant('{userappdata}\FlowDownloads'), True, True, True);
   end;
 end;

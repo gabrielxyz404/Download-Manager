@@ -82,6 +82,31 @@ def mark_from_internet(path: str, url: str, referrer: str | None = None) -> bool
         return False  # FAT32 / exFAT pen drives have no place for it
 
 
+# --------------------------------------------------------------- sparse files
+FILE_ATTRIBUTE_SPARSE_FILE = 0x200
+
+
+def make_sparse(f) -> bool:
+    """Windows (NTFS): mark an open file as sparse. Other systems already work this way."""
+    if os.name != "nt":
+        return False
+    try:
+        import ctypes
+        import msvcrt
+        from ctypes import wintypes
+        kernel32 = ctypes.windll.kernel32
+        kernel32.DeviceIoControl.argtypes = [wintypes.HANDLE, wintypes.DWORD, wintypes.LPVOID, wintypes.DWORD,
+                                             wintypes.LPVOID, wintypes.DWORD, ctypes.POINTER(wintypes.DWORD),
+                                             wintypes.LPVOID]
+        kernel32.DeviceIoControl.restype = wintypes.BOOL
+        returned = wintypes.DWORD(0)
+        handle = msvcrt.get_osfhandle(f.fileno())
+        return bool(kernel32.DeviceIoControl(handle, 0x900C4, None, 0, None, 0,  # FSCTL_SET_SPARSE
+                                             ctypes.byref(returned), None))
+    except (OSError, AttributeError, ValueError):
+        return False  # FAT32 / exFAT drives: a normal file, as before
+
+
 # ------------------------------------------------------------- disk problems
 DISK_FULL = {errno.ENOSPC, getattr(errno, "EDQUOT", -1)}
 NO_PERMISSION = {errno.EACCES, errno.EPERM, errno.EROFS}

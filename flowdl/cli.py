@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import argparse
+import signal
 import sys
-import time
+import threading
 
 from .engine import DownloadTask, Status, format_size, format_time
 from .manager import default_download_dir
@@ -17,13 +18,20 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("-c", "--connections", type=int, default=8, help="conexões por arquivo (padrão 8)")
     args = parser.parse_args(argv)
 
+    # Ctrl+C only asks to pause. (Interrupting the wait for the download thread itself left
+    # Python believing the thread had ended: the program then quit before the download had
+    # saved where it was, and the same command started over from zero.)
+    interrupted = threading.Event()
+    previous = signal.signal(signal.SIGINT, lambda *_a: interrupted.set())
     failed = 0
-    for url in args.urls:
-        task = DownloadTask(url, args.output, args.connections)
-        task.start()
-        try:
-            while task.is_running():
-                task.wait(0.5)  # returns as soon as the download ends
+    try:
+        for url in args.urls:
+            task = DownloadTask(url, args.output, args.connections)
+            done = threading.Event()
+            task.on_done = lambda _t, done=done: done.set()  # after its progress is saved
+            task.start()
+            while not done.is_set() and not interrupted.is_set():
+                done.wait(0.5)
                 name = task.filename or url
                 sys.stdout.write(
                     f"\r{name[:40]:40} {task.progress * 100:5.1f}% "
@@ -31,17 +39,19 @@ def main(argv: list[str] | None = None) -> int:
                     f"{format_size(task.speed)}/s ETA {format_time(task.eta)} "
                     f"[{task.active_connections} con]   ")
                 sys.stdout.flush()
-        except KeyboardInterrupt:
-            task.pause()
-            task.wait()
-            print("\nPausado. Rode o mesmo comando de novo para continuar de onde parou.")
-            return 130
-        print()
-        if task.status == Status.COMPLETED:
-            print(f"✔ Salvo em {task.path}")
-        else:
-            failed += 1
-            print(f"✖ {task.status}: {task.error or ''}")
+            if interrupted.is_set():
+                task.pause()
+                done.wait(60)
+                print("\nPausado. Rode o mesmo comando de novo para continuar de onde parou.")
+                return 130
+            print()
+            if task.status == Status.COMPLETED:
+                print(f"✔ Salvo em {task.path}")
+            else:
+                failed += 1
+                print(f"✖ {task.status}: {task.error or ''}")
+    finally:
+        signal.signal(signal.SIGINT, previous)
     return 1 if failed else 0
 
 

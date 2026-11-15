@@ -89,5 +89,29 @@ class AwakeTests(unittest.TestCase):
             self.assertFalse(awake._thread.is_alive())
 
 
+class SparseFileTests(unittest.TestCase):
+    @unittest.skipUnless(os.name == "nt", "NTFS")
+    def test_part_file_is_sparse_on_windows(self):
+        import ctypes
+        import tempfile
+        from flowdl import system
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "x.part")
+            with open(p, "wb") as f:
+                self.assertTrue(system.make_sparse(f))
+                f.truncate(64 * 1024 * 1024)
+                f.seek(60 * 1024 * 1024)
+                f.write(b"x")  # far into the file: no zero-filling of what is before
+            attrs = ctypes.windll.kernel32.GetFileAttributesW(p)
+            self.assertTrue(attrs & system.FILE_ATTRIBUTE_SPARSE_FILE)
+
+    def test_elsewhere_nothing_happens(self):
+        import tempfile
+        from flowdl import system
+        if os.name == "nt":
+            self.skipTest("Windows")
+        with tempfile.TemporaryFile() as f:
+            self.assertFalse(system.make_sparse(f))
+
 if __name__ == "__main__":
     unittest.main()

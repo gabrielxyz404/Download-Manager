@@ -331,6 +331,7 @@ class Service:
             task.stream_token = None  # its address to the browser is not valid any more
             self.manager.save()
             self.after_download(task)  # now the file is where the browser saved it
+            self.tray_notify_done(task)
             self.events.put(("tick", None))
             return 200, {"ok": True}
         return 404, {"ok": False}
@@ -359,6 +360,7 @@ class Service:
             log("stream end", task.filename, "complete" if complete else "interrupted")
             if complete:
                 task.release_to_browser()  # the extension tells us the final path soon after
+                self.tray_notify_done(task)  # the browser has every byte now
                 self.manager.save()
             elif task.status == Status.COMPLETED and task.awaiting_browser:
                 self._later(BROWSER_GONE_AFTER_S, self._keep_if_unclaimed, task)
@@ -373,6 +375,7 @@ class Service:
                 task.error = str(exc)
                 return
             self.after_download(task)
+            self.tray_notify_done(task)
             self.manager.save()
             self.events.put(("tick", None))
 
@@ -481,6 +484,8 @@ class Service:
         if self.tray is None or not getattr(self.settings, "tray_notify", True) or task is None:
             return
         name = getattr(task, "filename", None) or "download"
+        if task.status == Status.COMPLETED and getattr(task, "awaiting_browser", False):
+            return  # the browser is still saving it: "done" once it has it (/mirror-done)
         if task.status == Status.COMPLETED and not getattr(task, "notified", False):
             task.notified = True
             check = getattr(task, "check", "")

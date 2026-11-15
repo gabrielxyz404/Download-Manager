@@ -45,7 +45,7 @@ MIN_SPLIT_SIZE = 512 * 1024  # do not split segments smaller than 2x this
 MAX_RETRIES = 8
 FIRST_REQUEST = 2 * 1024 * 1024  # the first request already fetches this much
 REQUEST_SECONDS = 2.0     # each later request asks for ~2 s worth of data...
-MIN_REQUEST = 1024 * 1024  # ...between 1 MB...
+MIN_REQUEST = 4 * 1024 * 1024  # ...between 4 MB (a new connection must not stop to ask again at once)...
 MAX_REQUEST = 32 * 1024 * 1024  # ...and 32 MB, on a connection that stays open
 START_CONNECTIONS = 2     # adaptive mode starts small (4 for big files)...
 START_CONNECTIONS_BIG = 4
@@ -64,6 +64,7 @@ STALL_ALONE_SECONDS = 4.0 # ...or for this long while the other connections are 
 ENDGAME_MIN_PIECE = 32 * 1024   # near the end, help connections that still need...
 ENDGAME_MIN_ETA = 1.5           # ...more than 1.5 s to finish their piece
 TIMEOUT = 30
+CHECKPOINT_S = 5.0        # progress forced onto the disk this often (a power cut loses at most this)
 RESCUE_EXTRA = 2          # a stuck piece may add this many connections over the maximum (while
                           # the stuck ones, which leave once they wake, are at most the maximum)
 
@@ -818,6 +819,11 @@ class DownloadTask:
                 raise
             try:
                 with open(self._part_path, "wb") as f:
+                    # Windows: a sparse file, so writing far into it does not first make Windows
+                    # fill everything before that point with zeros (several connections write
+                    # at different places; on a hard disk that zero-filling cost seconds).
+                    from .system import make_sparse
+                    make_sparse(f)
                     f.truncate(self.size)
             except OSError as exc:
                 raise _disk(exc, self._part_path) from exc
@@ -902,6 +908,13 @@ class DownloadTask:
             if seg.remaining > 0 and not seg.active and self._active_workers < target:
                 seg.active = True
                 spawn(seg)
+        # The other first connections start now, not after the first half-second check (in
+        # browser mode the file is one piece, so the loop above starts only one).
+        while self._active_workers < target and not self._stop.is_set():
+            new_seg = self._split_largest()
+            if new_seg is None:
+                break
+            spawn(new_seg)
 
         while True:
             self._wake.wait(0.5)
@@ -961,7 +974,7 @@ class DownloadTask:
                     spawn(new_seg)
             if all(s.remaining == 0 for s in self.segments):
                 self._naps.set()  # complete: no connection may keep it waiting
-            if time.monotonic() - last_save > 2.0:
+            if time.monotonic() - last_save > CHECKPOINT_S:
                 self._checkpoint(sync_fd)
                 last_save = time.monotonic()
             if not any(t.is_alive() for t in threads):
@@ -976,7 +989,8 @@ class DownloadTask:
         with self._fh_lock:
             self._fh.close()  # a straggler that wakes up later finds it closed and just leaves
         self.downloaded = sum(s.pos - s.start for s in self.segments)
-        self._checkpoint(sync_fd)
+        if not all(s.remaining == 0 for s in self.segments):
+            self._checkpoint(sync_fd)  # paused / stopped: where to continue (complete: not needed)
         os.close(sync_fd)
         if self.host_memory and all(s.remaining == 0 for s in self.segments) and self.size >= MEMORY_MIN_SIZE:
             # Remember for next time (only downloads long enough to have measured something).
@@ -1238,7 +1252,10 @@ class DownloadTask:
                                 want = min(seg.end, seg.inflight_end) - seg.pos + 1
                             if want <= 0:
                                 break
-                            chunk = resp.read(min(w.chunk_size(), want))
+                            # Whatever has arrived (up to a chunk): a slow but living connection
+                            # shows progress at once, so it is never taken for a stalled one.
+                            # (Measured: no more processor time than waiting for whole chunks.)
+                            chunk = resp.read1(min(w.chunk_size(), want))
                             if not chunk:
                                 break
                             with seg.lock:
@@ -1262,6 +1279,9 @@ class DownloadTask:
                                 w.got_data = True
                                 with self._lock:
                                     self._streaming += 1
+                                if self.first_byte_after is None:
+                                    self.first_byte_after = time.monotonic() - self._run_started
+                                self._wake.set()  # progress known at once (the browser waits for it)
                             self._throttle(n)
                             if request_done or w.reconnect:
                                 break

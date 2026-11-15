@@ -1107,6 +1107,10 @@ class DetailsPanel(ttk.Frame):
                 v.grid_remove()
 
     def _buttons(self, spec) -> None:
+        key = tuple(text for text, _cmd in spec)
+        if key == getattr(self, "_buttons_key", None):
+            return  # unchanged: do not redraw them twice a second
+        self._buttons_key = key
         for b, (text, cmd) in zip((self.primary, self.second, self.third), spec):
             b.configure(text=text, command=cmd)
             b.pack(side="left", padx=(0, 8))
@@ -1455,8 +1459,10 @@ class App(tk.Tk):
 
         if list(self.settings.columns) == OLD_DEFAULT_COLUMNS:
             self.settings.columns = list(DEFAULT_COLUMNS)  # the details panel shows the rest
+        self._narrow = False  # window too narrow for the details panel (it hides itself)
         self._build_menu()
         self._build_ui()
+        self.bind("<Configure>", self._on_resize, add="+")
         self.apply_theme()
         self._apply_columns()
         self.protocol("WM_DELETE_WINDOW", self.close_window)
@@ -1469,6 +1475,7 @@ class App(tk.Tk):
             ShutdownCountdown(self)
         self._process_events()
         self.after(REFRESH_MS, self._refresh)
+        self.after(100, self._poll_service)
 
     # --------------------------------------------------------- window life
     def show_window(self) -> None:
@@ -1689,6 +1696,16 @@ class App(tk.Tk):
         self.ctx.add_command(label="Excluir", command=self._remove)
         self.menus.append(self.ctx)
 
+    NARROW = 1000  # below this width the list needs the room: the details panel steps aside
+
+    def _on_resize(self, event) -> None:
+        if event.widget is not self:
+            return
+        narrow = event.width < self.NARROW
+        if narrow != self._narrow:
+            self._narrow = narrow
+            self._layout()
+
     def _placeholder(self) -> None:
         if self.url_var.get():
             self.placeholder.place_forget()
@@ -1702,7 +1719,7 @@ class App(tk.Tk):
         if self.settings.filter_style != "pills":
             self.side_frame.pack(side="left", fill="y")
             self.side_line.pack(side="left", fill="y")
-        if self.settings.show_details:
+        if self.settings.show_details and not self._narrow:
             self.details.pack(side="right", fill="y")
             self.details_line.pack(side="right", fill="y")
         self.center.pack(side="left", fill="both", expand=True)
@@ -2027,6 +2044,9 @@ class App(tk.Tk):
 
     def _open_file(self) -> None:
         for t in self._selected():
+            if t.status == Status.COMPLETED and getattr(t, "awaiting_browser", False):
+                self.status_var.set("O navegador ainda está a receber este ficheiro: abre-se quando ele terminar.")
+                return
             if t.status == Status.COMPLETED and t.path and os.path.exists(t.path):
                 open_path(t.path)
                 return
@@ -2239,6 +2259,17 @@ class App(tk.Tk):
             AddDialog(self, item["url"], item.get("filename"), headers, title="Download do navegador",
                       cookies=cookies, final_url=item.get("final_url"),
                       rid=item.get("rid"))
+
+    def _poll_service(self) -> None:
+        """A download from the browser is handled within 0.1 s (it waits paused in the
+        browser meanwhile), not at the next redraw of the list (up to 1.5 s when idle)."""
+        svc = self.service
+        try:
+            if not svc.events.empty() or svc.pending:
+                self._process_events()
+            self.after(100, self._poll_service)
+        except tk.TclError:
+            pass  # the window is closing
 
     def _browser_duplicate(self, item: dict, existing) -> None:
         svc, rid = self.service, item.get("rid")
