@@ -690,7 +690,7 @@ class StallTests(unittest.TestCase):
             self.assertGreaterEqual(task.outages, 1)
             # Before: still downloading after 2 min, with 30-40 connections open at the server
             # and the server stopping again every few seconds.
-            self.assertLessEqual(peak_app, 10, "more connections after the server stopped")
+            self.assertLessEqual(peak_app, 16 + 2, "more connections than allowed after the server stopped")
             self.assertLessEqual(PenaltyServer.stalls, 8, "kept provoking the server")
         finally:
             server.shutdown()

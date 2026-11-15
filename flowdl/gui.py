@@ -1148,7 +1148,7 @@ class DetailsPanel(ttk.Frame):
             rows = [("Tamanho", size)]
             if took >= 0.5:
                 first = getattr(t, "first_byte_after", None)
-                rows.append(("Demorou", format_time(took) + (f" (1.º byte aos {first:.1f} s)" if first else "")))
+                rows.append(("Demorou", format_time(took) + (f" (1.º byte aos {first:.1f} s)" if first is not None else "")))
                 speeds = f"média {format_size((t.size or t.downloaded) / took)}/s"
                 if getattr(t, "peak_speed", 0):
                     speeds += f" · máx {format_size(t.peak_speed)}/s"
