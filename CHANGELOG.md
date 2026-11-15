@@ -1,5 +1,13 @@
 # Novidades do Flow Downloads
 
+## 0.9.4
+
+- **Corrigido: velocidade a 0 com as ligações a subir (visto: 8 → 21) e downloads mais lentos do que o navegador.** Quando o servidor (ou a internet) parava todas as ligações, a app lia a queda como "precisa de mais ligações", e ao cortar e reabrir as ligações paradas abria ainda mais no servidor. Alguns servidores e routers castigam isso, e o download ficava preso. Agora:
+  - numa paragem geral a app **espera** com as ligações que tem: não abre, não corta e não divide trabalho;
+  - usa **metade das ligações** durante 90 s e, se o servidor voltar a parar no mesmo download, lembra-se disso para a próxima vez;
+  - nunca aumenta as ligações com a velocidade perto de 0.
+  Num servidor que castiga ligações a mais: antes não terminava (40 ligações abertas); agora termina com 4.
+
 ## 0.9.3
 
 Revisão completa da app (três análises do código + medições). Cada correção tem um teste que falhava antes.

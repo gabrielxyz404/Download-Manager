@@ -508,6 +508,62 @@ class OutageServer(BaseHTTPRequestHandler):
             pass
 
 
+class PenaltyServer(BaseHTTPRequestHandler):
+    """A server (or a home router) that stops sending to EVERY connection for a while when a
+    client opens more than LIMIT at once - what a user saw: speed down to 0 three times,
+    connections going up to 21, and the download much slower than the browser alone."""
+    protocol_version = "HTTP/1.1"
+    LIMIT, STALL = 4, 5.0
+    open_now = peak_after = stalls = 0
+    stall_until = 0.0
+    lock = threading.Lock()
+
+    def log_message(self, *a):
+        pass
+
+    @classmethod
+    def reset(cls):
+        cls.open_now = cls.peak_after = cls.stalls = 0
+        cls.stall_until = 0.0
+
+    def setup(self):
+        super().setup()
+        cls = PenaltyServer
+        with cls.lock:
+            cls.open_now += 1
+            if cls.stalls:
+                cls.peak_after = max(cls.peak_after, cls.open_now)
+            if cls.open_now > cls.LIMIT and time.monotonic() >= cls.stall_until:
+                cls.stall_until = time.monotonic() + cls.STALL
+                cls.stalls += 1
+
+    def finish(self):
+        try:
+            super().finish()
+        finally:
+            with PenaltyServer.lock:
+                PenaltyServer.open_now -= 1
+
+    def do_GET(self):
+        data = BIG
+        m = re.match(r"bytes=(\d+)-(\d*)", self.headers.get("Range", ""))
+        start = int(m.group(1)) if m else 0
+        end = min(int(m.group(2)) if m and m.group(2) else len(data) - 1, len(data) - 1)
+        self.send_response(206 if m else 200)
+        if m:
+            self.send_header("Content-Range", f"bytes {start}-{end}/{len(data)}")
+        self.send_header("Content-Length", str(end - start + 1))
+        self.end_headers()
+        try:
+            for i in range(start, end + 1, 64 * 1024):
+                while time.monotonic() < PenaltyServer.stall_until:
+                    time.sleep(0.1)
+                self.wfile.write(data[i:min(i + 64 * 1024, end + 1)])
+                time.sleep(0.15)  # ~430 KB/s per connection: the app ramps up past the limit
+        except OSError:
+            pass
+
+
 class StallTests(unittest.TestCase):
     def test_connections_that_go_silent_are_replaced_quickly(self):
         ThreadingHTTPServer.request_queue_size = 64
@@ -605,6 +661,38 @@ class StallTests(unittest.TestCase):
                 self.assertEqual(hashlib.sha256(f.read()).digest(), hashlib.sha256(BIG).digest())
         finally:
             OutageServer.outage = 20.0
+            server.shutdown()
+            tmp.cleanup()
+
+    def test_server_that_stops_everyone_gets_fewer_connections_not_more(self):
+        """Every connection stopping together must never make the app open more (it used to
+        read the drop to 0 as "more connections will help" and doubled them); it uses half as
+        many instead, so a server or router that punishes many connections is calmed."""
+        PenaltyServer.reset()
+        ThreadingHTTPServer.request_queue_size = 64
+        server = ThreadingHTTPServer(("127.0.0.1", 0), PenaltyServer)
+        server.daemon_threads = True
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        tmp = tempfile.TemporaryDirectory()
+        try:
+            task = DownloadTask(f"http://127.0.0.1:{server.server_address[1]}/f.bin", tmp.name, 16)
+            task.start()
+            peak_app = 0
+            t0 = time.monotonic()
+            while task.is_running() and time.monotonic() - t0 < 120:
+                time.sleep(0.2)
+                if PenaltyServer.stalls:
+                    peak_app = max(peak_app, task.active_connections)
+            task.wait(5)
+            self.assertEqual(task.status, Status.COMPLETED, task.error)
+            with open(task.path, "rb") as f:
+                self.assertEqual(hashlib.sha256(f.read()).digest(), hashlib.sha256(BIG).digest())
+            self.assertGreaterEqual(task.outages, 1)
+            # Before: still downloading after 2 min, with 30-40 connections open at the server
+            # and the server stopping again every few seconds.
+            self.assertLessEqual(peak_app, 10, "more connections after the server stopped")
+            self.assertLessEqual(PenaltyServer.stalls, 8, "kept provoking the server")
+        finally:
             server.shutdown()
             tmp.cleanup()
 
