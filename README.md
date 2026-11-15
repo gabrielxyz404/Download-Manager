@@ -51,8 +51,8 @@ Como consegue isto:
 | Claro / escuro | ✅ preto e branco; botão ◐ troca num clique; **Automático** segue o Windows (**⚙ → Configurações → Aparência**) |
 | Interface personalizável | ✅ painel de detalhes com o **mapa das partes**, filtros na barra lateral ou em botões, colunas à escolha (**⚙ → Colunas**) |
 | Fila de downloads | ✅ número de downloads simultâneos configurável |
-| Capturar links copiados | ✅ link copiado aparece automaticamente na barra de URL |
-| HTTP / HTTPS / FTP | ✅ HTTP e HTTPS com várias conexões; FTP básico (1 conexão) |
+| Capturar links copiados | ✅ ao voltar à janela da app, o link copiado aparece na barra de URL |
+| HTTP / HTTPS | ✅ com várias conexões (FTP ainda não: esses links ficam com o navegador) |
 | Alt+clique | ✅ segurar **Alt** ao clicar num link deixa esse download com o navegador; no menu da extensão: "Capturar neste site" e "Próximo download fica no navegador" |
 | Abrir a app pelo navegador | ✅ se o Flow Downloads estiver fechado, o navegador abre-o sozinho no próximo download |
 | Checksum | ✅ campo "Checksum" ao adicionar (MD5/SHA-1/SHA-256/SHA-512) e "Verificar checksum..." no menu do botão direito |
@@ -100,6 +100,7 @@ python -m flowdl https://exemplo.com/arquivo.zip -o C:\Downloads -c 16
 ```
 
 Se interromper com `Ctrl+C`, rode o mesmo comando de novo para continuar de onde parou.
+A linha de comando baixa sozinha (não usa as categorias, o suporte a vídeos nem a lista da app).
 
 ## Extensão do navegador
 

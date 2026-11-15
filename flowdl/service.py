@@ -92,6 +92,7 @@ class Service:
         self._req_cond = threading.Condition()
         self.active_streams = 0
         self.extension_outdated = False  # an old extension talked to us: suggest updating it
+        self._to_browser: dict = {}  # link -> until when the browser keeps it (hand_to_browser)
         self._next_schedule_check = 0.0
 
     # ------------------------------------------------------- lazy manager
@@ -196,6 +197,24 @@ class Service:
     def cancel_request(self, rid: str | None, state: str = "cancelled") -> None:
         self._set_request(rid, state=state)
 
+    def hand_to_browser(self, *urls: str) -> None:
+        """The next browser download of these links (within 2 min) stays with the browser:
+        "Baixar no navegador" for a site that refuses the app."""
+        import time
+        until = time.monotonic() + 120
+        for u in urls:
+            if u:
+                self._to_browser[u] = until
+
+    def _handed_to_browser(self, *urls: str) -> bool:
+        import time
+        now = time.monotonic()
+        for u in urls:
+            if u and self._to_browser.get(u, 0) > now:
+                self._to_browser.pop(u, None)
+                return True
+        return False
+
     def request_state(self, rid: str | None) -> str | None:
         with self._req_cond:
             return (self.requests.get(rid) or {}).get("state") if rid else None
@@ -279,6 +298,8 @@ class Service:
         if path == "/check":  # should the app take this browser download? (file types, sites)
             from .capture import should_capture, skipped_site
             url, final, ref = str(data.get("url", "")), str(data.get("final_url", "")), str(data.get("referrer", ""))
+            if self._handed_to_browser(url, final):
+                return 200, {"ok": True, "capture": False, "reason": "devolvido ao navegador pela app"}
             ok = should_capture(self.settings, url, final, str(data.get("filename", "")),
                                 str(data.get("mime", "")), ref)
             reason = "" if ok else ("site ignorado" if skipped_site(self.settings, url, final, ref)

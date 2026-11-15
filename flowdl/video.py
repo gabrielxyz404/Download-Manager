@@ -368,7 +368,7 @@ class VideoTask:
             "kind": self.kind, "id": self.id, "url": self.url, "dest_dir": self.dest_dir,
             "format": self.format, "audio_only": self.audio_only, "title": self.title,
             "connections": self.connections, "headers": self.headers, "cookiefile": self.cookiefile,
-            "cookie_jar": vault.protect(self.cookie_jar),
+            "cookie_jar": vault.protect_cached(self.cookie_jar),
             "speed_limit": self.speed_limit, "quality": self.quality, "filename": self.filename,
             "path": self.path, "size": self.size, "downloaded": self.downloaded,
             "status": self.status, "added_at": self.added_at,

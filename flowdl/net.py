@@ -13,6 +13,7 @@ import base64
 import http.client
 import os
 import socket
+import threading
 import ssl
 import urllib.parse
 import urllib.request
@@ -80,7 +81,88 @@ class Response:
         return self.raw.isclosed()
 
 
+HAPPY_DELAY = 0.25  # start the next address if the first has not answered by then
+
+
+def happy_connect(address, timeout=None, source_address=None):
+    """Like socket.create_connection, but the addresses (IPv6 and IPv4 mixed) are tried
+    side by side, each one HAPPY_DELAY after the previous, and the first that connects wins
+    ("Happy Eyeballs", as browsers do). Before: a broken IPv6 route made every new
+    connection wait for the whole timeout (30 s) before trying IPv4."""
+    host, port = address[0], address[1]
+    infos = socket.getaddrinfo(host, port, 0, socket.SOCK_STREAM)
+    if len({i[0] for i in infos}) < 2:  # one family only: the usual way
+        return socket.create_connection(address, timeout, source_address)
+    v6 = [i for i in infos if i[0] == socket.AF_INET6]
+    v4 = [i for i in infos if i[0] != socket.AF_INET6]
+    order = []
+    while v6 or v4:  # alternate the families, the system's preferred one first
+        for group in ((v6, v4) if infos[0][0] == socket.AF_INET6 else (v4, v6)):
+            if group:
+                order.append(group.pop(0))
+    winner: list = []
+    errors: list = []
+    done = threading.Event()
+    lock = threading.Lock()
+
+    def attempt(info):
+        family, kind, proto, _name, sockaddr = info
+        sock = None
+        try:
+            sock = socket.socket(family, kind, proto)  # may fail: no IPv6 on this computer
+            if timeout is not None:
+                sock.settimeout(timeout)
+            if source_address:
+                sock.bind(source_address)
+            sock.connect(sockaddr)
+        except OSError as exc:
+            if sock is not None:
+                sock.close()
+            with lock:
+                errors.append(exc)
+                if len(errors) == len(order):
+                    done.set()
+            return
+        with lock:
+            if winner:
+                sock.close()  # another address was faster
+                return
+            winner.append(sock)
+        done.set()
+
+    for n, info in enumerate(order):
+        threading.Thread(target=attempt, args=(info,), daemon=True, name="connect").start()
+        if done.wait(HAPPY_DELAY if n < len(order) - 1 else None if timeout is None else timeout):
+            break
+    else:
+        done.wait(timeout)
+    with lock:
+        if winner:
+            return winner[0]
+        if errors:
+            raise errors[0]
+    raise socket.timeout("timed out")
+
+
+_PROXY_CACHE: dict = {}  # (scheme, host) -> (when, answer)
+
+
 def _proxy_for(scheme: str, host: str) -> tuple[str, int, dict] | None:
+    """The system's proxy for this address (or None). Remembered for a minute: on Windows
+    the check reads the registry and may look the name up in DNS, for every new connection."""
+    import time
+    key, now = (scheme, host), time.monotonic()
+    cached = _PROXY_CACHE.get(key)
+    if cached and now - cached[0] < 60:
+        return cached[1]
+    answer = _find_proxy(scheme, host)
+    if len(_PROXY_CACHE) > 200:
+        _PROXY_CACHE.clear()
+    _PROXY_CACHE[key] = (now, answer)
+    return answer
+
+
+def _find_proxy(scheme: str, host: str) -> tuple[str, int, dict] | None:
     proxies = urllib.request.getproxies()
     proxy = proxies.get(scheme)
     if not proxy or urllib.request.proxy_bypass(host):
@@ -166,6 +248,8 @@ class Connection:
             ip = self.address[1]
             conn._create_connection = lambda addr, timeout=None, source=None: socket.create_connection(
                 (ip, addr[1]), timeout, source)
+        elif not proxy:
+            conn._create_connection = happy_connect
         self.conn, self.key = conn, (scheme, host, port)
         self.opened += 1
         self.requests = 0

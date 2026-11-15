@@ -177,8 +177,8 @@ class AddDialog(tk.Toplevel):
             self.destroy()
             return
         url = self.url.get().strip()
-        if not url.lower().startswith(("http://", "https://", "ftp://")):
-            messagebox.showwarning("URL inválida", "O link deve começar com http://, https:// ou ftp://",
+        if not url.lower().startswith(("http://", "https://")):
+            messagebox.showwarning("URL inválida", "O link deve começar com http:// ou https:// (FTP ainda não é suportado)",
                                    parent=self)
             return
         try:
@@ -1162,7 +1162,8 @@ class DetailsPanel(ttk.Frame):
         elif st == Status.ERROR:
             rows = [("Baixado", got), ("Problema", t.error or "erro desconhecido"),
                     ("O que fazer", error_hint(t.error or "")), ("Guardar em", folder)]
-            buttons = [("↻ Tentar de novo", app._resume), ("Atualizar link", app._update_link), ("✕", app._remove)]
+            buttons = [("↻ Tentar de novo", app._resume), ("Atualizar link", app._update_link),
+                       ("Baixar no navegador", app._to_browser)]
         elif st == Status.PAUSED:
             again = ("o servidor permite continuar ✓" if t.resumable or not t.downloaded
                      else "o servidor não permite continuar: recomeça do início")
@@ -1692,6 +1693,7 @@ class App(tk.Tk):
         self.ctx.add_command(label="Copiar endereço", command=self._copy_url)
         self.ctx.add_command(label="Verificar checksum...", command=self._verify_checksum)
         self.ctx.add_command(label="Atualizar link...", command=self._update_link)
+        self.ctx.add_command(label="Baixar no navegador", command=self._to_browser)
         self.ctx.add_separator()
         self.ctx.add_command(label="Excluir", command=self._remove)
         self.menus.append(self.ctx)
@@ -1767,6 +1769,22 @@ class App(tk.Tk):
             return None
         return next((t for t in self.manager.tasks if t.id == sel[0]), None)
 
+    def _to_browser(self) -> None:
+        """A site that refuses the app (single-use link, protection page): the browser downloads
+        it as if the app were not there; this download leaves the list."""
+        import webbrowser
+        tasks = [t for t in self._selected() if getattr(t, "kind", "") != "video"]
+        if not tasks:
+            return
+        t = tasks[0]
+        page = (t.headers or {}).get("Referer", "")
+        self.service.hand_to_browser(t.url, getattr(t, "_final_url", None) or "")
+        webbrowser.open(t.url)
+        self.status_var.set("Aberto no navegador: ele baixa sozinho"
+                            + (" (se o link expirou, volte à página do download)" if page else ""))
+        self.manager.remove(t, delete_files=True)
+        self._refresh(schedule=False)
+
     def _update_link(self) -> None:
         """A link that expired: give the download a fresh one (it continues where it stopped
         when the file is the same; the engine starts over if the server sends another version)."""
@@ -1780,8 +1798,8 @@ class App(tk.Tk):
         url = (url or "").strip()
         if not url:
             return
-        if not url.lower().startswith(("http://", "https://", "ftp://")):
-            messagebox.showwarning("URL inválida", "Informe um link que comece com http://, https:// ou ftp://",
+        if not url.lower().startswith(("http://", "https://")):
+            messagebox.showwarning("URL inválida", "Informe um link que comece com http:// ou https:// (FTP ainda não é suportado)",
                                    parent=self)
             return
         t.pause()
@@ -1947,8 +1965,8 @@ class App(tk.Tk):
 
     def _quick_add(self) -> None:
         url = self.url_var.get().strip()
-        if not url.lower().startswith(("http://", "https://", "ftp://")):
-            messagebox.showwarning("URL inválida", "Informe um link que comece com http://, https:// ou ftp://")
+        if not url.lower().startswith(("http://", "https://")):
+            messagebox.showwarning("URL inválida", "Informe um link que comece com http:// ou https:// (FTP ainda não é suportado)")
             return
         self.url_var.set("")
         if is_video_site(url):
@@ -2320,7 +2338,7 @@ class App(tk.Tk):
             text = self.clipboard_get().strip()
         except tk.TclError:
             return
-        if text != self._last_clip and text.lower().startswith(("http://", "https://", "ftp://")) \
+        if text != self._last_clip and text.lower().startswith(("http://", "https://")) \
                 and " " not in text and len(text) < 4000:
             self._last_clip = text
             if not self.url_var.get():

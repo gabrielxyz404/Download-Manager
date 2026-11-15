@@ -1,5 +1,24 @@
 # Novidades do Flow Downloads
 
+## 0.9.3
+
+Revisão completa da app (três análises do código + medições). Cada correção tem um teste que falhava antes.
+
+- **Segurança:** um site podia enviar downloads para a app (pedidos com origem "null"). Agora só a nossa extensão.
+- **A lista de downloads já não se perde:** duas gravações ao mesmo tempo podiam estragar o ficheiro e, ao abrir, a lista ficava vazia. As configurações também passam a ser gravadas de forma segura e logo que mudam.
+- **Nunca duas cópias da app a correr ao mesmo tempo** (escreviam os mesmos ficheiros).
+- **Pausar é imediato** (podia demorar 30 s).
+- **Downloads do Brave com a fila cheia** começam logo e nunca se perdem; a extensão aguenta ser reiniciada pelo Brave a meio, e se a app demorar, o Brave nunca fica com o download parado para sempre.
+- **Mais rápido no modo Brave:** as primeiras ligações arrancam todas de uma vez; ~1 s ganho num servidor longe, ~30% menos pedidos. A app reage em 0,1 s a um download novo com a janela aberta.
+- **Windows:** ficheiro temporário "esparso" (sem encher de zeros), menos escritas forçadas no disco, IPv6 avariado já não atrasa 30 s, cópias temporárias apagadas mesmo quando o Windows as segura, nomes como CON/NUL tratados.
+- **Novo botão "Baixar no navegador"** para sites que recusam a app; "Atualizar link" funciona com o download a correr.
+- **Comando ao terminar:** nomes com "&" já não correm comandos; ficheiros extraídos de um zip mantêm a marca "veio da internet"; o ficheiro guardado pelo Brave recebe a marca com o site verdadeiro.
+- **Agendador** não falha a hora se o PC estava a dormir (até 15 min); vídeos com o mesmo título não se substituem; ficheiros sem tamanho aparecem logo no Brave; o aviso "concluído" só aparece quando o Brave já tem o ficheiro.
+- **Linha de comando:** Ctrl+C e repetir o comando continua mesmo de onde parou.
+- **Desinstalar** pergunta se apaga também a lista e as configurações; atualizações apagam os ficheiros antigos.
+- O FTP deixou de ser anunciado (nunca funcionou): esses links ficam com o navegador.
+- Extensão 0.9.3: recarregue-a em brave://extensions (botão ↻) depois de atualizar a app.
+
 ## 0.9.2
 
 - **Quanto demorou:** o painel de um download concluído mostra o tempo que levou, quando chegou o primeiro byte e a velocidade média e máxima; durante o download, a velocidade máxima também aparece. Útil para comparar com o navegador.

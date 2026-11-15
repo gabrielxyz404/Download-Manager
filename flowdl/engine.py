@@ -464,7 +464,7 @@ class DownloadTask:
             "path": self.path, "size": self.size, "status": self.status,
             "downloaded": self.downloaded, "added_at": self.added_at,
             "headers": self.headers, "speed_limit": self.speed_limit,
-            "cookies": vault.protect(self.cookies), "final_url": self._final_url,
+            "cookies": vault.protect_cached(self.cookies), "final_url": self._final_url,
             "mirror": self.mirror, "stream_token": self.stream_token, "rid": self.rid,
             "awaiting_browser": self.awaiting_browser,
             "expected_hash": self.expected_hash, "check": self.check,

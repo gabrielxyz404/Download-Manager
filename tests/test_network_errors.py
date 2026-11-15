@@ -156,5 +156,39 @@ class AbortTests(unittest.TestCase):
         srv.close()
 
 
+class HappyEyeballsTests(unittest.TestCase):
+    def test_broken_ipv6_does_not_hold_the_connection(self):
+        """Many home networks list IPv6 addresses that do not work. Before, every new
+        connection waited for the whole timeout on such an address before trying IPv4."""
+        import socket
+        import threading
+        import time
+        from unittest import mock
+        from flowdl import net
+        srv = socket.socket()
+        srv.bind(("127.0.0.1", 0))
+        srv.listen(5)
+        port = srv.getsockname()[1]
+        threading.Thread(target=lambda: [srv.accept() for _ in range(3)], daemon=True).start()
+        real_socket = socket.socket
+
+        class SlowV6(real_socket):
+            def connect(self, addr):
+                if self.family == socket.AF_INET6:
+                    time.sleep(5)  # a route that swallows the connection
+                    raise TimeoutError("timed out")
+                return super().connect(addr)
+        infos = [(socket.AF_INET6, socket.SOCK_STREAM, 6, "", ("2001:db8::1", port, 0, 0)),
+                 (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", port))]
+        with mock.patch.object(net.socket, "getaddrinfo", lambda *a, **k: infos), \
+                mock.patch.object(net.socket, "socket", SlowV6):
+            t0 = time.monotonic()
+            sock = net.happy_connect(("servidor.exemplo", port), timeout=30)
+            took = time.monotonic() - t0
+        self.assertEqual(sock.family, socket.AF_INET)
+        self.assertLess(took, 1.0)
+        sock.close()
+        srv.close()
+
 if __name__ == "__main__":
     unittest.main()

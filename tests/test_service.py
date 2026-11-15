@@ -173,6 +173,17 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(marked, [(saved, "https://site.example/f.zip", "https://site.example/page")])
         self.assertIsNone(task.stream_token)  # the address the browser used is closed
 
+    def test_handed_back_link_stays_with_the_browser_once(self):
+        """'Baixar no navegador' (a site that refuses the app): the browser's next download of
+        that link must not be taken by the app again - only that once."""
+        link = "https://site.example/once/mod.zip"
+        self.svc.hand_to_browser(link)
+        code, ans = self.svc.api("POST", "/check", {"url": link, "filename": "mod.zip"})
+        self.assertFalse(ans["capture"])
+        self.assertIn("devolvido", ans["reason"])
+        code, ans = self.svc.api("POST", "/check", {"url": link, "filename": "mod.zip"})
+        self.assertTrue(ans["capture"])  # only once
+
     def test_video_link_opens_dialog(self):
         post(self.port, "/video", {"page": "https://www.youtube.com/watch?v=abc", "media": []})
         self.assertEqual(self.wait_mode(), "dialog")

@@ -51,6 +51,23 @@ def protect(value) -> str | None:
     return PREFIX_PLAIN + base64.b64encode(raw).decode()
 
 
+_cache: dict = {}  # JSON of a value -> its protected text (protect() gives a new one each time)
+
+
+def protect_cached(value) -> str | None:
+    """protect(), but the same value gives the same text: the download list is saved often,
+    and a new encryption each time made it look changed (rewritten every few seconds)."""
+    if not value:
+        return None
+    key = json.dumps(value, sort_keys=True)
+    text = _cache.get(key)
+    if text is None:
+        if len(_cache) > 500:
+            _cache.clear()
+        text = _cache[key] = protect(value)
+    return text
+
+
 def unprotect(text: str | None, default=None):
     """Read back what protect() wrote. Anything unreadable gives ``default`` (the download
     then simply goes on without the login cookies)."""

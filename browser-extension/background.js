@@ -221,6 +221,7 @@ function remember(details) {
   for (const h of details.requestHeaders || []) {
     if (BROWSER_HEADERS.includes(h.name.toLowerCase()) && h.value) hdrs[h.name.toLowerCase()] = h.value;
   }
+  seen.delete(details.url); // re-added at the end: the map stays in order of age (oldest first)
   seen.set(details.url, { method: details.method, cookie: cookie ? cookie.value : null,
                           ua: ua ? ua.value : null, lang: lang ? lang.value : null, hdrs, time: Date.now() });
   if (seen.size > 300) {
@@ -559,8 +560,10 @@ async function handleDownload(item) {
   const finalUrl = item.finalUrl || item.url; // where it led after redirects
   if (finalUrl.startsWith(APP) || url.startsWith(APP)) return; // the browser's copy of an app download
   const label = shortName(finalUrl, item.filename ? item.filename.split(/[\\/]/).pop() : "");
-  if (!/^(https?|ftp):/i.test(finalUrl)) {
-    return note(label, "deixado ao navegador: o ficheiro foi criado pela própria página (" + finalUrl.split(":")[0] + ":)");
+  if (!/^https?:/i.test(finalUrl)) { // (FTP stays with the browser: the app speaks HTTP only)
+    const scheme = finalUrl.split(":")[0].toLowerCase();
+    return note(label, scheme === "ftp" ? "deixado ao navegador: a app ainda não baixa por FTP"
+                                        : "deixado ao navegador: o ficheiro foi criado pela própria página (" + scheme + ":)");
   }
   if (passThrough.delete(url) || passThrough.delete(finalUrl)) return;
   if (item.incognito) { // private window: nothing of it goes to the app's list or history

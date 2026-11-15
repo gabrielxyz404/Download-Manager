@@ -418,6 +418,7 @@ class GuiTests(unittest.TestCase):
         task.status, task.error = "Erro", "HTTP 403: Forbidden"  # how an expired link looks
         pump(app, 3, lambda: str(panel.second["text"]) == "Atualizar link")
         self.assertEqual(str(panel.second["text"]), "Atualizar link")
+        self.assertEqual(str(panel.third["text"]), "Baixar no navegador")
         self.assertIn("expirado", panel.rows[2][1]["text"])
         task.status, task.error = "Concluído", None
         # a narrow window: the list keeps its room, the panel steps aside (and comes back)

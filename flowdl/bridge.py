@@ -90,7 +90,7 @@ def _expected(size, mime) -> dict | None:
 
 def _download_item(data: dict) -> dict:
     url = str(data.get("url", ""))
-    if not url.startswith(("http://", "https://", "ftp://")):
+    if not url.startswith(("http://", "https://")):  # (no FTP: the engine speaks HTTP only)
         raise ValueError("url inválida")
     final = str(data.get("final_url") or "")
     by_host = data.get("cookies_by_host") or {}

@@ -188,6 +188,17 @@ class FileNameTests(unittest.TestCase):
         self.assertEqual(sanitize_filename(" . "), "download")
 
 
+class SaveOnlyWhenChangedTests(unittest.TestCase):
+    def test_same_cookies_give_the_same_protected_text(self):
+        """Found in an audit: the cookies were encrypted again at each save with a new result,
+        so the download list always looked changed and was rewritten every few seconds."""
+        from flowdl import vault
+        a = vault.protect_cached({"site.com": "sessao=1"})
+        self.assertEqual(vault.protect_cached({"site.com": "sessao=1"}), a)
+        self.assertEqual(vault.unprotect(a), {"site.com": "sessao=1"})
+        self.assertNotEqual(vault.protect_cached({"site.com": "sessao=2"}), a)
+
+
 class RefusedLinkTests(unittest.TestCase):
     def test_gives_up_when_fresh_addresses_never_work(self):
         """No endless loop: if every fresh address is refused, the download stops with a message."""
