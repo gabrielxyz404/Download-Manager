@@ -25,6 +25,7 @@ class DownloadManager:
         self.db_path = Path(db_path) if db_path else config_dir() / "downloads.json"
         self.tasks: list[DownloadTask] = []
         self._lock = threading.RLock()
+        self._save_lock = threading.Lock()
         self._last_saved: str | None = None
         self._resume_ids: set[str] = set()
         self._signature: tuple = ()
@@ -58,9 +59,20 @@ class DownloadManager:
                 task.status = Status.QUEUED
             task.on_done = self._task_done
             task.on_change = self._task_changed
+            if getattr(task, "leftovers", None):  # temporary copies left behind last time
+                from .engine import _remove_quietly
+                task.leftovers = [p for p in task.leftovers if not _remove_quietly(p)]
             self.tasks.append(task)
 
     def save(self) -> None:
+        # One save at a time, from reading the list to replacing the file: engine, bridge,
+        # timer and window threads all save. Before, a save that read the list earlier could
+        # write after a later one (a removed download came back) or two writers shared the
+        # temporary file (the list file was left broken - and then the whole list was lost).
+        with self._save_lock:
+            self._save()
+
+    def _save(self) -> None:
         with self._lock:
             items = [t.to_dict() for t in self.tasks]
             for d in items:
@@ -85,7 +97,7 @@ class DownloadManager:
             start: bool = True, filename: str | None = None,
             headers: dict | None = None, cookies: dict | None = None,
             final_url: str | None = None, auto_folder: bool = False,
-            page: str = "", expect: dict | None = None) -> DownloadTask:
+            page: str = "", expect: dict | None = None, now: bool = False) -> DownloadTask:
         """``auto_folder``: ``dest_dir`` is only the base; the category folder inside it is
         chosen once the real file name is known."""
         task = DownloadTask(url.strip(), dest_dir or default_download_dir(), connections,
@@ -96,7 +108,7 @@ class DownloadManager:
             from .categories import folder_for
             base, rules = task.dest_dir, self.folder_rules
             task.choose_folder = lambda name, url: folder_for(base, name, url, page, rules)
-        return self.add_task(task, start)
+        return self.add_task(task, start, now)
 
     def _task_changed(self, task) -> None:
         """The file name / place became known: save the list (not a 'finished' event)."""
@@ -119,8 +131,10 @@ class DownloadManager:
                     return t
         return None
 
-    def add_task(self, task, start: bool = True):
-        """Add any task object (DownloadTask or video.VideoTask)."""
+    def add_task(self, task, start: bool = True, now: bool = False):
+        """Add any task object (DownloadTask or video.VideoTask). ``now``: start it at once even
+        when the limit of simultaneous downloads is reached (a download the user just clicked
+        in the browser: the browser would have started it; the limit is for the queue)."""
         task.on_done = self._task_done
         task.on_change = self._task_changed
         if hasattr(task, "mark_internet"):
@@ -134,6 +148,8 @@ class DownloadManager:
             task.status = Status.PAUSED
         with self._lock:
             self.tasks.append(task)
+        if start and now:
+            task.start()
         self.tick()
         return task
 

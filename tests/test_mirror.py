@@ -76,6 +76,52 @@ class MirrorTests(unittest.TestCase):
             self.assertIn("Content-Range: bytes 150000-199999/200000", head)
             self.assertEqual(body, data[150000:])
 
+    def test_unknown_size_is_sent_as_it_arrives(self):
+        """Found in an audit: a file without a size from the server was held until the whole
+        download finished, and given up after 10 minutes (the browser showed "failed")."""
+        with tempfile.TemporaryDirectory() as d:
+            data = os.urandom(400_000)
+            task = FakeTask(os.path.join(d, "x.bin"), data)
+            task.size = None
+            got_early = []
+
+            def grow():
+                with open(task.part, "r+b", buffering=0) as f:
+                    for i in range(0, len(data), 40_000):
+                        f.seek(i)
+                        f.write(data[i:i + 40_000])
+                        task.prefix = i + len(data[i:i + 40_000])
+                        time.sleep(0.05)
+                task.status = Status.COMPLETED
+            a, b = socket.socketpair()
+            threading.Thread(target=mirror.serve, args=(a, task, {"range": "bytes=0-"}, lambda: True),
+                             daemon=True).start()
+            threading.Thread(target=grow, daemon=True).start()
+            b.settimeout(30)
+            got = b""
+            while True:
+                chunk = b.recv(1 << 20)
+                if not chunk:
+                    break
+                got += chunk
+                if task.status != Status.COMPLETED and b"\r\n\r\n" in got:
+                    got_early.append(len(got))
+            head, body = got.split(b"\r\n\r\n", 1)
+            head = head.decode()
+            self.assertIn("200 OK", head)  # no size: no partial answer
+            self.assertNotIn("Content-Length", head)
+            self.assertTrue(got_early, "nothing arrived before the download ended")
+            self.assertEqual(body, data)
+
+    def test_range_at_the_end_is_answered_416(self):
+        with tempfile.TemporaryDirectory() as d:
+            data = os.urandom(1000)
+            task = FakeTask(os.path.join(d, "x.bin"), data)
+            task.grow(1000, 0)
+            head, body = self.receive(task, {"range": "bytes=1000-"})
+            self.assertIn("416", head)
+            self.assertEqual(body, b"")
+
     def test_non_ascii_names(self):
         value = mirror.content_disposition("relatório final.zip")
         self.assertIn("filename*=UTF-8''relat%C3%B3rio%20final.zip", value)

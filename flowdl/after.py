@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -89,9 +90,11 @@ _NO_WINDOW = 0x08000000 if os.name == "nt" else 0  # CREATE_NO_WINDOW
 
 
 # ----------------------------------------------------------------------- extract
-def extract_zip(path: str) -> str:
+def extract_zip(path: str, url: str = "", mark: bool = True) -> str:
     """Into a folder next to the zip, named after it. Paths that try to leave that folder
-    are refused by zipfile; there must be room for everything first."""
+    are refused by zipfile; there must be room for everything first. The extracted files
+    keep Windows' "came from the internet" mark, as when Explorer extracts a downloaded zip
+    (so Windows still warns before running a program that came inside it)."""
     if not zipfile.is_zipfile(path):
         return ""
     base = os.path.splitext(path)[0]
@@ -111,6 +114,11 @@ def extract_zip(path: str) -> str:
             z.extractall(target)
     except (OSError, zipfile.BadZipFile, RuntimeError) as exc:
         return f"não consegui extrair ({exc})"
+    if mark and url:
+        from .system import mark_from_internet
+        for root, _dirs, files in os.walk(target):
+            for name in files:
+                mark_from_internet(os.path.join(root, name), url)
     return f"extraído para {os.path.basename(target)}"
 
 
@@ -131,10 +139,21 @@ def command_for(template: str, path: str, url: str = "") -> list[str] | str:
     if os.name == "nt":
         filled = template
         for k, v in values.items():
-            filled = filled.replace("{" + k + "}", subprocess.list2cmdline([v]))
+            filled = filled.replace("{" + k + "}", _win_quote(v))
         return filled
     parts = shlex.split(template)
     return [p.format_map(_Keep(values)) for p in parts]
+
+
+def _win_quote(value: str) -> str:
+    """Always in double quotes: inside them cmd.exe (a .bat, "cmd /c ...") treats & | ^ < >
+    as plain text, and programs get one argument. (subprocess.list2cmdline only quotes values
+    with spaces: a server-chosen name like "x&calc.zip" or a link with "&" ran commands.)
+    Quotes cannot be in Windows names and are dropped from links; backslashes at the end are
+    doubled so they do not escape the closing quote."""
+    value = value.replace('"', "")
+    value = re.sub(r"(\\+)$", r"\1\1", value)
+    return f'"{value}"'
 
 
 class _Keep(dict):
@@ -168,7 +187,7 @@ def run(task, settings) -> list[str]:
         if verdict.startswith("⚠"):
             return notes
     if getattr(settings, "after_extract", False) and path.lower().endswith(".zip"):
-        msg = extract_zip(path)
+        msg = extract_zip(path, getattr(task, "url", ""), getattr(task, "mark_internet", True))
         if msg:
             notes.append(msg)
     if getattr(settings, "after_command", ""):

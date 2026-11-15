@@ -4,7 +4,7 @@ Written directly on sockets (instead of http.server) so the background process
 stays small: it sleeps in accept() and uses no CPU until the browser calls.
 
 Listens only on 127.0.0.1. Requests must carry the ``X-FlowDL`` header and must
-not come from a regular web page origin, so websites cannot push downloads.
+come from our extension (or a program on this computer), so websites cannot push downloads.
 """
 
 from __future__ import annotations
@@ -114,10 +114,18 @@ def _download_item(data: dict) -> dict:
     return item
 
 
+def origin_allowed(origin: str) -> bool:
+    """Only our extension (its ID is fixed by the "key" in its manifest) or a program on this
+    computer (no Origin at all) may talk to the app. Not "null": a web page can send that
+    (a sandboxed iframe, a data: page) and would otherwise be let in."""
+    from .nativehost import EXTENSION_ID
+    return origin == "" or origin.rstrip("/") == f"chrome-extension://{EXTENSION_ID}"
+
+
 def handle_request(method: str, path: str, headers: dict, body: bytes,
                    on_add: Callable[[dict], None], api=None) -> tuple[int, dict]:
     origin = headers.get("origin", "")
-    if origin.startswith(("http://", "https://")) or headers.get("x-flowdl") != "1":
+    if not origin_allowed(origin) or headers.get("x-flowdl") != "1":
         return 403, {"ok": False}
     if method == "GET" and path == "/ping":
         from . import __version__
@@ -225,7 +233,7 @@ class BrowserBridge:
                     k, v = line.split(":", 1)
                     headers[k.strip().lower()] = v.strip()
             origin = headers.get("origin", "")
-            if not origin.startswith(("http://", "https://")):
+            if origin and origin_allowed(origin):
                 # Only the extension (chrome-extension://...) is answered with these, never a
                 # web page. Browsers may check before a POST to this computer (a "preflight",
                 # including the private / local network check) and need to see them.
@@ -233,7 +241,7 @@ class BrowserBridge:
             else:
                 cors = ""
             if method == "OPTIONS":
-                allowed = cors and not origin.startswith(("http://", "https://"))
+                allowed = bool(cors)
                 conn.sendall((f"HTTP/1.1 {204 if allowed else 403} {'No Content' if allowed else 'Forbidden'}\r\n"
                               + (cors + "Access-Control-Allow-Methods: GET, POST\r\n"
                                  "Access-Control-Allow-Headers: Content-Type, X-FlowDL, X-FlowDL-Ext\r\n"

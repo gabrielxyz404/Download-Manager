@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import json
+import os
+import threading
 
 from .paths import config_dir, default_download_dir
 
+_SAVE_LOCK = threading.Lock()
 DEFAULT_COLUMNS = ["name", "size", "progress", "speed", "eta"]  # the details panel shows the rest
 OLD_DEFAULT_COLUMNS = ["name", "size", "progress", "speed", "eta", "conns", "status"]  # up to 0.8.0
 
@@ -64,8 +67,18 @@ class Settings:
         return self.categories or default_rules()
 
     def save(self) -> None:
-        data = {k: v for k, v in self.__dict__.items() if k != "path"}
-        try:
-            self.path.write_text(json.dumps(data, indent=1), encoding="utf-8")
-        except OSError:
-            pass
+        """Written to a temporary file and then put in place: a crash or two saves at the
+        same time can never leave a broken file (which reset every setting at the next start)."""
+        with _SAVE_LOCK:
+            try:
+                data = {k: v for k, v in dict(self.__dict__).items() if k != "path"}
+                text = json.dumps(data, indent=1)
+            except (RuntimeError, TypeError, ValueError):
+                return
+            tmp = self.path.with_name(self.path.name + ".tmp")
+            try:
+                self.path.parent.mkdir(parents=True, exist_ok=True)
+                tmp.write_text(text, encoding="utf-8")
+                os.replace(tmp, self.path)
+            except OSError:
+                pass

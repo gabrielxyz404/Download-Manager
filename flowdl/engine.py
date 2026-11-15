@@ -159,10 +159,24 @@ def _filename_from_headers(headers: Message, url: str) -> str:
     return sanitize_filename(name)
 
 
+# Names Windows keeps for devices, whatever the extension ("con.txt" opens the console).
+_RESERVED = {"CON", "PRN", "AUX", "NUL", *(f"COM{i}" for i in "123456789¹²³"),
+             *(f"LPT{i}" for i in "123456789¹²³")}
+MAX_NAME = 200  # Windows allows 255 per name; room for ".part.json" and " (12)"
+
+
 def sanitize_filename(name: str) -> str:
     name = os.path.basename(name.replace("\\", "/"))
     name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", name).strip(" .")
-    return name or "download"
+    if not name:
+        return "download"
+    if name.split(".")[0].strip().upper() in _RESERVED:
+        name = "_" + name
+    if len(name) > MAX_NAME:  # keep the extension: it decides how the file opens
+        stem, ext = os.path.splitext(name)
+        ext = ext if len(ext) <= 16 else ""
+        name = stem[:MAX_NAME - len(ext)].rstrip(" .") + ext
+    return name
 
 
 def unique_path(path: str) -> str:
@@ -369,6 +383,7 @@ class DownloadTask:
         self.stream_token: str | None = None
         self.rid: str | None = None  # the extension's request id for this download
         self.awaiting_browser = False  # finished here, waiting for the browser to take it
+        self.leftovers: list = []  # our temporary copies the system did not let us delete yet
         self.on_done = None  # called (from the download thread) when it stops for any reason
         self.on_change = None  # called when the file name / place is known (to save the list)
         # Picks the folder from the real file name (category folders); set by the manager for
@@ -428,6 +443,12 @@ class DownloadTask:
         if self.is_running():
             self._stop.set()
             self._naps.set()
+            # Wake every connection now: one waiting on a server that stopped sending would
+            # otherwise hold the pause (and the file, on Windows) for its 30 s timeout.
+            with self._lock:
+                conns = [w.conn for w in self._workers if w.alive and w.conn is not None]
+            for conn in conns:
+                conn.abort()
         elif self.status in (Status.QUEUED, Status.CONNECTING):
             self.status = Status.PAUSED
 
@@ -446,6 +467,7 @@ class DownloadTask:
             "mirror": self.mirror, "stream_token": self.stream_token, "rid": self.rid,
             "awaiting_browser": self.awaiting_browser,
             "expected_hash": self.expected_hash, "check": self.check,
+            "leftovers": [p for p in self.leftovers if os.path.exists(p)],
             "active_seconds": round(self.active_seconds, 2), "peak_speed": round(self.peak_speed),
             "first_byte_after": self.first_byte_after,
         }
@@ -466,6 +488,8 @@ class DownloadTask:
         t.expected_hash = d.get("expected_hash")
         t.check = d.get("check", "")
         t.active_seconds = d.get("active_seconds", 0.0)
+        t.leftovers = [p for p in d.get("leftovers", []) if isinstance(p, str)
+                       and p.endswith((".part", ".part.json"))]
         t.peak_speed = d.get("peak_speed", 0.0)
         t.first_byte_after = d.get("first_byte_after")
         t.after_ran = d.get("status") == Status.COMPLETED  # never again for an old download
@@ -636,6 +660,13 @@ class DownloadTask:
                 self._stop.wait(2 ** attempt)  # a network blip: try again
             if self._stop.is_set():
                 raise RuntimeError("pausado")  # _run reports it as paused, not as an error
+        else:
+            # Every try used up without an answer (e.g. the browser's expired address was
+            # dropped on the last try): one more try with the original link, then give up
+            # with the server's real answer (before: an internal error, "resp" unset).
+            resp = conn.get(self._current_url(), self._headers_for(self._current_url()), 0,
+                            FIRST_REQUEST - 1, cookies=self.cookies)
+            self._first_peer = conn.peer
         info = _info_from_response(resp)
         try:
             _check_expected(self.expect, info)
@@ -971,24 +1002,27 @@ class DownloadTask:
             # (_split_largest), so the browser's progress keeps up with the app's.
             n = 1
         step = self.size // n
-        self.segments = []
+        # Built aside and then put in place in one step: other threads (the window's map of
+        # the parts, the progress) read the list without a lock and must never see it half done.
+        segments = []
         for i in range(n):
             start = i * step
             end = self.size - 1 if i == n - 1 else (i + 1) * step - 1
-            self.segments.append(Segment(start, end))
-        if first_len > self.segments[0].end + 1:
+            segments.append(Segment(start, end))
+        if first_len > segments[0].end + 1:
             # The first answer already covers more than the first piece: grow piece 0 so
             # that connection is not cut, and shrink / drop the pieces it overlaps.
-            seg0 = self.segments[0]
+            seg0 = segments[0]
             seg0.end = min(first_len, self.size) - 1
             rest = []
-            for s in self.segments[1:]:
+            for s in segments[1:]:
                 if s.end <= seg0.end:
                     continue
                 if s.start <= seg0.end:
                     s.start = s.pos = seg0.end + 1
                 rest.append(s)
-            self.segments = [seg0] + rest
+            segments = [seg0] + rest
+        self.segments = segments
 
     def _split_largest(self) -> Segment | None:
         """Work for a free connection: an idle piece, or the second half of the largest
@@ -1069,8 +1103,10 @@ class DownloadTask:
 
     def _add_segment(self, new: Segment) -> Segment:
         new.active = True
-        self.segments.append(new)
-        self.segments.sort(key=lambda s: s.start)
+        # A new sorted list, put in place in one step. Sorting in place made the list look
+        # EMPTY to threads reading it meanwhile (CPython empties a list while sorting it): the
+        # download could then believe it was complete, or save an empty progress.
+        self.segments = sorted(self.segments + [new], key=lambda s: s.start)
         return new
 
     def _replace_slow_connections(self, now: float, target: int | None = None) -> None:
@@ -1321,7 +1357,8 @@ class DownloadTask:
         except _Finished:
             pass
         except Exception as exc:  # noqa: BLE001
-            self._worker_error = str(exc) or exc.__class__.__name__
+            if not self._stop.is_set():  # an error caused by pausing (connection cut) is no error
+                self._worker_error = str(exc) or exc.__class__.__name__
         finally:
             conn.close()
             if seg is not None:
@@ -1388,12 +1425,19 @@ class DownloadTask:
         self._finish()
 
     def release_to_browser(self, browser_path: str | None = None) -> None:
-        """The browser saved the file: remove our temporary copy."""
-        for p in (self._part_path, self._state_path):
-            try:
-                os.remove(p)
-            except OSError:
-                pass
+        """The browser saved the file: remove our temporary copy. On Windows it may still be
+        held for a moment (the antivirus scanning it, the stream closing): try again for a
+        minute instead of leaving a copy as big as the file behind."""
+        left = [p for p in (self._part_path, self._state_path) if not _remove_quietly(p)]
+        self.leftovers = left  # kept in the list: removed at the next start if still there
+        if left:
+            def retry():
+                for wait in (0.5, 1, 2, 4, 8, 15, 30):
+                    time.sleep(wait)
+                    left[:] = [p for p in left if not _remove_quietly(p)]
+                    if not left:
+                        return
+            threading.Thread(target=retry, name="cleanup", daemon=True).start()
         self.awaiting_browser = False
         if browser_path:
             self.path = browser_path
@@ -1440,6 +1484,17 @@ def format_size(n: float | None) -> str:
             return f"{n:.0f} {unit}" if unit == "B" else f"{n:.1f} {unit}"
         n /= 1024
     return f"{n:.2f} TB"
+
+
+def _remove_quietly(path: str) -> bool:
+    """Delete a file; True when it is gone (or was never there)."""
+    try:
+        os.remove(path)
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+    return True
 
 
 def format_time(sec: float | None) -> str:

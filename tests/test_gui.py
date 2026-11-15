@@ -227,6 +227,8 @@ class GuiTests(unittest.TestCase):
         with mock.patch.object(self.gui.simpledialog, "askinteger", return_value=500):
             app._global_limit()
         self.assertEqual(GLOBAL_LIMITER.rate, 500 * 1024)
+        # saved at once, not only when the window closes (a crash or log-off lost it)
+        self.assertIn('"global_limit_kb": 500', read_text(self.svc.settings.path))
         with mock.patch.object(self.gui.simpledialog, "askinteger", return_value=0):
             app._global_limit()
         self.assertEqual(GLOBAL_LIMITER.rate, 0)
@@ -420,6 +422,17 @@ class GuiTests(unittest.TestCase):
             app._update_link()
         self.assertEqual(task.url, self.base + "/novo.bin")
         self.wait_status(task, "Concluído")
+        # while it is downloading (found in an audit: it was left paused)
+        Handler.delay = 0.2
+        app.add_download(self.base + "/correndo.bin", self.dl, 2)
+        running = self.svc.manager.tasks[-1]
+        self.wait_status(running, "Baixando", 10)
+        self.select(running)
+        Handler.delay = 0.0
+        with mock.patch.object(self.gui.simpledialog, "askstring", return_value=self.base + "/outro.bin"):
+            app._update_link()
+        self.assertEqual(running.url, self.base + "/outro.bin")
+        self.wait_status(running, "Concluído")
 
     def test_copy_url_and_open_folder(self):
         app = self.open_app()

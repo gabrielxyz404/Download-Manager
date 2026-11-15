@@ -22,6 +22,15 @@ def post(port, path, payload):
         return r.status
 
 
+def _until(cond, secs, step=0.05):
+    end = time.monotonic() + secs
+    while time.monotonic() < end:
+        if cond():
+            return True
+        time.sleep(step)
+    return cond()
+
+
 class ServiceTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -82,6 +91,25 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(self.svc.pending[0]["url"], self.base + "/x.zip")
         self.assertEqual(self.svc.manager.tasks, [])
 
+    def test_browser_download_starts_at_once_even_with_the_queue_full(self):
+        """The user clicked it now: it starts now, whatever the limit of simultaneous downloads
+        (the limit is for the queue). Before, it waited in the queue while the browser was told
+        "ok" and dropped its own download - lost if the site refused the app later."""
+        Handler.delay = 0.05
+        self.svc.manager.max_active = 1
+        self.settings.show_progress_window = False
+        first = self.svc.manager.add(self.base + "/fila.bin", self.tmp.name, 2)
+        self.assertTrue(_until(first.is_running, 5))
+        self.svc.requests["r1"] = {"state": "waiting"}
+        self.svc.add_from_browser({"url": self.base + "/agora.bin", "rid": "r1", "mirror": True})
+        task = self.svc._task_for("r1")
+        self.assertTrue(_until(task.is_running, 3), task.status)
+        self.assertTrue(first.is_running())  # both run: 2 > the limit of 1
+        # the browser is told "started" only once data really arrived
+        self.assertTrue(_until(lambda: task.downloaded > 0, 10))
+        self.assertEqual(self.svc._verdict(task), "ok")
+        Handler.delay = 0.0
+
     def test_video_link_opens_dialog(self):
         post(self.port, "/video", {"page": "https://www.youtube.com/watch?v=abc", "media": []})
         self.assertEqual(self.wait_mode(), "dialog")
@@ -108,6 +136,38 @@ class ServiceTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SingleInstanceTests(unittest.TestCase):
+    def test_only_one_copy_runs_even_without_the_browser_link(self):
+        """Found in an audit: the app only asked the browser link (the local port) whether
+        another copy was running. With that link off, or two starts at the same moment, two
+        copies ran and wrote the same files. Now an exclusive lock decides."""
+        import subprocess
+        d = tempfile.mkdtemp()
+        cfg = os.path.join(d, "FlowDownloads")
+        os.makedirs(cfg)
+        with open(os.path.join(cfg, "settings.json"), "w", encoding="utf-8") as f:
+            json.dump({"browser_integration": False, "dest_dir": d, "show_tray": False,
+                       "check_updates": False}, f)
+        env = {**os.environ, "XDG_CONFIG_HOME": d, "APPDATA": d}
+        code = ("import sys; sys.path.insert(0, %r); from flowdl.service import run; run(background=True)"
+                % os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        first = subprocess.Popen([sys.executable, "-c", code], env=env)
+        try:
+            time.sleep(2.5)
+            self.assertIsNone(first.poll(), "the first copy must keep running")
+            second = subprocess.Popen([sys.executable, "-c", code], env=env)
+            self.assertEqual(second.wait(20), 0)  # left by itself
+            self.assertIsNone(first.poll())
+        finally:
+            first.kill()
+            first.wait(10)
+        # the lock goes with the process: a new copy can start afterwards
+        lock = service_mod._instance_lock(path=__import__("pathlib").Path(cfg) / "instance.lock")
+        self.assertTrue(lock)
+        self.assertIsNone(service_mod._instance_lock(path=__import__("pathlib").Path(cfg) / "instance.lock"))
+        lock.close()
 
 
 class RestartTests(unittest.TestCase):

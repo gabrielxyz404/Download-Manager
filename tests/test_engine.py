@@ -1,4 +1,5 @@
 import hashlib
+import json
 import os
 import re
 import tempfile
@@ -133,6 +134,186 @@ class EngineTests(unittest.TestCase):
         self.assertFileOk(again.path)
         self.assertGreater(paused_at, 0)
 
+    def test_parts_list_is_never_seen_empty_while_a_part_is_added(self):
+        """Found in an audit: adding a part sorted the list in place, and CPython shows a list
+        as EMPTY while it sorts it. Threads reading it without the lock (progress, "is it
+        complete?", the window's map) could then see no parts at all."""
+        import sys
+        from flowdl.engine import Segment
+        task = DownloadTask("http://127.0.0.1:1/x", tempfile.mkdtemp(), 8)
+        task.segments = [Segment(i * 100, i * 100 + 99) for i in range(40)]
+        stop, empty, reads = [False], [0], [0]
+
+        def reader():
+            while not stop[0]:
+                reads[0] += 1
+                if not task.segments or all(seg.remaining == 0 for seg in task.segments):
+                    empty[0] += 1
+
+        old = sys.getswitchinterval()
+        sys.setswitchinterval(0.0005)
+        t = threading.Thread(target=reader)
+        t.start()
+        try:
+            for i in range(3000):
+                with task._lock:
+                    task._add_segment(Segment(10_000 + i, 10_000 + i))
+        finally:
+            stop[0] = True
+            t.join()
+            sys.setswitchinterval(old)
+        self.assertGreater(reads[0], 100)
+        self.assertEqual(empty[0], 0, f"{empty[0]} of {reads[0]} reads saw no parts")
+
+    def test_expired_browser_address_on_the_last_try_falls_back_to_the_link(self):
+        """Found in an audit: when the browser's final address answered "busy" (503) and then
+        "forbidden" (403) on the LAST first-request try, the loop ended with no answer and the
+        download failed with an internal error. It must fall back to the original link."""
+        calls = []
+
+        class H(BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def log_message(self, *a):
+                pass
+
+            def do_GET(self):
+                calls.append(self.path)
+                if self.path.startswith("/final"):
+                    busy = sum(1 for c in calls if c.startswith("/final")) < 4
+                    self.send_response(503 if busy else 403)
+                    if busy:
+                        self.send_header("Retry-After", "1")
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    return
+                m = re.match(r"bytes=(\d+)-(\d*)", self.headers.get("Range", ""))
+                a = int(m.group(1)) if m else 0
+                b = int(m.group(2)) if m and m.group(2) else len(DATA) - 1
+                b = min(b, len(DATA) - 1)
+                self.send_response(206 if m else 200)
+                if m:
+                    self.send_header("Content-Range", f"bytes {a}-{b}/{len(DATA)}")
+                self.send_header("Content-Length", str(b - a + 1))
+                self.end_headers()
+                self.wfile.write(DATA[a:b + 1])
+
+        srv = ThreadingHTTPServer(("127.0.0.1", 0), H)
+        srv.daemon_threads = True
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        base = f"http://127.0.0.1:{srv.server_address[1]}"
+        try:
+            task = DownloadTask(base + "/orig.bin", tempfile.mkdtemp(), 2, final_url=base + "/final.bin")
+            task.start()
+            task.wait(60)
+            self.assertEqual(task.status, Status.COMPLETED, task.error)
+            with open(task.path, "rb") as f:
+                self.assertEqual(f.read(), DATA)
+        finally:
+            srv.shutdown()
+
+    def test_temporary_copy_is_removed_even_if_windows_holds_it_for_a_moment(self):
+        """Browser mode: once the browser has the file, our temporary copy (as big as the file)
+        is deleted. On Windows the antivirus or the closing stream may hold it for a moment;
+        the delete was tried once and the copy stayed forever. Now: tries again, and at the
+        next start of the app."""
+        from unittest import mock
+        from flowdl import engine as eng
+        from flowdl.manager import DownloadManager
+        d = tempfile.mkdtemp()
+        task = DownloadTask("http://127.0.0.1:1/f.bin", d, 2)
+        task.path = os.path.join(d, "f.bin")
+        for p in (task.path + ".part", task.path + ".part.json"):
+            with open(p, "wb") as f:
+                f.write(b"x" * 1000)
+        real, held = os.remove, {"n": 0}
+
+        def busy_remove(p):
+            if held["n"] < 2:  # held twice, then free
+                held["n"] += 1
+                raise PermissionError(13, "in use")
+            real(p)
+        with mock.patch.object(eng.os, "remove", busy_remove):
+            task.release_to_browser(os.path.join(d, "browser", "f.bin"))
+            self.assertTrue(task.leftovers)
+            end = time.monotonic() + 5
+            while time.monotonic() < end and os.path.exists(os.path.join(d, "f.bin.part")):
+                time.sleep(0.1)
+        self.assertFalse(os.path.exists(os.path.join(d, "f.bin.part")))
+        self.assertFalse(os.path.exists(os.path.join(d, "f.bin.part.json")))
+        # held for longer than the app ran: cleaned at the next start
+        with open(os.path.join(d, "g.bin.part"), "wb") as f:
+            f.write(b"x")
+        db = os.path.join(d, "db.json")
+        with open(db, "w", encoding="utf-8") as f:
+            json.dump({"tasks": [{**task.to_dict(), "leftovers": [os.path.join(d, "g.bin.part"),
+                                                                  os.path.join(d, "keep.txt")]}]}, f)
+        with open(os.path.join(d, "keep.txt"), "w") as f:
+            f.write("not ours")
+        DownloadManager(db_path=db)
+        self.assertFalse(os.path.exists(os.path.join(d, "g.bin.part")))
+        self.assertTrue(os.path.exists(os.path.join(d, "keep.txt")))  # only our temporary files
+
+    def test_list_saved_from_many_threads_stays_whole_and_current(self):
+        """Engine, bridge, timer and window threads all save the download list. Found in an
+        audit: two saves at once could leave the file broken (and the next start then lost
+        the whole list), or an older save could land after a newer one (a removed download
+        came back)."""
+        from flowdl.manager import DownloadManager
+        d = tempfile.mkdtemp()
+        db = os.path.join(d, "db.json")
+        mgr = DownloadManager(db_path=db)
+        for i in range(60):
+            mgr.add(f"http://127.0.0.1:1/f{i}.bin", d, 2, start=False)
+        stop, bad = [False], [0]
+
+        def saver():
+            while not stop[0]:
+                mgr._last_saved = None  # force a real write every time
+                mgr.save()
+
+        def reader():
+            while not stop[0]:
+                try:
+                    with open(db, encoding="utf-8") as f:
+                        json.load(f)
+                except ValueError:
+                    bad[0] += 1
+                except OSError:
+                    pass
+        threads = [threading.Thread(target=saver) for _ in range(4)] + [threading.Thread(target=reader)]
+        for t in threads:
+            t.start()
+        time.sleep(1.5)
+        removed = mgr.tasks[0]
+        mgr.remove(removed)  # saves; the other savers must not bring it back
+        time.sleep(0.5)
+        stop[0] = True
+        for t in threads:
+            t.join()
+        self.assertEqual(bad[0], 0)
+        again = DownloadManager(db_path=db)
+        self.assertEqual(len(again.tasks), 59)
+        self.assertNotIn(removed.id, {t.id for t in again.tasks})
+
+    def test_settings_file_is_never_left_half_written(self):
+        from unittest import mock
+        from flowdl.settings import Settings
+        st = Settings()
+        st.path = type(st.path)(os.path.join(tempfile.mkdtemp(), "settings.json"))
+        st.global_limit_kb = 123
+        st.save()
+        real = type(st.path).write_text
+
+        def crash(self_, *a, **k):  # the computer turns off in the middle of writing
+            real(self_, "{ broken", encoding="utf-8")
+            raise OSError("power cut")
+        st.global_limit_kb = 456
+        with mock.patch.object(type(st.path), "write_text", crash):
+            st.save()
+        with open(st.path, encoding="utf-8") as f:
+            self.assertEqual(json.load(f)["global_limit_kb"], 123)  # the last good version
+
     def test_dynamic_segmentation_splits(self):
         task = DownloadTask(self.base + "/file.bin", self.tmp.name, 3)
         task.size = len(DATA)
@@ -250,6 +431,15 @@ class StalledServer(BaseHTTPRequestHandler):
                     return
         except OSError:
             pass
+
+
+def _until(cond, secs, step=0.1):
+    end = time.monotonic() + secs
+    while time.monotonic() < end:
+        if cond():
+            return True
+        time.sleep(step)
+    return cond()
 
 
 class OutageServer(BaseHTTPRequestHandler):
@@ -381,6 +571,40 @@ class StallTests(unittest.TestCase):
             # before the fix it passed 100 in 45 s and kept growing
             self.assertLessEqual(OutageServer.peak, 18, f"servidor: {OutageServer.peak} {timeline}")
         finally:
+            server.shutdown()
+            tmp.cleanup()
+
+    def test_pause_is_immediate_even_while_the_server_is_silent(self):
+        """Pausing used to wait for every connection's 30 s timeout when the server had stopped
+        sending (and on Windows kept the file locked meanwhile). It must stop at once, as
+        "paused" (not an error), and continue to a correct file afterwards."""
+        OutageServer.reset()
+        OutageServer.outage = 8.0
+        ThreadingHTTPServer.request_queue_size = 64
+        server = ThreadingHTTPServer(("127.0.0.1", 0), OutageServer)
+        server.daemon_threads = True
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        tmp = tempfile.TemporaryDirectory()
+        try:
+            task = DownloadTask(f"http://127.0.0.1:{server.server_address[1]}/f.bin", tmp.name, 4)
+            task.start()
+            self.assertTrue(_until(lambda: OutageServer.outage_from is not None, 20))
+            time.sleep(1.0)  # every connection is now waiting on a silent server
+            t0 = time.monotonic()
+            task.pause()
+            task.wait(10)
+            took = time.monotonic() - t0
+            self.assertFalse(task.is_running())
+            self.assertLess(took, 3, f"{took:.1f}s")
+            self.assertEqual(task.status, Status.PAUSED, task.error)
+            time.sleep(max(0.0, OutageServer.outage_from + OutageServer.outage - time.monotonic()))
+            task.start()
+            task.wait(60)
+            self.assertEqual(task.status, Status.COMPLETED, task.error)
+            with open(task.path, "rb") as f:
+                self.assertEqual(hashlib.sha256(f.read()).digest(), hashlib.sha256(BIG).digest())
+        finally:
+            OutageServer.outage = 20.0
             server.shutdown()
             tmp.cleanup()
 

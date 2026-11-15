@@ -269,6 +269,9 @@ class _Paused(Exception):
     pass
 
 
+_NAME_LOCK = threading.Lock()
+
+
 class VideoTask:
     """Same interface as engine.DownloadTask, but downloads through yt-dlp."""
 
@@ -406,10 +409,35 @@ class VideoTask:
             # "Title.f137.mp4" -> "Title.mp4" (yt-dlp names each stream with its format id)
             self.filename = re.sub(r"\.f\d+(?=\.\w+$)", "", os.path.basename(name))
 
+    _reserved: set = set()  # names taken by videos being downloaded right now
+
     def _name_template(self) -> str:
         if self.title:  # title shown in the browser tab / chosen by the user
-            return sanitize_filename(self.title)[:150].replace("%", "%%") + ".%(ext)s"
+            first = sanitize_filename(self.title)[:150]
+            base = getattr(self, "_reserved_name", None)
+            if base is None and self.filename and self.filename != sanitize_filename(self.title):
+                # resuming (the real name, with its extension, came from an earlier run): the
+                # same name, so it continues instead of starting over
+                base = os.path.splitext(self.filename)[0]
+            if base is None:
+                base = self._free_name(first)
+            return base.replace("%", "%%") + ".%(ext)s"
         return "%(title).150B.%(ext)s"
+
+    def _free_name(self, base: str) -> str:
+        """The same video in another quality, or two streams with the same tab title: a new
+        name ("Title (2)"). Before, yt-dlp said "already downloaded" and the download was
+        marked finished pointing at the OTHER file."""
+        import glob
+        name, n = base, 1
+        with _NAME_LOCK:
+            while (name in VideoTask._reserved
+                   or glob.glob(os.path.join(glob.escape(self.dest_dir), glob.escape(name) + ".*"))):
+                n += 1
+                name = f"{base} ({n})"
+            VideoTask._reserved.add(name)
+            self._reserved_name = name
+        return name
 
     def _run(self) -> None:
         os.makedirs(self.dest_dir, exist_ok=True)

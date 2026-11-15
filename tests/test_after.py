@@ -2,6 +2,7 @@
 
 import hashlib
 import os
+import subprocess
 import sys
 import tempfile
 import time
@@ -82,6 +83,24 @@ class ExtractTests(unittest.TestCase):
             self.assertIn("palavra-passe", after.extract_zip(locked))
 
 
+class ExtractMarkTests(unittest.TestCase):
+    def test_extracted_files_keep_the_internet_mark(self):
+        """Found in an audit: files taken out of a downloaded zip lost Windows' "came from the
+        internet" mark, so a program inside ran without the usual warning."""
+        from unittest import mock
+        with tempfile.TemporaryDirectory() as d:
+            z = os.path.join(d, "pacote.zip")
+            with zipfile.ZipFile(z, "w") as f:
+                f.writestr("programa.exe", b"MZ")
+                f.writestr("pasta/leia.txt", b"oi")
+            marked = []
+            with mock.patch("flowdl.system.mark_from_internet", lambda p, u, r=None: marked.append((p, u))):
+                self.assertIn("extraído", after.extract_zip(z, "https://site/pacote.zip"))
+            names = sorted(os.path.relpath(p, d) for p, _ in marked)
+            self.assertEqual(names, [os.path.join("pacote", "pasta", "leia.txt"), os.path.join("pacote", "programa.exe")])
+            self.assertTrue(all(u == "https://site/pacote.zip" for _, u in marked))
+
+
 class CommandTests(unittest.TestCase):
     def test_names_with_spaces_and_symbols_stay_one_argument(self):
         path = os.path.join(tempfile.gettempdir(), "o meu ficheiro & outro.zip")
@@ -90,6 +109,27 @@ class CommandTests(unittest.TestCase):
             self.assertIn('"' + path + '"', cmd)
         else:
             self.assertEqual(cmd, ["programa", path, "--nome", os.path.basename(path)])
+
+    def test_symbols_in_names_and_links_never_run_as_commands_on_windows(self):
+        """Found in an audit: on Windows only values with spaces were quoted, so a server-chosen
+        name like "x&calc.zip" or any link with "&" ran commands through cmd.exe / a .bat."""
+        from unittest import mock
+        with mock.patch.object(after.os, "name", "nt"):
+            cmd = after.command_for("cmd /c echo {nome} {url} {pasta}", os.path.join("d", "x&calc.zip"),
+                                    'https://a/?a=1&b="2"|c^')
+        self.assertEqual(cmd, 'cmd /c echo "x&calc.zip" "https://a/?a=1&b=2|c^" "d"')
+        self.assertEqual(after._win_quote("C:\\pasta\\"), '"C:\\pasta\\\\"')  # \ before the quote
+
+    @unittest.skipUnless(os.name == "nt", "cmd.exe")
+    def test_cmd_receives_the_ampersand_as_text(self):
+        with tempfile.TemporaryDirectory() as d:
+            out = os.path.join(d, "saida.txt")
+            path = os.path.join(d, "x&y.zip")
+            open(path, "wb").close()
+            subprocess.run(after.command_for(f'cmd /c echo {{url}}>"{out}"', path, "https://a/?a=1&b=2"),
+                           timeout=30)
+            with open(out, encoding="mbcs") as f:
+                self.assertIn("a=1&b=2", f.read())
 
     def test_command_really_runs(self):
         with tempfile.TemporaryDirectory() as d:

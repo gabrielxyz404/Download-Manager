@@ -34,14 +34,25 @@ class Scheduler:
         if now.weekday() not in self.days:
             return []
         events = []
-        hm = now.strftime("%H:%M")
         for name, enabled, at in (("start", self.start_enabled, self.start_time),
                                   ("stop", self.stop_enabled, self.stop_time)):
             key = f"{name}-{now.date()}-{at}"
-            if enabled and hm == at and key not in self._fired:
+            if not enabled or key in self._fired:
+                continue
+            try:
+                h, m = (int(x) for x in at.split(":"))
+            except ValueError:
+                continue
+            late = (now - now.replace(hour=h, minute=m, second=0, microsecond=0)).total_seconds()
+            # Not only that exact minute: the computer may have been asleep or busy then.
+            # Up to CATCH_UP late it still happens (once); later than that it waits for tomorrow.
+            if 0 <= late <= CATCH_UP_S:
                 self._fired.add(key)
                 events.append(name)
         return events
+
+
+CATCH_UP_S = 15 * 60
 
 
 def shutdown_computer() -> None:

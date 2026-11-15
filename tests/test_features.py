@@ -101,6 +101,14 @@ class FeatureTests(unittest.TestCase):
         self.assertEqual(s.due(monday), ["start"])
         self.assertEqual(s.due(monday + dt.timedelta(seconds=20)), [])
         self.assertEqual(s.due(dt.datetime(2026, 11, 10, 2, 0)), [])  # Tuesday not selected
+        # The computer slept through 02:00 (or the app was busy that minute): it still starts
+        # when it wakes at 02:09, once; at 03:00 it is too late (waits for next week).
+        s2 = Scheduler(s.to_dict())
+        self.assertEqual(s2.due(dt.datetime(2026, 11, 9, 2, 9, 30)), ["start"])
+        self.assertEqual(s2.due(dt.datetime(2026, 11, 9, 2, 10)), [])
+        s3 = Scheduler(s.to_dict())
+        self.assertEqual(s3.due(dt.datetime(2026, 11, 9, 3, 0)), [])
+        self.assertEqual(s3.due(dt.datetime(2026, 11, 9, 1, 59)), [])
 
     def test_bridge(self):
         got = []
@@ -115,12 +123,19 @@ class FeatureTests(unittest.TestCase):
                 except urllib.error.HTTPError as e:
                     return e.code
 
-            ok = {"X-FlowDL": "1", "Content-Type": "application/json", "Origin": "chrome-extension://abc"}
+            ext = "chrome-extension://iomfaojagjphjdphkipgejgebijmpfph"  # our extension (fixed ID)
+            ok = {"X-FlowDL": "1", "Content-Type": "application/json", "Origin": ext}
             self.assertEqual(post(ok, {"url": "https://a/b.zip", "cookies": "k=v"}), 200)
+            # Not "null" (a web page can send it: sandboxed iframe, data: page), not another
+            # extension. Found in an audit: a site could push downloads with Origin: null.
+            for bad in ("null", "chrome-extension://abcdefghijklmnopabcdefghijklmnop", "file://"):
+                self.assertEqual(post({**ok, "Origin": bad}, {"url": "https://a/x.zip"}), 403, bad)
+            no_origin = {k: v for k, v in ok.items() if k != "Origin"}  # a program on this PC
+            self.assertEqual(post(no_origin, {"url": "https://a/local.zip"}), 200)
             self.assertEqual(post({"Content-Type": "application/json"}, {"url": "https://a/c"}), 403)
             self.assertEqual(post({**ok, "Origin": "https://evil.example"}, {"url": "https://a/d"}), 403)
             self.assertEqual(post(ok, {"url": "javascript:alert(1)"}), 400)
-            self.assertEqual([g["url"] for g in got], ["https://a/b.zip"])
+            self.assertEqual([g["url"] for g in got], ["https://a/b.zip", "https://a/local.zip"])
             self.assertEqual(got[0]["cookies"], "k=v")
 
             # A browser may check first (preflight, incl. the local network check): answered
@@ -135,15 +150,16 @@ class FeatureTests(unittest.TestCase):
                     return r.status, dict(r.headers)
                 except urllib.error.HTTPError as e:
                     return e.code, dict(e.headers)
-            code, h = options("chrome-extension://abc")
+            code, h = options(ext)
             self.assertEqual(code, 204)
-            self.assertEqual(h.get("Access-Control-Allow-Origin"), "chrome-extension://abc")
+            self.assertEqual(h.get("Access-Control-Allow-Origin"), ext)
             self.assertEqual(h.get("Access-Control-Allow-Private-Network"), "true")
             self.assertIn("X-FlowDL", h.get("Access-Control-Allow-Headers", ""))
-            code, h = options("https://evil.example")
-            self.assertEqual(code, 403)
-            self.assertNotIn("Access-Control-Allow-Origin", h)
-            self.assertEqual(len(got), 1)  # a check never adds anything
+            for bad in ("https://evil.example", "null"):
+                code, h = options(bad)
+                self.assertEqual(code, 403, bad)
+                self.assertNotIn("Access-Control-Allow-Origin", h)
+            self.assertEqual(len(got), 2)  # a check never adds anything
         finally:
             bridge.stop()
 

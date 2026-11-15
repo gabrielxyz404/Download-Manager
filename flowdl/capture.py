@@ -15,6 +15,10 @@ DEFAULT_TYPES = (
 ).split()
 
 # Types that mean "a file to save" when the name says nothing.
+# Servers' "just a file" types: they map to ".bin", which says nothing about the file - so
+# removing "bin" from the list must not stop these downloads from being taken.
+GENERIC_MIMES = ("application/octet-stream", "binary/octet-stream", "application/force-download",
+                 "application/download", "application/x-download", "application/binary")
 DOWNLOAD_MIMES = ("application/octet-stream", "application/zip", "application/x-msdownload",
                   "application/x-msdos-program", "application/vnd.android.package-archive",
                   "application/x-7z-compressed", "application/x-rar-compressed", "application/x-iso9660-image",
@@ -54,10 +58,16 @@ def host_matches(pattern: str, host: str) -> bool:
 
 
 def skipped_site(settings, *urls: str) -> str | None:
-    """The entry of the "never from these sites" list that covers one of these addresses."""
+    """The entry of the "never from these sites" list that covers one of these addresses.
+    An entry starting with "!" is an exception ("!drive.google.com" next to "google.com")."""
     hosts = {(urllib.parse.urlsplit(u).hostname or "").lower() for u in urls if u}
-    for pattern in getattr(settings, "capture_skip_sites", []):
-        if any(host_matches(pattern, h) for h in hosts if h):
+    entries = list(getattr(settings, "capture_skip_sites", []))
+    allowed = [p[1:] for p in entries if p.startswith("!")]
+    for pattern in entries:
+        if pattern.startswith("!"):
+            continue
+        covered = [h for h in hosts if h and host_matches(pattern, h)]
+        if any(not any(host_matches(a, h) for a in allowed) for h in covered):
             return pattern
     return None
 
@@ -71,13 +81,23 @@ def set_site_skipped(settings, host: str, skipped: bool) -> bool:
     if not host or "/" in host or " " in host:
         return False
     sites = list(getattr(settings, "capture_skip_sites", []))
+    before = list(sites)
     if skipped:
-        if skipped_site(settings, "https://" + host + "/"):
-            return False
-        sites.append(host)
+        sites = [p for p in sites if p != "!" + host]  # an exception for it goes away
+        settings.capture_skip_sites = sites
+        if not skipped_site(settings, "https://" + host + "/"):
+            sites.append(host)
+        settings.capture_skip_sites = sites
+        return sites != before
     else:
-        kept = [p for p in sites if not host_matches(p, host) and not host_matches(p, "www." + host)]
-        if len(kept) == len(sites):
+        # Only this site's own entries go; a rule for a bigger site (google.com when this is
+        # drive.google.com) stays, with an exception for this one. (Before: turning one
+        # sub-site back on removed the whole google.com rule.)
+        kept = [p for p in sites if p.lstrip("!") not in (host, "www." + host)]
+        settings.capture_skip_sites = kept
+        if skipped_site(settings, "https://" + host + "/"):
+            kept.append("!" + host)
+        if kept == sites:
             return False
         sites = kept
     settings.capture_skip_sites = sites
@@ -98,6 +118,8 @@ def should_capture(settings, url: str, final_url: str = "", filename: str = "", 
     # The browser often does not know the name yet (links like /download?id=7): use the type of
     # content the server announced, checked against the same list when it maps to a file type.
     mime = (mime or "").split(";")[0].strip().lower()
+    if mime in GENERIC_MIMES:
+        return True  # "some file" with no name to judge by: a download (the browser saves it too)
     ext = MIME_TYPES.get(mime) or (mimetypes.guess_extension(mime) or "").lstrip(".")
     if ext:
         return ext in types

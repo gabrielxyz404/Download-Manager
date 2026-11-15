@@ -38,16 +38,20 @@ def serve(conn: socket.socket, task, headers: dict, is_alive) -> bool:
     f = None
     try:
         deadline = time.monotonic() + WAIT_FOR_START_S
-        while task.path is None or (task.size is None and task.status != Status.COMPLETED):
+        while task.path is None:  # the first answer gives the name and size
             if task.status == Status.ERROR or not is_alive() or time.monotonic() > deadline:
                 _send_error(conn, 404, "Not Found")
                 return False
-            time.sleep(0.2)
+            time.sleep(0.05)
         size = task.size
         m = re.match(r"bytes=(\d+)-", headers.get("range", ""))
+        if size is None:
+            # No size from the server (one stream from the start): sent as it arrives, ended by
+            # closing. Before: held until the whole download finished, and given up after 10 min.
+            m = None
         pos = int(m.group(1)) if m else 0  # the browser resumes with a Range request
-        if size is not None and pos > size:
-            _send_error(conn, 416, "Range Not Satisfiable")
+        if m and size is not None and pos >= size and size > 0:
+            _send_error(conn, 416, "Range Not Satisfiable")  # nothing left from there
             return False
         lines = [
             "HTTP/1.1 206 Partial Content" if m else "HTTP/1.1 200 OK",
@@ -78,16 +82,16 @@ def serve(conn: socket.socket, task, headers: dict, is_alive) -> bool:
                 f.seek(pos)
                 data = f.read(min(BLOCK, available - pos))  # never beyond what is downloaded
                 if not data:
-                    time.sleep(0.1)
+                    time.sleep(0.05)
                     continue
                 conn.sendall(data)
                 pos += len(data)
                 continue
-            if task.status == Status.COMPLETED and (size is None or pos >= size):
+            if task.status == Status.COMPLETED and pos >= (size if size is not None else task.available_prefix()):
                 return True
             if task.status == Status.ERROR or not is_alive():
                 return False  # closing the connection makes the browser show a failed download
-            time.sleep(0.2)
+            time.sleep(0.05)  # caught up: the browser is at most this far behind the app
     except OSError:
         return False  # the browser paused / cancelled / closed
     finally:

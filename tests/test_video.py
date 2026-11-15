@@ -98,6 +98,25 @@ class VideoTests(unittest.TestCase):
         t.speed_limit = 0
         self._run(t)
 
+    def test_same_title_twice_gets_its_own_file(self):
+        """Found in an audit: the same video in another quality (or two streams with the same
+        tab title) collided: yt-dlp said "already downloaded" and the download was marked
+        finished pointing at the other file."""
+        from flowdl.video import VideoTask
+        with tempfile.TemporaryDirectory() as d:
+            open(os.path.join(d, "Aula 1.mp4"), "wb").close()
+            a = VideoTask("https://x/v", d, title="Aula 1")
+            b = VideoTask("https://x/v", d, title="Aula 1")
+            na, nb = a._name_template(), b._name_template()
+            self.assertEqual(na, "Aula 1 (2).%(ext)s")
+            self.assertEqual(nb, "Aula 1 (3).%(ext)s")  # running at the same time: not the same either
+            self.assertEqual(a._name_template(), na)  # resumed: the same name, so it continues
+            c = VideoTask("https://x/v", d, title="Aula 1")
+            c.filename = "Aula 1 (7).mp4"  # the name it had before the app was closed
+            self.assertEqual(c._name_template(), "Aula 1 (7).%(ext)s")
+            dotted = VideoTask("https://x/v", d, title="Meu.Video")
+            self.assertEqual(dotted._name_template(), "Meu.Video.%(ext)s")
+
     def test_persist_roundtrip(self):
         t = video.VideoTask(self.base + "/x", self.tmp.name, "b", True, "T", quality="Só áudio")
         d = json.loads(json.dumps(t.to_dict()))

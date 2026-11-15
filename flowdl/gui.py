@@ -200,7 +200,7 @@ class AddDialog(tk.Toplevel):
                                      self.name.get().strip() or None, self.headers,
                                      cookies=self.cookies, final_url=self.final_url if same_link else None,
                                      auto_folder=bool(self.auto.get()),
-                                     page=(self.headers or {}).get("Referer", ""))
+                                     page=(self.headers or {}).get("Referer", ""), now=bool(self.rid))
         from .after import algo_for, clean_hash
         wanted = clean_hash(self.checksum.get())
         if wanted and algo_for(wanted):
@@ -1268,6 +1268,11 @@ class SettingsDialog(tk.Toplevel):
         self._check(text, var, changed)
         return var
 
+    def _set(self, key: str, value) -> None:
+        """Change a setting and save it at once (a crash or log-off must not lose it)."""
+        setattr(self.app.settings, key, value)
+        self.app.settings.save()
+
     def _row(self, text: str, button: str, command) -> ttk.Label:
         row = ttk.Frame(self.page)
         row.pack(anchor="w", fill="x", pady=3)
@@ -1307,7 +1312,7 @@ class SettingsDialog(tk.Toplevel):
             self._head("Fila")
             self._row(f"Downloads ao mesmo tempo: {app.manager.max_active}", "Alterar...", app._max_active)
             self._check("Retomar downloads ao abrir o Flow Downloads", app.resume_var,
-                        lambda: setattr(st, "auto_resume", app.resume_var.get()))
+                        lambda: self._set("auto_resume", app.resume_var.get()))
             self._head("Quando terminar")
             self._row("Abrir, extrair, analisar com o antivírus, correr um comando", "Escolher...",
                       lambda: AfterDialog(app))
@@ -1322,17 +1327,17 @@ class SettingsDialog(tk.Toplevel):
             self._head("Extensão", first=True)
             self._check("Receber downloads do navegador", app.bridge_var, app._toggle_bridge)
             self._check("Perguntar antes de baixar (em vez de começar logo)", app.confirm_var,
-                        lambda: setattr(st, "confirm_browser", app.confirm_var.get()))
+                        lambda: self._set("confirm_browser", app.confirm_var.get()))
             self._setting_check("Mostrar a janela de progresso", "show_progress_window")
             self._row("Tipos de ficheiro apanhados e sites ignorados", "Editar...", lambda: CaptureDialog(app))
             self._row("Como instalar a extensão no Brave / Chrome / Edge", "Ver...", app._extension_help)
             self._head("Área de transferência")
             self._check("Detetar links copiados", app.clip_var,
-                        lambda: setattr(st, "watch_clipboard", app.clip_var.get()))
+                        lambda: self._set("watch_clipboard", app.clip_var.get()))
         elif section == "Sistema":
             self._head("Segundo plano", first=True)
             self._check("Continuar em segundo plano ao fechar a janela", app.bg_var,
-                        lambda: setattr(st, "run_in_background", app.bg_var.get()))
+                        lambda: self._set("run_in_background", app.bg_var.get()))
             ttk.Checkbutton(self.page, text="Iniciar com o computador (em segundo plano)",
                             variable=app.autostart_var, command=app._toggle_autostart,
                             state="normal" if autostart.supported() else "disabled").pack(anchor="w", pady=3)
@@ -1755,8 +1760,11 @@ class App(tk.Tk):
                                    parent=self)
             return
         t.pause()
+        t.wait(5)  # stopped (pausing is immediate) before the address changes under it
         t.url, t._final_url = url, None
         t.error = None
+        if t.status not in (Status.PAUSED, Status.ERROR):
+            t.status = Status.PAUSED
         self.manager.save()
         self.manager.resume(t)
         self.status_var.set(f"Link atualizado: {t.filename or url}")
@@ -1897,11 +1905,13 @@ class App(tk.Tk):
 
     # ---------------------------------------------------------------- actions
     def add_download(self, url, folder, conns, start=True, filename=None, headers=None,
-                     cookies=None, final_url=None, auto_folder=False, page=""):
+                     cookies=None, final_url=None, auto_folder=False, page="", now=False):
         self.settings.dest_dir = folder or self.settings.dest_dir
         self.settings.connections = conns
+        self.settings.save()
         task = self.manager.add(url, folder, conns, start=start, filename=filename, headers=headers,
-                                cookies=cookies, final_url=final_url, auto_folder=auto_folder, page=page)
+                                cookies=cookies, final_url=final_url, auto_folder=auto_folder, page=page,
+                                now=now)
         self._last_clip = url
         self.status_var.set(f"Adicionado: {filename or url}")
         self._refresh(schedule=False)
@@ -1944,6 +1954,7 @@ class App(tk.Tk):
         path = filedialog.askdirectory(initialdir=self.settings.dest_dir)
         if path:
             self.settings.dest_dir = path
+            self.settings.save()
             self.status_var.set(f"Pasta padrão: {path}")
 
     def _max_active(self) -> None:
@@ -1951,6 +1962,8 @@ class App(tk.Tk):
                                     initialvalue=self.manager.max_active, minvalue=1, maxvalue=20, parent=self)
         if n:
             self.manager.max_active = self.settings.max_active = n
+            self.settings.save()
+            self.manager.tick()
 
     def _global_limit(self) -> None:
         kb = simpledialog.askinteger(
@@ -1958,6 +1971,7 @@ class App(tk.Tk):
             initialvalue=self.settings.global_limit_kb, minvalue=0, parent=self)
         if kb is not None:
             self.settings.global_limit_kb = kb
+            self.settings.save()
             GLOBAL_LIMITER.rate = kb * 1024
             self.status_var.set("Limite removido" if kb == 0 else f"Limite total: {kb} KB/s")
 
@@ -2145,6 +2159,7 @@ class App(tk.Tk):
     # ------------------------------------------------------- browser bridge
     def _toggle_bridge(self) -> None:
         self.settings.browser_integration = self.bridge_var.get()
+        self.settings.save()
         if self.bridge_var.get():
             if not self.service.start_bridge():
                 self.status_var.set("Integração com navegador indisponível: a porta já está em uso")

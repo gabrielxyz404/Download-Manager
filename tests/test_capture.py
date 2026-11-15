@@ -47,6 +47,31 @@ class CaptureRuleTests(unittest.TestCase):
     def test_final_address_name(self):
         self.assertTrue(should_capture(S, "https://a.com/go?id=9", final_url="https://cdn.a.com/file.7z"))
 
+    def test_turning_a_sub_site_back_on_keeps_the_bigger_rule(self):
+        """Found in an audit: turning capture back on for drive.google.com (in the popup)
+        removed the whole "google.com" rule. Now that one site gets an exception."""
+        from flowdl.capture import set_site_skipped, skipped_site
+        st = Settings()
+        st.capture_skip_sites = ["google.com"]
+        self.assertTrue(skipped_site(st, "https://drive.google.com/x.zip"))
+        self.assertTrue(set_site_skipped(st, "drive.google.com", False))
+        self.assertFalse(skipped_site(st, "https://drive.google.com/x.zip"))
+        self.assertTrue(skipped_site(st, "https://mail.google.com/x.zip"))  # the rule stays
+        self.assertIn("google.com", st.capture_skip_sites)
+        self.assertFalse(set_site_skipped(st, "drive.google.com", False))  # nothing changes
+        self.assertTrue(set_site_skipped(st, "drive.google.com", True))  # off again
+        self.assertTrue(skipped_site(st, "https://drive.google.com/x.zip"))
+        self.assertEqual(st.capture_skip_sites, ["google.com"])
+
+    def test_generic_file_type_is_taken_whatever_the_list(self):
+        """Found in an audit: "application/octet-stream" (a link with no name) mapped to ".bin",
+        so removing "bin" from the list stopped all such downloads."""
+        st = Settings()
+        st.capture_types = ["zip", "exe"]
+        for mime in ("application/octet-stream", "binary/octet-stream; charset=x", "application/force-download"):
+            self.assertTrue(should_capture(st, "https://a/get?id=7", mime=mime), mime)
+        self.assertFalse(should_capture(st, "https://a/get?id=7", mime="application/pdf"))
+
     def test_all_types_and_skipped_sites(self):
         class All(S):
             capture_all_types = True

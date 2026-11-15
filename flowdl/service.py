@@ -207,12 +207,11 @@ class Service:
             return "ok"
         if task.downloaded > 0 or task.status in (Status.COMPLETED, Status.PAUSED):
             return "ok"
+        # (Browser downloads start at once, whatever the limit of simultaneous downloads:
+        # "ok" only once the site has really sent data, so the browser never drops its own
+        # download for one the site might refuse later.)
         if task.status == Status.QUEUED and not task.is_running():
-            # Waiting for a free slot (the user's limit of simultaneous downloads): it will
-            # start later, so the browser hands it over now as it always did.
-            running = sum(1 for t in self.manager.tasks if t.is_running())
-            if running >= self.manager.max_active:
-                return "ok"
+            return "ok"  # not one of ours (e.g. added paused and resumed later)
         if task.status == Status.ERROR:
             return task.error or "erro"
         return None
@@ -514,7 +513,8 @@ class Service:
         task = self.manager.add(item["url"], self.settings.dest_dir, self.settings.connections,
                                 filename=item.get("filename"), headers=headers, cookies=cookies,
                                 final_url=item.get("final_url"), auto_folder=True,
-                                page=item.get("referrer") or "", expect=item.get("expect"))
+                                page=item.get("referrer") or "", expect=item.get("expect"),
+                                now=bool(item.get("rid")))
         self.bind_request(item.get("rid"), task)
         if self.settings.show_progress_window:
             self.pending.append({"kind": "progress", "task": task.id})
@@ -539,6 +539,7 @@ class Service:
             if slim_at is not None:
                 left = max(0.0, slim_at - time.monotonic())
                 timeout = left if timeout is None else min(timeout, left)
+            self.check_scheduler()  # also when events keep arriving (it checks at most every 30 s)
             try:
                 kind, data = self.events.get(timeout=timeout)
             except queue.Empty:
@@ -617,6 +618,38 @@ class Service:
 
 
 # --------------------------------------------------------------- entry point
+_INSTANCE_LOCK = None
+
+
+def _instance_lock(wait: float = 0.0, path=None):
+    """Only one copy of the app at a time: an exclusive lock on a file, held while the app
+    runs and released by the system when it ends (even if it crashes). None if another copy
+    holds it after ``wait`` seconds."""
+    import time
+    path = path or (config_dir() / "instance.lock")
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        f = open(path, "a+b")
+    except OSError:
+        return True  # cannot even create it (read-only profile?): do not block the app
+    deadline = time.monotonic() + wait
+    while True:
+        try:
+            if os.name == "nt":
+                import msvcrt
+                f.seek(0)
+                msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return f
+        except OSError:
+            if time.monotonic() >= deadline:
+                f.close()
+                return None
+            time.sleep(0.2)
+
+
 def _existing_instance(port: int = DEFAULT_PORT, show: bool = True) -> bool:
     """If Flow Downloads is already running, return True (and ask it to show its window
     when the user opened the program; not when it was started in the background)."""
@@ -658,6 +691,14 @@ def _run(background: bool) -> None:
         faulthandler.register(signal.SIGUSR1, file=open(config_dir() / "stacks.log", "a"), all_threads=True)
     if _existing_instance(show=not background):
         log("already running")
+        return
+    global _INSTANCE_LOCK
+    _INSTANCE_LOCK = _instance_lock(wait=6.0)  # a restarting copy may take a moment to leave
+    if _INSTANCE_LOCK is None:
+        # Another copy is running but did not answer (its browser link is off or it is just
+        # starting): never run two - both would write the same files and the same list.
+        log("already running (lock held)")
+        _existing_instance(show=not background)
         return
     svc = Service()
     svc.slim_enabled = True

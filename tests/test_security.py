@@ -172,6 +172,22 @@ class SecurityTests(unittest.TestCase):
 
 
 
+class FileNameTests(unittest.TestCase):
+    def test_windows_device_names_and_very_long_names(self):
+        """A server could name its file "con.txt" or "NUL": on Windows those open a device
+        (or fail at the end). Names over 255 characters fail too. Both are made safe."""
+        from flowdl.engine import MAX_NAME, sanitize_filename
+        for name in ("con.txt", "CON", "nul.tar.gz", "COM1.zip", "lpt9", "Aux.pdf"):
+            self.assertTrue(sanitize_filename(name).startswith("_"), name)
+        for name in ("console.txt", "comic.zip", "null.bin"):
+            self.assertEqual(sanitize_filename(name), name)
+        long = sanitize_filename("a" * 400 + ".zip")
+        self.assertLessEqual(len(long), MAX_NAME)
+        self.assertTrue(long.endswith(".zip"))
+        self.assertEqual(sanitize_filename("..\\..\\x/../evil.exe"), "evil.exe")
+        self.assertEqual(sanitize_filename(" . "), "download")
+
+
 class RefusedLinkTests(unittest.TestCase):
     def test_gives_up_when_fresh_addresses_never_work(self):
         """No endless loop: if every fresh address is refused, the download stops with a message."""
