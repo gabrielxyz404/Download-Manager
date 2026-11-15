@@ -168,6 +168,14 @@ class AddDialog(tk.Toplevel):
             self.folder.set(path)
 
     def _ok(self, start: bool) -> None:
+        if self.rid and self.app.service.request_state(self.rid) == "cancelled":
+            # The browser stopped waiting meanwhile and carries on with its own download:
+            # starting here too would download the file twice.
+            self._decided = True
+            messagebox.showinfo("Download do navegador", "O navegador já continuou este download "
+                                "sozinho (a app esperou demasiado pela confirmação).", parent=self)
+            self.destroy()
+            return
         url = self.url.get().strip()
         if not url.lower().startswith(("http://", "https://", "ftp://")):
             messagebox.showwarning("URL inválida", "O link deve começar com http://, https:// ou ftp://",
@@ -2070,7 +2078,9 @@ class App(tk.Tk):
 
         def work():
             try:
-                results.put(("ok", updater.download(update, str(config_dir() / "updates"))))
+                folder = str(config_dir() / "updates")
+                updater.clean_old(folder)  # earlier updates' installers are not needed any more
+                results.put(("ok", updater.download(update, folder)))
             except (OSError, ValueError) as exc:
                 results.put(("err", str(exc)))
         threading.Thread(target=work, daemon=True).start()
@@ -2085,7 +2095,13 @@ class App(tk.Tk):
                 self.status_var.set("A atualização falhou.")
                 messagebox.showerror("Atualizações", f"Não foi possível atualizar: {value}", parent=self)
                 return
-            updater.run_installer(value)
+            try:
+                updater.run_installer(value)
+            except OSError as exc:
+                self.status_var.set("A atualização falhou.")
+                messagebox.showerror("Atualizações", f"Não foi possível abrir o instalador: {exc}\n\n"
+                                     f"Pode corrê-lo à mão: {value}", parent=self)
+                return
             self.quit_all()  # the installer replaces the files and starts the app again
         self.after(300, done)
 

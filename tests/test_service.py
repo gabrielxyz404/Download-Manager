@@ -110,6 +110,69 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(self.svc._verdict(task), "ok")
         Handler.delay = 0.0
 
+    def test_has_it_started_is_answered_within_the_limit(self):
+        """The browser stops an extension whose request takes over 30 s (and the browser's own
+        paused download is then forgotten). Found in an audit: the answer could take 20 + 20 s."""
+        from flowdl.status import Status
+        old = service_mod.REQUEST_WAIT_S
+        service_mod.REQUEST_WAIT_S = 2
+        try:
+            class T:
+                id, downloaded, status, error = "t1", 0, Status.CONNECTING, None
+
+                def is_running(self):
+                    return True
+            self.svc.manager.tasks.append(T())
+            self.svc.requests["r"] = {"state": "waiting"}
+            threading.Timer(1.8, lambda: self.svc._set_request("r", state="started", task="t1",
+                                                                stream="/s")).start()
+            t0 = time.monotonic()
+            code, body = self.svc.api("GET", "/request/r", {})
+            self.assertLess(time.monotonic() - t0, 2.6)
+            self.assertEqual(body["state"], "waiting")  # "ask again"
+        finally:
+            service_mod.REQUEST_WAIT_S = old
+            self.svc.manager.tasks[:] = [t for t in self.svc.manager.tasks if not isinstance(t, T)]
+
+    def test_extension_giving_up_stops_a_pending_confirmation(self):
+        """Found in an audit: after the extension stopped waiting (30 min) the browser carried
+        on, but confirming the app's window later downloaded the file a second time."""
+        self.svc.requests["r9"] = {"state": "waiting"}
+        req = urllib.request.Request(f"http://127.0.0.1:{self.port}/control",
+                                     data=json.dumps({"rid": "r9", "action": "cancel"}).encode(),
+                                     headers={"X-FlowDL": "1", "Content-Type": "application/json"}, method="POST")
+        with urllib.request.urlopen(req, timeout=5) as r:
+            self.assertEqual(r.status, 200)
+        self.assertEqual(self.svc.request_state("r9"), "cancelled")
+        self.assertFalse(self.svc.busy())
+
+    def test_browser_saved_path_is_checked_and_marked_with_the_real_site(self):
+        """/mirror-done tells where the browser saved the file. Found in an audit: any path was
+        taken (and later hashed / extracted / opened); and the file's "came from the internet"
+        mark named the app (127.0.0.1) instead of the real site."""
+        from unittest import mock
+        from flowdl.engine import DownloadTask
+        task = DownloadTask("https://site.example/f.zip", self.tmp.name, 2,
+                            headers={"Referer": "https://site.example/page"})
+        task.size, task.status, task.stream_token, task.rid = 5, "Concluído", "tok", "rm"
+        task.path = os.path.join(self.tmp.name, "f.zip")
+        self.svc.manager.tasks.append(task)
+        self.svc.requests["rm"] = {"state": "started", "task": task.id}
+        marked = []
+        with mock.patch("flowdl.system.mark_from_internet", lambda p, u, r=None: marked.append((p, u, r))):
+            self.svc.api("POST", "/mirror-done", {"rid": "rm", "path": "C:/Windows/notepad.exe"})
+            self.assertEqual(task.path, os.path.join(self.tmp.name, "f.zip"))  # not taken
+            self.assertEqual(marked, [])
+            task.stream_token = "tok"
+            saved = os.path.join(self.tmp.name, "browser", "f.zip")
+            os.makedirs(os.path.dirname(saved))
+            with open(saved, "wb") as f:
+                f.write(b"12345")
+            self.svc.api("POST", "/mirror-done", {"rid": "rm", "path": saved})
+        self.assertEqual(task.path, saved)
+        self.assertEqual(marked, [(saved, "https://site.example/f.zip", "https://site.example/page")])
+        self.assertIsNone(task.stream_token)  # the address the browser used is closed
+
     def test_video_link_opens_dialog(self):
         post(self.port, "/video", {"page": "https://www.youtube.com/watch?v=abc", "media": []})
         self.assertEqual(self.wait_mode(), "dialog")

@@ -126,6 +126,7 @@ class Tray:
                                           wintypes.HWND, wintypes.LPVOID]
         user32.DestroyMenu.argtypes = [wintypes.HMENU]
         kernel32.GetModuleHandleW.restype = wintypes.HMODULE
+        user32.UnregisterClassW.argtypes = [wintypes.LPCWSTR, wintypes.HINSTANCE]
         self._nid_type = self._structs()
         taskbar_created = user32.RegisterWindowMessageW("TaskbarCreated")
 
@@ -168,6 +169,9 @@ class Tray:
         wc.lpfnWndProc = self._wndproc
         wc.hInstance = hinst
         wc.lpszClassName = "FlowDownloadsTray"
+        # A window kind registered by an earlier icon (switched off and on in the settings, or a
+        # cancelled restart) would keep calling THAT icon's function, already freed: crash.
+        user32.UnregisterClassW("FlowDownloadsTray", hinst)
         user32.RegisterClassW(ctypes.byref(wc))
         self.hwnd = user32.CreateWindowExW(0, "FlowDownloadsTray", "Flow Downloads", 0, 0, 0, 0, 0,
                                            None, None, hinst, None)
@@ -185,6 +189,7 @@ class Tray:
             user32.TranslateMessage(ctypes.byref(msg))
             user32.DispatchMessageW(ctypes.byref(msg))
         self.hwnd = None
+        user32.UnregisterClassW("FlowDownloadsTray", hinst)  # the next icon registers its own
 
     def _menu(self, hwnd) -> None:
         import ctypes

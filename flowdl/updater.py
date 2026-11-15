@@ -96,11 +96,35 @@ def install_command(installer: str) -> list[str]:
 
 
 def run_installer(installer: str) -> None:
-    flags = 0
-    if os.name == "nt":
-        flags = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS | 0x01000000
-    subprocess.Popen(install_command(installer), creationflags=flags, close_fds=True,
-                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    """Start the installer on its own (it outlives the app it replaces). Raises OSError if
+    it cannot be started at all (the caller tells the user)."""
+    def start(flags):
+        subprocess.Popen(install_command(installer), creationflags=flags, close_fds=True,
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    if os.name != "nt":
+        start(0)
+        return
+    detached = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
+    try:
+        start(detached | 0x01000000)  # CREATE_BREAKAWAY_FROM_JOB: survives the app's end
+    except OSError:
+        # Started from a "job" that forbids leaving it (e.g. by the browser): without that flag.
+        start(detached)
+
+
+def clean_old(folder, keep: str | None = None) -> None:
+    """Remove installers of earlier updates (tens of MB each)."""
+    try:
+        names = os.listdir(folder)
+    except OSError:
+        return
+    for name in names:
+        path = os.path.join(folder, name)
+        if name.startswith("FlowDownloads-Setup") and name.endswith(".exe") and path != keep:
+            try:
+                os.remove(path)
+            except OSError:
+                pass  # still running (the update that is installing right now)
 
 
 def can_install() -> bool:

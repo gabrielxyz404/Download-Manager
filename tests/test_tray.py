@@ -100,5 +100,24 @@ class WindowsTrayTests(unittest.TestCase):
         self.assertFalse(t._thread.is_alive())
 
 
+    def test_icon_switched_off_and_on_again_calls_the_new_one(self):
+        """Found in an audit: the second icon reused the first one's window kind, whose
+        function belonged to the first (freed) icon - a crash once that was cleaned up."""
+        import ctypes
+        import gc
+        first = tray.Tray(lambda a: None)
+        self.assertTrue(first.start())
+        first.stop()
+        del first
+        gc.collect()
+        got = []
+        second = tray.Tray(got.append)
+        self.assertTrue(second.start())
+        try:
+            ctypes.windll.user32.SendMessageW(second.hwnd, tray.WM_COMMAND, tray.PAUSE_ALL, 0)
+            self.assertEqual(got, ["pause_all"])
+        finally:
+            second.stop()
+
 if __name__ == "__main__":
     unittest.main()

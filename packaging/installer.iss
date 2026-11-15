@@ -38,6 +38,10 @@ Name: "autostart"; Description: "Iniciar com o Windows (em segundo plano, quase 
 Source: "..\dist\{#AppName}\*"; DestDir: "{app}"; Flags: recursesubdirs createallsubdirs ignoreversion
 Source: "..\browser-extension\*"; DestDir: "{app}\browser-extension"; Flags: recursesubdirs createallsubdirs ignoreversion
 
+[InstallDelete]
+; Files of the previous version's program (an update must not leave old ones behind).
+Type: filesandordirs; Name: "{app}\_internal"
+
 [Icons]
 Name: "{group}\{#AppName}"; Filename: "{app}\{#AppExe}"
 Name: "{group}\Pasta da extensão do navegador"; Filename: "{app}\browser-extension"
@@ -70,4 +74,19 @@ Type: filesandordirs; Name: "{app}"
 function IsAppUpdate: Boolean;
 begin
   Result := ExpandConstant('{param:UPDATE|0}') = '1';
+end;
+
+procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+begin
+  if CurUninstallStep = usPostUninstall then
+  begin
+    { "Start with Windows" may have been switched on in the app (not by this installer). }
+    RegDeleteValue(HKEY_CURRENT_USER, 'Software\Microsoft\Windows\CurrentVersion\Run', 'FlowDownloads');
+    { The download list (with site logins), settings and logs: the user decides. }
+    if (not UninstallSilent) and DirExists(ExpandConstant('{userappdata}\FlowDownloads')) and
+       (MsgBox('Apagar também a lista de downloads, as configurações e os registos do Flow Downloads?' +
+               #13#10#13#10 + 'Os ficheiros que baixou ficam onde estão.',
+               mbConfirmation, MB_YESNO or MB_DEFBUTTON2) = IDYES) then
+      DelTree(ExpandConstant('{userappdata}\FlowDownloads'), True, True, True);
+  end;
 end;

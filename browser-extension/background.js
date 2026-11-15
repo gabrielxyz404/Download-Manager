@@ -301,17 +301,56 @@ async function dropOriginal(original) {
   try { await chrome.downloads.erase({ id: original.id }); } catch {}
 }
 
-async function showInBrowser(rid, original = null) {
-  if (original) waitingOriginals.set(original.id, original);
+// Storage changes made one after another (two downloads finishing together must not
+// overwrite each other's entries).
+let storageQueue = Promise.resolve();
+function updateStored(key, change) {
+  storageQueue = storageQueue.then(async () => {
+    const { [key]: value = {} } = await chrome.storage.local.get(key);
+    change(value);
+    await chrome.storage.local.set({ [key]: value });
+  }).catch(() => {});
+  return storageQueue;
+}
+
+// The browser may stop and restart this extension's background work at any time (after ~30 s
+// without activity, or when it is updated). What we wait for is kept on disk, so a restart
+// picks it up again instead of leaving the browser's download paused forever.
+async function showInBrowser(rid, original = null, since = Date.now()) {
+  if (original) {
+    waitingOriginals.set(original.id, original);
+    await updateStored("waits", (w) => { w[original.id] = { rid, url: original.url, label: original.label, since }; });
+  }
   try {
-    await waitForApp(rid, original);
+    await waitForApp(rid, original, since);
   } finally {
-    if (original) waitingOriginals.delete(original.id);
+    if (original) {
+      waitingOriginals.delete(original.id);
+      await updateStored("waits", (w) => { delete w[original.id]; });
+    }
   }
 }
 
-async function waitForApp(rid, original) {
-  for (let i = 0; i < 90; i++) { // up to ~30 min waiting for "Baixar agora" in the app
+async function resumeWaits() {
+  const { waits = {} } = await chrome.storage.local.get("waits");
+  for (const [key, w] of Object.entries(waits)) {
+    const id = +key;
+    if (waitingOriginals.has(id)) continue;
+    const [item] = await chrome.downloads.search({ id });
+    if (!item || item.state !== "in_progress") {
+      await updateStored("waits", (all) => { delete all[key]; });
+      continue;
+    }
+    const original = { id, url: w.url, label: w.label, paused: !!item.paused, rid: w.rid };
+    showInBrowser(w.rid, original, w.since || Date.now()); // not awaited: carries on in the background
+  }
+}
+resumeWaits().catch(() => {});
+
+const WAIT_LIMIT_MS = 30 * 60 * 1000; // up to 30 min waiting for "Baixar agora" in the app
+
+async function waitForApp(rid, original, since = Date.now()) {
+  while (Date.now() - since < WAIT_LIMIT_MS) {
     chrome.runtime.getPlatformInfo(() => {}); // keeps this service worker awake while we wait
     if (original && original.cancelled) { // cancelled in the browser meanwhile: the app stops too
       await postApp("/control", { rid, action: "cancel" });
@@ -319,7 +358,7 @@ async function waitForApp(rid, original) {
     }
     let st = null;
     try {
-      const r = await fetch(`${APP}/request/${rid}`, { headers: HEADERS }); // answers within 20 s
+      const r = await fetch(`${APP}/request/${rid}`, { headers: HEADERS }); // answers within a few s
       if (!r.ok) {
         if (original) await giveBack(original, `a app respondeu ${r.status}`);
         return;
@@ -335,10 +374,10 @@ async function waitForApp(rid, original) {
     }
     if (st.state === "started") { // the app is receiving the file: the browser shows the app's copy
       await dropOriginal(original);
+      // Noted BEFORE the browser starts it: a tiny file may finish before download() returns.
+      await updateStored("streams", (m) => { m[st.stream] = rid; });
       const id = await chrome.downloads.download({ url: APP + st.stream, conflictAction: "uniquify" });
-      const { mirrors = {} } = await chrome.storage.session.get("mirrors");
-      mirrors[id] = rid;
-      await chrome.storage.session.set({ mirrors });
+      await updateStored("mirrors", (m) => { m[id] = rid; });
       if (original) await note(original.label, "baixado pela app ✔");
       return;
     }
@@ -351,6 +390,7 @@ async function waitForApp(rid, original) {
       return;
     }
   }
+  await postApp("/control", { rid, action: "cancel" }); // the app must not start it later too
   if (original) await giveBack(original, "a app não começou a tempo");
 }
 
@@ -373,15 +413,24 @@ async function giveBack(original, reason) {
   await note(original.label, "o Brave baixou sozinho: a app não conseguiu (" + reason + ")");
 }
 
+// Which app download a browser download shows. Kept on disk (survives a browser restart,
+// when an interrupted download is resumed), and found from its address if the id was not
+// written yet.
 async function mirrorOf(downloadId) {
-  const { mirrors = {} } = await chrome.storage.session.get("mirrors");
-  return mirrors[downloadId];
+  await storageQueue;
+  const { mirrors = {}, streams = {} } = await chrome.storage.local.get(["mirrors", "streams"]);
+  if (mirrors[downloadId]) return mirrors[downloadId];
+  const [item] = await chrome.downloads.search({ id: downloadId });
+  const url = item ? (item.finalUrl || item.url || "") : "";
+  if (!url.startsWith(APP + "/stream/")) return null;
+  return streams[url.slice(APP.length).split("?")[0]] || null;
 }
 
 async function forgetMirror(downloadId) {
-  const { mirrors = {} } = await chrome.storage.session.get("mirrors");
-  delete mirrors[downloadId];
-  await chrome.storage.session.set({ mirrors });
+  const [item] = await chrome.downloads.search({ id: downloadId });
+  const path = item ? (item.finalUrl || item.url || "").slice(APP.length).split("?")[0] : "";
+  await updateStored("mirrors", (m) => { delete m[downloadId]; });
+  if (path) await updateStored("streams", (m) => { delete m[path]; });
 }
 
 // The browser's buttons control the app's download: pause, resume, cancel; when the
@@ -514,6 +563,9 @@ async function handleDownload(item) {
     return note(label, "deixado ao navegador: o ficheiro foi criado pela própria página (" + finalUrl.split(":")[0] + ":)");
   }
   if (passThrough.delete(url) || passThrough.delete(finalUrl)) return;
+  if (item.incognito) { // private window: nothing of it goes to the app's list or history
+    return note(label, "deixado ao navegador: janela privada");
+  }
   const bypass = await bypassed([url, finalUrl]);
   if (bypass) return note(label, "deixado ao navegador: " + bypass);
   const watched = seenFor(url) || seenFor(finalUrl);

@@ -49,7 +49,8 @@ def log(*args) -> None:
                 f.write(line + "\n")
     except OSError:
         pass
-REQUEST_WAIT_S = 20        # the extension asks "has it started?" and we answer within 20 s
+REQUEST_WAIT_S = 8         # the extension asks "has it started?" and we answer within 8 s (it asks
+                           # again; short answers keep few of the browser's 6 connections to us busy)
 NO_BROWSER_AFTER_S = 30    # finished but the browser never came for the file: keep it here
 BROWSER_GONE_AFTER_S = 120  # the browser stopped receiving and did not come back
 SLIM_AFTER_IDLE_S = 5  # restart to free memory only after this many quiet seconds
@@ -150,7 +151,12 @@ class Service:
 
     # ------------------------------------------------------------- helpers
     def busy(self) -> bool:
-        if self.active_streams or any(r["state"] == "waiting" for r in list(self.requests.values())):
+        import time
+        now = time.monotonic()
+        # A request nobody has asked about for 40 min is forgotten (the extension gives up
+        # after 30): it must not keep "when all downloads finish" from ever happening.
+        if self.active_streams or any(r["state"] == "waiting" and now - r.get("at", now) < 40 * 60
+                                      for r in list(self.requests.values())):
             return True
         if self._manager is None:
             return False
@@ -172,8 +178,9 @@ class Service:
         if not rid:
             return
         log("request", rid, state.get("state"))
+        import time
         with self._req_cond:
-            self.requests[rid] = state
+            self.requests[rid] = {**state, "at": time.monotonic()}
             self._req_cond.notify_all()
 
     def bind_request(self, rid: str | None, task) -> None:
@@ -188,6 +195,10 @@ class Service:
 
     def cancel_request(self, rid: str | None, state: str = "cancelled") -> None:
         self._set_request(rid, state=state)
+
+    def request_state(self, rid: str | None) -> str | None:
+        with self._req_cond:
+            return (self.requests.get(rid) or {}).get("state") if rid else None
 
     def _restore_request(self, rid: str) -> None:
         """After a restart the request ids are known again from the saved downloads."""
@@ -235,6 +246,10 @@ class Service:
         if method == "GET" and path.startswith("/request/"):
             rid = path.split("/")[2]
             self._restore_request(rid)
+            # One limit for the whole answer: the browser stops an extension whose request takes
+            # more than 30 s (and then forgets the paused original). Before: 20 s + 20 s.
+            import time
+            deadline = time.monotonic() + REQUEST_WAIT_S
             with self._req_cond:
                 if rid not in self.requests:
                     log("unknown request", rid)
@@ -243,8 +258,6 @@ class Service:
                                         timeout=REQUEST_WAIT_S)
             # "started" only once the site has really sent us data: until then the browser
             # keeps its own download paused, and gets it back if the site refuses us.
-            import time
-            deadline = time.monotonic() + REQUEST_WAIT_S
             while True:
                 with self._req_cond:
                     req = dict(self.requests[rid])
@@ -262,7 +275,7 @@ class Service:
                     req = {**req, "state": "waiting"}  # ask again
                     break
                 time.sleep(0.2)
-            return 200, {"ok": True, **{k: v for k, v in req.items() if k != "task"}}
+            return 200, {"ok": True, **{k: v for k, v in req.items() if k not in ("task", "at")}}
         if path == "/check":  # should the app take this browser download? (file types, sites)
             from .capture import should_capture, skipped_site
             url, final, ref = str(data.get("url", "")), str(data.get("final_url", "")), str(data.get("referrer", ""))
@@ -281,6 +294,11 @@ class Service:
         rid = str(data.get("rid", ""))
         self._restore_request(rid)
         task = self._task_for(rid) if rid in self.requests else None
+        if task is None and path == "/control" and data.get("action") == "cancel" and rid in self.requests:
+            # The extension gave up waiting (or the user cancelled) while the app was still
+            # asking the user: the browser keeps its own download, the app must not start too.
+            self.cancel_request(rid)
+            return 200, {"ok": True}
         if task is None:
             return 404, {"ok": False}
         if path == "/control":
@@ -295,7 +313,22 @@ class Service:
                 self.events.put(("tick", None))
             return 200, {"ok": True}
         if path == "/mirror-done":  # the browser saved the file: drop our temporary copy
-            task.release_to_browser(str(data.get("path") or "") or None)
+            saved = str(data.get("path") or "")
+            # Only a real file of the right size is taken as "where the browser saved it":
+            # the end-of-download actions (checksum, extract, open, command) use this path.
+            try:
+                ok_path = bool(saved) and os.path.isfile(saved) and (
+                    not task.size or os.path.getsize(saved) == task.size)
+            except OSError:
+                ok_path = False
+            task.release_to_browser(saved if ok_path else None)
+            if ok_path and getattr(task, "mark_internet", True):
+                # The browser saved it from the app (127.0.0.1): Windows' "came from the
+                # internet" mark must name the real site, as when the browser downloads alone.
+                from .system import mark_from_internet
+                from .engine import _headers
+                mark_from_internet(saved, task.url, _headers(task.headers).get("Referer"))
+            task.stream_token = None  # its address to the browser is not valid any more
             self.manager.save()
             self.after_download(task)  # now the file is where the browser saved it
             self.events.put(("tick", None))

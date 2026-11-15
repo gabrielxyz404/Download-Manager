@@ -105,5 +105,30 @@ class UpdaterTests(unittest.TestCase):
         self.assertIn("/UPDATE=1", cmd)
 
 
+class UpdaterHousekeepingTests(unittest.TestCase):
+    def test_old_installers_are_removed(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            for n in ("FlowDownloads-Setup-0.8.0.exe", "FlowDownloads-Setup-0.9.0.exe", "outro.txt"):
+                open(os.path.join(d, n), "wb").close()
+            updater.clean_old(d)
+            self.assertEqual(os.listdir(d), ["outro.txt"])
+
+    def test_installer_still_starts_when_leaving_the_job_is_not_allowed(self):
+        from unittest import mock
+        calls = []
+
+        def popen(cmd, creationflags=0, **kw):
+            calls.append(creationflags)
+            if creationflags & 0x01000000:
+                raise OSError(5, "Access is denied")
+        with mock.patch.object(updater.os, "name", "nt"), \
+                mock.patch.object(updater.subprocess, "Popen", popen), \
+                mock.patch.object(updater.subprocess, "CREATE_NEW_PROCESS_GROUP", 0x200, create=True), \
+                mock.patch.object(updater.subprocess, "DETACHED_PROCESS", 0x8, create=True):
+            updater.run_installer("setup.exe")
+        self.assertEqual(len(calls), 2)
+        self.assertFalse(calls[1] & 0x01000000)
+
 if __name__ == "__main__":
     unittest.main()
