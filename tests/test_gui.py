@@ -457,6 +457,76 @@ class GuiTests(unittest.TestCase):
         self.assertEqual(running.url, self.base + "/outro.bin")
         self.wait_status(running, "Concluído")
 
+    def test_category_with_a_repeated_name_is_refused(self):
+        """Found by clicking through every window: a second "Vídeos" was saved, and the main
+        window could never be opened again (the list of filters failed)."""
+        app = self.open_app()
+        dlg = self.gui.CategoriesDialog(app)
+        ed = self.gui.CategoryEditor(dlg, {"name": "", "exts": []}, None)
+        ed.name.set("vídeos")
+        with mock.patch.object(self.gui.messagebox, "showwarning") as warn:
+            ed._ok()
+        warn.assert_called_once()
+        self.assertEqual(sum(r["name"].casefold() == "vídeos" for r in dlg.rules), 1)
+        ed.destroy()
+        dlg.destroy()
+        # settings already holding a repeated name (older version) still open the window
+        self.svc.settings.categories = [dict(r) for r in self.svc.settings.category_rules()] + [
+            {"name": "Vídeos", "exts": ["xyz"]}]
+        try:
+            app = self.open_app()
+            self.assertTrue(app.side.exists("cat:Outros"))
+        finally:
+            self.svc.settings.categories = []
+
+    def test_finished_download_is_never_deleted_by_hand_back_or_new_link(self):
+        """'Baixar no navegador' deleted a finished file; 'Atualizar link' downloaded it again."""
+        app = self.open_app()
+        app.add_download(self.base + "/feito.bin", self.dl, 2)
+        task = self.svc.manager.tasks[0]
+        self.wait_status(task, "Concluído")
+        self.select(task)
+        with mock.patch("webbrowser.open") as browser, \
+                mock.patch.object(self.gui.simpledialog, "askstring", return_value=self.base + "/x.bin") as ask:
+            app._to_browser()
+            app._update_link()
+        browser.assert_not_called()
+        ask.assert_not_called()
+        self.assertTrue(os.path.exists(task.path))
+        self.assertIn(task, self.svc.manager.tasks)
+
+    def test_closed_window_is_freed(self):
+        """Each open/close of the window kept the whole window in memory (~2 MB each time)."""
+        import gc
+        import weakref
+        app = self.open_app()
+        ref = weakref.ref(app)
+        app.close_gui()
+        self.app = app = None
+        for _ in range(3):
+            gc.collect()
+        self.assertIsNone(ref(), "the closed window is still in memory")
+
+    def test_queued_download_can_start_now(self):
+        """A download waiting for a free slot: its button did nothing."""
+        Handler.delay = 0.05
+        self.svc.manager.max_active = 1
+        try:
+            app = self.open_app()
+            app.add_download(self.base + "/primeiro.bin", self.dl, 2)
+            app.add_download(self.base + "/segundo.bin", self.dl, 2)
+            first, second = self.svc.manager.tasks
+            self.wait_status(first, "Baixando", 10)
+            self.select(second)
+            pump(app, 0.6)
+            self.assertEqual(second.status, "Na fila")
+            self.assertEqual(str(app.details.primary["text"]), "▶ Começar já")
+            app.details.primary.invoke()
+            self.assertTrue(pump(app, 5, second.is_running))
+        finally:
+            Handler.delay = 0.0
+            self.svc.manager.max_active = 3
+
     def test_copy_url_and_open_folder(self):
         app = self.open_app()
         app.add_download(self.base + "/f.bin", self.dl, 2, start=False)
@@ -738,6 +808,15 @@ class GuiTests(unittest.TestCase):
         app = self.open_app()
         dlg = self.gui.HostLimitsDialog(app)
         dlg.text.insert("1.0", "www.lento.com = 2\nisto não é válido\n")
+        # A line that is not understood is pointed out, not silently dropped (found in a test of
+        # every window): nothing is saved until it is fixed.
+        with mock.patch.object(self.gui.messagebox, "showwarning") as warn:
+            dlg._save()
+        warn.assert_called_once()
+        self.assertIn("isto não é válido", warn.call_args[0][1])
+        self.assertTrue(dlg.winfo_exists())
+        dlg.text.delete("1.0", "end")
+        dlg.text.insert("1.0", "www.lento.com = 2\n")
         dlg._save()
         self.assertEqual(self.svc.settings.host_limits, {"lento.com": 2})
         self.assertEqual(self.svc.manager.host_limits, {"lento.com": 2})

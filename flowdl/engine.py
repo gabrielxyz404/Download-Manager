@@ -19,6 +19,7 @@ import http.client
 import json
 import ssl
 import os
+import zlib
 import re
 import threading
 import time
@@ -64,6 +65,7 @@ STALL_ALONE_SECONDS = 4.0 # ...or for this long while the other connections are 
 ENDGAME_MIN_PIECE = 32 * 1024   # near the end, help connections that still need...
 ENDGAME_MIN_ETA = 1.5           # ...more than 1.5 s to finish their piece
 TIMEOUT = 30
+SINGLE_TRIES = 3          # a server that cannot continue mid-file: start over this many times
 CHECKPOINT_S = 5.0        # progress forced onto the disk this often (a power cut loses at most this)
 PROBE_OK_BYTES = 256 * 1024  # a fresh connection that got this much really works (not a trickle)
 OUTAGE_CALM_S = 90.0      # after the server stopped every connection: fewer connections for this long
@@ -150,9 +152,13 @@ def _filename_from_headers(headers: Message, url: str) -> str:
         except (LookupError, UnicodeDecodeError):
             name = urllib.parse.unquote(raw, encoding="latin-1")
     else:
-        m = re.search(r'filename\s*=\s*"?([^";]+)"?', cd, re.I)
+        # A quoted name may hold ";" and \" (escaped quotes); an unquoted one ends at ";".
+        m = (re.search(r'filename\s*=\s*"((?:[^"\\]|\\.)*)"', cd, re.I)
+             or re.search(r'filename\s*=\s*([^";]+)', cd, re.I))
         if m:
-            name = m.group(1).strip()
+            # Only \" and \\ are escapes; other backslashes are kept (old servers send Windows
+            # paths like C:\dir\name.exe: only the last part is used, further down).
+            name = re.sub(r'\\(["\\])', r"\1", m.group(1)).strip()
             try:  # headers are read as Latin-1: a name sent in UTF-8 ("ç" as 2 bytes) is fixed here
                 name = name.encode("latin-1").decode("utf-8")
             except (UnicodeEncodeError, UnicodeDecodeError):
@@ -180,6 +186,9 @@ def sanitize_filename(name: str) -> str:
         ext = ext if len(ext) <= 16 else ""
         name = stem[:MAX_NAME - len(ext)].rstrip(" .") + ext
     return name
+
+
+_NAME_LOCK = threading.Lock()  # choosing a free file name and claiming it is one step
 
 
 def unique_path(path: str) -> str:
@@ -213,8 +222,12 @@ def _info_from_response(resp: net.Response) -> dict:
         if m:
             size = int(m.group(1))
             resumable = True
-    elif headers.get("Content-Length"):
+    elif (headers.get("Content-Length") or "").strip().isdigit():
         size = int(headers["Content-Length"])
+    if (headers.get("Content-Encoding") or "identity").strip().lower() not in ("identity", ""):
+        # Compressed by the server: the sizes and ranges are those of the compressed data, not
+        # of the file. One stream, unpacked as it comes (see _download_single).
+        size, resumable = None, False
     return {"url": resp.url, "size": size, "resumable": resumable,
             "filename": _filename_from_headers(headers, resp.url), "validator": validator_of(headers),
             "type": (headers.get("Content-Type") or "").split(";")[0].strip().lower()}
@@ -355,6 +368,7 @@ class DownloadTask:
         self._target = 1 << 30  # connections wanted now (set by the download loop)
         self._in_outage = False  # every connection stopped together (no cutting / reopening)
         self._tail = False  # the last few seconds of work: stuck pieces are always rescued
+        self._accepted_any = True  # the server accepted a connection in this run
         self._wake = threading.Event()  # set when a connection finishes: react at once
         self.server_limit: int | None = None  # connections the server accepts, when it refuses more
         self.connection_note = ""  # shown in the list: speed test / limit found
@@ -651,6 +665,13 @@ class DownloadTask:
                 break
             except net.HTTPError as exc:
                 conn.close()
+                if exc.code == 416 and exc.content_range.replace(" ", "").endswith("/0"):
+                    # An empty file: servers that follow the rules (S3...) cannot send "the
+                    # first bytes" of nothing. Ask for the whole (empty) file instead.
+                    resp = conn.get(self._current_url(), self._headers_for(self._current_url()),
+                                    cookies=self.cookies)
+                    self._first_peer = conn.peer
+                    break
                 if self._final_url and exc.code in (401, 403, 404, 410):
                     # The browser's final address expired already: start again from the link.
                     self._final_url = None
@@ -695,10 +716,17 @@ class DownloadTask:
             os.makedirs(self.dest_dir, exist_ok=True)
         if not self.path:
             candidate = os.path.join(self.dest_dir, self.filename)
-            if self._state_matches(candidate):
-                self.path = candidate  # continue an interrupted download of the same URL
-            else:
-                self.path = unique_path(candidate)
+            # Chosen and claimed in one step: downloads started together that get the same
+            # name (same.bin) each pick a free one - they used to write into the same file.
+            with _NAME_LOCK:
+                if self._state_matches(candidate):
+                    self.path = candidate  # continue an interrupted download of the same URL
+                else:
+                    self.path = unique_path(candidate)
+                    try:
+                        open(self.path + ".part", "ab").close()  # the name is taken from now on
+                    except OSError:
+                        pass  # the real error (no room, no folder) is reported when writing
             self.filename = os.path.basename(self.path)
         if self._load_state() and self.size == info["size"]:
             conn.close()  # we already have these bytes
@@ -779,24 +807,64 @@ class DownloadTask:
         self._active_workers = 1
         conn, resp = self._first or (net.Connection(TIMEOUT), None)
         self._first = None
+        decoded = False
         try:
-            if resp is None or resp.status == 206:  # need the whole body in one answer
-                resp = conn.get(self._current_url(), self._headers_for(self._current_url()), cookies=self.cookies)
-            with open(self._part_path, "wb") as f:
-                while not self._stop.is_set():
-                    chunk = resp.read(CHUNK_SIZE)
-                    if not chunk:
-                        break
-                    try:
-                        f.write(chunk)
-                    except OSError as exc:
-                        raise _disk(exc, self._part_path) from exc
-                    self.downloaded += len(chunk)
-                    self._update_speed()
-                    self._throttle(len(chunk))
+            for attempt in range(1, SINGLE_TRIES + 1):
+                got = expected = 0
+                try:
+                    if resp is None or resp.status == 206:  # need the whole body in one answer
+                        resp = conn.get(self._current_url(), self._headers_for(self._current_url()),
+                                        cookies=self.cookies)
+                    # A server may compress the file although we asked it not to (the browser
+                    # would unpack it): unpack it too, or the saved file is the compressed one.
+                    encoding = (resp.headers.get("Content-Encoding") or "").strip().lower()
+                    inflate = (zlib.decompressobj(16 + zlib.MAX_WBITS) if encoding in ("gzip", "x-gzip")
+                               else zlib.decompressobj() if encoding == "deflate" else None)
+                    decoded = inflate is not None
+                    length = resp.headers.get("Content-Length")
+                    expected = int(length) if length and length.strip().isdigit() else 0
+                    self.downloaded = 0
+                    with open(self._part_path, "wb") as f:
+                        while not self._stop.is_set():
+                            chunk = resp.read(CHUNK_SIZE)
+                            if not chunk:
+                                break
+                            got += len(chunk)
+                            data = inflate.decompress(chunk) if inflate else chunk
+                            try:
+                                f.write(data)
+                            except OSError as exc:
+                                raise _disk(exc, self._part_path) from exc
+                            self.downloaded += len(data)
+                            self._update_speed()
+                            self._throttle(len(chunk))
+                        if inflate and not self._stop.is_set():
+                            tail = inflate.flush()
+                            f.write(tail)
+                            self.downloaded += len(tail)
+                    if not self._stop.is_set() and expected and got < expected:
+                        # The connection ended before the size the server announced: a cut-off
+                        # file must never be taken for the whole one.
+                        raise http.client.IncompleteRead(b"", expected - got)
+                    break
+                except DiskProblem:
+                    raise
+                except (OSError, http.client.HTTPException, zlib.error) as exc:
+                    if isinstance(exc, net.HTTPError) or self._stop.is_set():
+                        raise
+                    conn.close()
+                    resp = None
+                    if attempt == SINGLE_TRIES:
+                        have = f"{format_size(got)} de {format_size(expected)}" if expected else format_size(got)
+                        raise RuntimeError(
+                            f"A ligação caiu antes do fim ({have}). Este servidor não deixa continuar "
+                            "a meio: \"Tentar de novo\" recomeça do início") from exc
+                    self._nap(2 * attempt)  # this server cannot continue: start over, after a pause
         finally:
             conn.close()
             self._active_workers = 0
+        if decoded and not self._stop.is_set():
+            self.size = self.downloaded  # the announced size was the compressed one
         if self._stop.is_set():
             # Can't resume without range support: start over next time.
             self.status = Status.PAUSED
@@ -914,13 +982,18 @@ class DownloadTask:
             seg0.inflight_end = min(seg0.end, int(re.match(r"bytes \d+-(\d+)/",
                                                            first[1].headers["Content-Range"]).group(1)))
             spawn(seg0, *first)
+        # Resuming (no first answer yet in this run): one connection until the server has
+        # accepted one - a server that allows few connections answers extra ones with 403,
+        # which would look like an expired link and stop the download for good.
+        self._accepted_any = first is not None
+        allowed = lambda: target if self._accepted_any else 1  # noqa: E731
         for seg in self.segments:
-            if seg.remaining > 0 and not seg.active and self._active_workers < target:
+            if seg.remaining > 0 and not seg.active and self._active_workers < allowed():
                 seg.active = True
                 spawn(seg)
         # The other first connections start now, not after the first half-second check (in
         # browser mode the file is one piece, so the loop above starts only one).
-        while self._active_workers < target and not self._stop.is_set():
+        while self._active_workers < allowed() and not self._stop.is_set():
             new_seg = self._split_largest()
             if new_seg is None:
                 break
@@ -1020,7 +1093,7 @@ class DownloadTask:
                     spawn(self._rescued.pop(), rescuer=True)
                 # Dynamic segmentation: keep `target` connections busy (not while the server has
                 # stopped every connection: new ones would only add to what it punishes).
-                while self._active_workers < target and (not self._in_outage or self._active_workers == 0):
+                while self._active_workers < allowed() and (not self._in_outage or self._active_workers == 0):
                     new_seg = self._split_largest()
                     if new_seg is None:
                         break
@@ -1314,13 +1387,27 @@ class DownloadTask:
                             # a connection waiting for an answer is not cut before ~3x that.
                             self._answer_time = max(now_ - sent, self._answer_time * 0.9)
                             w.accepted = True
+                            if not self._accepted_any:
+                                self._accepted_any = True
+                                self._wake.set()  # the others may start now
                             if resp.status != 206:
                                 if self.validator:
                                     # If-Range said no: the file on the server is a new version
                                     self._file_changed = True
                                     raise FileChanged()
                                 raise RuntimeError("O servidor parou de aceitar downloads em partes")
+                            # The part must be the one asked for, of a file of the same size: a
+                            # server that answers another part, or a file replaced meanwhile
+                            # without If-Range support, would mix bytes from both silently.
+                            m = re.match(r"\s*bytes\s+(\d+)-(\d+)/(\d+|\*)", resp.headers.get("Content-Range", ""))
+                            if m and m.group(3) != "*" and self.size and int(m.group(3)) != self.size:
+                                self._file_changed = True
+                                raise FileChanged()
+                            if not m or int(m.group(1)) != seg.pos:
+                                raise http.client.HTTPException(
+                                    f"o servidor enviou outra parte do ficheiro ({resp.headers.get('Content-Range')!r})")
                             self._final_url = resp.url
+                        got_this = 0  # bytes this answer brought
                         while not self._stop.is_set():
                             with seg.lock:
                                 want = min(seg.end, seg.inflight_end) - seg.pos + 1
@@ -1346,6 +1433,7 @@ class DownloadTask:
                                             raise _disk(exc, self._part_path) from exc
                                     seg.pos += n
                                 request_done = seg.pos > last
+                            got_this += n
                             w.count(n)
                             self._last_rx = w.last_data
                             retries = 0
@@ -1361,9 +1449,19 @@ class DownloadTask:
                                 break
                         with seg.lock:
                             seg.inflight_end = -1
+                            unfinished = seg.remaining > 0
                         if not resp.finished:
                             conn.close()  # stopped mid-answer: this connection can't be reused
                         resp = None
+                        if got_this == 0 and unfinished and not w.reconnect and not self._stop.is_set():
+                            # An answer that ended without bringing anything (a server that lies
+                            # about the length): wait before asking again, and give up in the
+                            # end - it used to ask again thousands of times a second, for ever.
+                            retries += 1
+                            if retries > MAX_RETRIES:
+                                raise RuntimeError("O servidor deixou de enviar o resto do ficheiro")
+                            self._nap(min(2 ** retries, 30))
+                            continue
                         if w.reconnect:
                             conn.close()
                             w.reconnect = False
@@ -1422,6 +1520,13 @@ class DownloadTask:
                                 continue
                             self._limit_hit = max(self._limit_hit, self._streaming)
                             return
+                        if code == 403 and not self._accepted_any and self.downloaded > 0 and refusals < 3:
+                            # Resuming right after a pause: the server may still count the
+                            # connections we just closed and refuse even the first new one.
+                            # Not an expired link yet: wait a moment and ask again.
+                            refusals += 1
+                            self._nap(float(refusals))
+                            continue
                         if code in (401, 403, 410) and req_url != self._current_url():
                             continue  # another connection already replaced the expired address
                         if code in (401, 403, 410):

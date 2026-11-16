@@ -32,10 +32,12 @@ def ssl_context() -> ssl.SSLContext:
 
 
 class HTTPError(Exception):
-    def __init__(self, code: int, reason: str, url: str, retry_after: float | None = None):
+    def __init__(self, code: int, reason: str, url: str, retry_after: float | None = None,
+                 content_range: str = ""):
         super().__init__(f"HTTP {code}: {reason}")
         self.code, self.reason, self.url = code, reason, url
         self.retry_after = retry_after  # seconds the server asked us to wait (429 / 503)
+        self.content_range = content_range  # e.g. "bytes */0" with 416: the file is empty
 
 
 def parse_retry_after(value: str | None) -> float | None:
@@ -305,7 +307,8 @@ class Connection:
                 finally:
                     if not raw.isclosed():
                         self.close()
-                raise HTTPError(raw.status, raw.reason, url, parse_retry_after(raw.getheader("Retry-After")))
+                raise HTTPError(raw.status, raw.reason, url, parse_retry_after(raw.getheader("Retry-After")),
+                                raw.getheader("Content-Range") or "")
             self.response = Response(raw, url)
             return self.response
         raise HTTPError(310, "redirecionamentos a mais", url)

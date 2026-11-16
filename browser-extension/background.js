@@ -321,6 +321,9 @@ async function showInBrowser(rid, original = null, since = Date.now()) {
   if (original) {
     waitingOriginals.set(original.id, original);
     await updateStored("waits", (w) => { w[original.id] = { rid, url: original.url, label: original.label, since }; });
+    // The browser may stop this background work while it waits, and a paused download sends no
+    // event that would wake it again: an alarm does, every 30 s, until nothing is waiting.
+    chrome.alarms.create(WAKE_ALARM, { periodInMinutes: 0.5 });
   }
   try {
     await waitForApp(rid, original, since);
@@ -332,8 +335,12 @@ async function showInBrowser(rid, original = null, since = Date.now()) {
   }
 }
 
+const WAKE_ALARM = "flowdl-waits";
+chrome.alarms.onAlarm.addListener((a) => { if (a.name === WAKE_ALARM) resumeWaits().catch(() => {}); });
+
 async function resumeWaits() {
   const { waits = {} } = await chrome.storage.local.get("waits");
+  if (!Object.keys(waits).length) { chrome.alarms.clear(WAKE_ALARM); return; }
   for (const [key, w] of Object.entries(waits)) {
     const id = +key;
     if (waitingOriginals.has(id)) continue;

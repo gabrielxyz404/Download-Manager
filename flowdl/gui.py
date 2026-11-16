@@ -147,7 +147,7 @@ class AddDialog(tk.Toplevel):
         ttk.Label(frm, text="Checksum (opcional):").grid(row=6, column=0, sticky="w", pady=3)
         self.checksum = tk.StringVar()
         ttk.Entry(frm, textvariable=self.checksum).grid(row=6, column=1, columnspan=2, sticky="ew")
-        ttk.Label(frm, text="(MD5, SHA-1 ou SHA-256 do site: confirma que o ficheiro chegou perfeito)",
+        ttk.Label(frm, text="(MD5, SHA-1, SHA-256 ou SHA-512 do site: confirma que o ficheiro chegou perfeito)",
                   foreground=app.colors["muted"]).grid(row=7, column=1, sticky="w")
 
         btns = ttk.Frame(frm)
@@ -180,6 +180,12 @@ class AddDialog(tk.Toplevel):
         if not url.lower().startswith(("http://", "https://")):
             messagebox.showwarning("URL inválida", "O link deve começar com http:// ou https:// (FTP ainda não é suportado)",
                                    parent=self)
+            return
+        from .after import algo_for, clean_hash
+        typed = clean_hash(self.checksum.get())
+        if typed and not algo_for(typed):
+            messagebox.showwarning("Checksum", "Este checksum não parece certo: deve ser MD5, SHA-1, SHA-256 ou "
+                                   "SHA-512 (só letras a-f e números). Corrija-o ou deixe o campo vazio.", parent=self)
             return
         try:
             conns = max(1, min(32, int(self.conns.get())))
@@ -281,10 +287,13 @@ class SchedulerDialog(tk.Toplevel):
             return False
 
     def _save(self) -> None:
-        for var in (self.start_at, self.stop_at):
-            if not self._valid(var.get().strip()):
+        for on, var in ((self.start_on, self.start_at), (self.stop_on, self.stop_at)):
+            if on.get() and not self._valid(var.get().strip()):  # a time switched off may stay empty
                 messagebox.showwarning("Horário inválido", "Use o formato HH:MM (ex.: 02:30).", parent=self)
                 return
+        if (self.start_on.get() or self.stop_on.get()) and not any(v.get() for v in self.days):
+            messagebox.showwarning("Agendador", "Escolha pelo menos um dia.", parent=self)
+            return
         s = self.app.scheduler
         s.start_enabled, s.start_time = self.start_on.get(), self.start_at.get().strip()
         s.stop_enabled, s.stop_time = self.stop_on.get(), self.stop_at.get().strip()
@@ -351,7 +360,11 @@ class GrabberDialog(tk.Toplevel):
             messagebox.showwarning("URL inválida", "Informe o endereço de uma página web.", parent=self)
             return
         cats = {c for c, v in self.cat_vars.items() if v.get()}
-        depth = max(0, min(2, int(self.depth.get() or 0)))
+        try:
+            depth = max(0, min(2, int(self.depth.get() or 0)))
+        except (tk.TclError, ValueError):  # empty or not a number
+            messagebox.showwarning("Profundidade", "Escreva 0, 1 ou 2.", parent=self)
+            return
         self.go_btn.state(["disabled"])
         self.info.set("Procurando...")
 
@@ -619,8 +632,8 @@ class ProgressWindow(tk.Toplevel):
         self._update()
 
     def _toggle(self) -> None:
-        if self.task.is_running():
-            self.app.manager.pause(self.task)
+        if self.task.is_running() or self.task.status == Status.QUEUED:
+            self.app.manager.pause(self.task)  # also one waiting in the queue
         else:
             self.app.manager.resume(self.task)
 
@@ -670,7 +683,8 @@ class CategoriesDialog(tk.Toplevel):
         self.app = app
         app.attach_dialog(self)
         self.title("Categorias e pastas")
-        self.geometry("760x520")
+        self.geometry("860x520")
+        self.minsize(860, 400)
         self.rules = [dict(r) for r in app.settings.category_rules()]
         frm = ttk.Frame(self, padding=12)
         frm.pack(fill="both", expand=True)
@@ -752,6 +766,10 @@ class CategoryEditor(tk.Toplevel):
         self.parent, self.index = parent, index
         self.transient(parent)
         self.title("Categoria")
+        self.configure(background=parent.app.colors["bg"])
+        # Modal: while it is open, the list behind cannot change (a row deleted meanwhile made
+        # "OK" overwrite another category or fail).
+        self.after_idle(self._grab)
         frm = ttk.Frame(self, padding=12)
         frm.pack(fill="both", expand=True)
         frm.columnconfigure(1, weight=1)
@@ -786,6 +804,12 @@ class CategoryEditor(tk.Toplevel):
         ttk.Button(btns, text="OK", command=self._ok).pack(side="left", padx=4)
         ttk.Button(btns, text="Cancelar", command=self.destroy).pack(side="left")
 
+    def _grab(self) -> None:
+        try:
+            self.grab_set()
+        except tk.TclError:
+            pass  # not viewable yet / another grab: the index check in _ok still protects
+
     def _browse(self) -> None:
         path = filedialog.askdirectory(parent=self, initialdir=self.folder.get() or self.parent.app.settings.dest_dir)
         if path:
@@ -793,8 +817,16 @@ class CategoryEditor(tk.Toplevel):
 
     def _ok(self) -> None:
         name = self.name.get().strip()
-        if not name or name == OTHER:
+        if not name or name.casefold() == OTHER.casefold():
             messagebox.showwarning("Categoria", "Escolha um nome para a categoria.", parent=self)
+            return
+        taken = {r["name"].casefold() for i, r in enumerate(self.parent.rules) if i != self.index}
+        if name.casefold() in taken:
+            messagebox.showwarning("Categoria", f"Já existe uma categoria \"{name}\". Escolha outro nome.",
+                                   parent=self)
+            return
+        if self.index is not None and self.index >= len(self.parent.rules):
+            self.destroy()  # its row was deleted meanwhile
             return
         lines = lambda w: [x.strip() for x in w.get("1.0", "end").splitlines() if x.strip()]  # noqa: E731
         rule = {"name": name,
@@ -864,7 +896,15 @@ class HostLimitsDialog(tk.Toplevel):
 
     def _save(self) -> None:
         from .hostmemory import parse_limits
-        limits = parse_limits(self.text.get("1.0", "end"))
+        text = self.text.get("1.0", "end")
+        limits = parse_limits(text)
+        bad = [line.strip() for line in text.splitlines()
+               if line.strip() and not parse_limits(line)]
+        if bad:
+            messagebox.showwarning(
+                "Limites por site", "Estas linhas não foram entendidas (use \"site.com = 2\", "
+                "de 1 a 32 ligações, sem https:// nem /):\n\n" + "\n".join(bad[:8]), parent=self)
+            return
         self.app.settings.host_limits = limits
         self.app.settings.save()
         self.app.manager.host_limits = dict(limits)
@@ -1165,14 +1205,17 @@ class DetailsPanel(ttk.Frame):
             buttons = [("↻ Tentar de novo", app._resume), ("Atualizar link", app._update_link),
                        ("Baixar no navegador", app._to_browser)]
         elif st == Status.PAUSED:
-            again = ("o servidor permite continuar ✓" if t.resumable or not t.downloaded
+            again = ("continua de onde parou" if getattr(t, "kind", "") == "video"
+                     else "o servidor permite continuar ✓" if t.resumable or not t.downloaded
                      else "o servidor não permite continuar: recomeça do início")
             rows = [("Baixado", got), ("Estado", f"pausado · {t.error}" if t.error else "pausado"),
                     ("Retomar", again), ("Guardar em", folder)]
             buttons = [("▶ Retomar", app._resume), ("Abrir pasta", app._open_folder), ("✕", app._remove)]
         else:  # queued / starting / video steps
             rows = [("Estado", st), ("Baixado", got), ("Guardar em", folder)]
-            buttons = [("॥ Pausar", app._pause) if t.is_running() else ("▶ Iniciar", app._resume),
+            buttons = [("॥ Pausar", app._pause) if t.is_running()
+                       else ("▶ Começar já", app._start_now) if st == Status.QUEUED
+                       else ("▶ Iniciar", app._resume),
                        ("Abrir pasta", app._open_folder), ("✕", app._remove)]
         self._set_rows(rows)
         self._buttons(buttons)
@@ -1359,7 +1402,7 @@ class SettingsDialog(tk.Toplevel):
             self._head("Windows")
             self._setting_check("Não deixar o PC adormecer durante downloads", "keep_awake", self._awake)
             self._setting_check("Marcar ficheiros como vindos da internet (aviso do Windows ao abrir programas)",
-                                "mark_internet")
+                                "mark_internet", self._mark_internet)
         elif section == "Atualizações":
             self._head("Flow Downloads", first=True)
             self._setting_check("Procurar novas versões uma vez por dia", "check_updates")
@@ -1412,6 +1455,15 @@ class SettingsDialog(tk.Toplevel):
 
     def _awake(self) -> None:
         self.app.manager.keep_awake = self.app.settings.keep_awake
+
+    def _mark_internet(self) -> None:
+        """Takes effect at once, also for downloads already in the list (it used to wait for a
+        restart of the app)."""
+        on = bool(self.app.settings.mark_internet)
+        self.app.manager.mark_internet = on
+        for t in self.app.manager.tasks:
+            if hasattr(t, "mark_internet"):
+                t.mark_internet = on
 
 
 def _version() -> str:
@@ -1520,6 +1572,10 @@ class App(tk.Tk):
     def close_gui(self) -> None:
         """Destroy the window cleanly: cancel pending timers first, so nothing fires afterwards."""
         try:
+            self.url_var.trace_remove("write", self._url_trace)
+        except (tk.TclError, AttributeError, ValueError):
+            pass
+        try:
             # Cancel in Tcl directly: after_cancel() also deletes the Python callback, which
             # destroy() then tries to delete again ("can't delete Tcl command").
             for after_id in self.tk.splitlist(self.tk.call("after", "info")):
@@ -1627,7 +1683,9 @@ class App(tk.Tk):
         entry.focus_set()
         self.placeholder = tk.Label(entry, text="Cole um link para baixar…", anchor="w", cursor="xterm")
         self.placeholder.bind("<Button-1>", lambda _e: entry.focus_set())
-        self.url_var.trace_add("write", lambda *_a: self._placeholder())
+        # (Removed in close_gui: a Tcl trace holds the window from C, and the whole window was
+        # never freed after closing - ~2 MB lost each time it was opened.)
+        self._url_trace = self.url_var.trace_add("write", lambda *_a: self._placeholder())
         self._placeholder()
         ttk.Button(top, text="Baixar", command=self._quick_add, style="Accent.TButton").pack(side="left", padx=(8, 8))
         ttk.Button(top, text="+", width=3, command=self.open_add_dialog, style="Tool.TButton").pack(side="left")
@@ -1745,7 +1803,7 @@ class App(tk.Tk):
     def _pill_categories(self) -> list:
         """Categories that have downloads (plus the chosen one): the pills stay on one line."""
         used = {self._category(t) for t in self.manager.tasks}
-        names = [r["name"] for r in self.settings.category_rules()] + [OTHER]
+        names = list(dict.fromkeys([r["name"] for r in self.settings.category_rules()] + [OTHER]))  # no repeats
         return [f"cat:{n}" for n in names if n in used or self._filter == f"cat:{n}"]
 
     def _pick_filter(self, key: str) -> None:
@@ -1777,6 +1835,10 @@ class App(tk.Tk):
         if not tasks:
             return
         t = tasks[0]
+        if t.status == Status.COMPLETED:
+            # Already here: nothing to hand over (it used to delete the finished file).
+            self.status_var.set("Este download já terminou: o ficheiro está na pasta.")
+            return
         page = (t.headers or {}).get("Referer", "")
         self.service.hand_to_browser(t.url, getattr(t, "_final_url", None) or "")
         webbrowser.open(t.url)
@@ -1792,6 +1854,9 @@ class App(tk.Tk):
         if not tasks:
             return
         t = tasks[0]
+        if t.status == Status.COMPLETED:
+            self.status_var.set("Este download já terminou: não precisa de um link novo.")
+            return
         url = simpledialog.askstring(
             "Atualizar link", "Volte à página do download, copie o link de novo e cole-o aqui:",
             initialvalue="", parent=self)
@@ -1937,14 +2002,20 @@ class App(tk.Tk):
         self.tree.tag_configure(Status.ERROR, foreground=c["error"], font=self._bold_font)
         self.tree.tag_configure(Status.PAUSED, foreground=c["paused"])
         self.tree.tag_configure("stripe", background=c["stripe"])
-        for w in self.winfo_children():  # open dialogs follow the new look (plain Tk widgets)
-            if isinstance(w, tk.Toplevel):
+        def follow(parent) -> None:  # open dialogs (and dialogs of dialogs) follow the new look
+            for w in parent.winfo_children():
                 try:
-                    w.configure(background=c["bg"])
-                    if hasattr(w, "recolor"):
-                        w.recolor()
+                    if isinstance(w, tk.Toplevel):
+                        w.configure(background=c["bg"])
+                        if hasattr(w, "recolor"):
+                            w.recolor()
+                    elif isinstance(w, tk.Text):  # option_add only reaches text boxes made later
+                        w.configure(background=c["field"], foreground=c["fg"], insertbackground=c["fg"],
+                                    highlightcolor=c["accent"], highlightbackground=c["border"])
                 except tk.TclError:
-                    pass
+                    continue
+                follow(w)
+        follow(self)
 
     # ---------------------------------------------------------------- actions
     def add_download(self, url, folder, conns, start=True, filename=None, headers=None,
@@ -1966,7 +2037,8 @@ class App(tk.Tk):
     def _quick_add(self) -> None:
         url = self.url_var.get().strip()
         if not url.lower().startswith(("http://", "https://")):
-            messagebox.showwarning("URL inválida", "Informe um link que comece com http:// ou https:// (FTP ainda não é suportado)")
+            messagebox.showwarning("URL inválida", "Informe um link que comece com http:// ou https:// (FTP ainda não é suportado)",
+                                   parent=self)
             return
         self.url_var.set("")
         if is_video_site(url):
@@ -1994,7 +2066,7 @@ class App(tk.Tk):
             pass
 
     def _choose_dir(self) -> None:
-        path = filedialog.askdirectory(initialdir=self.settings.dest_dir)
+        path = filedialog.askdirectory(initialdir=self.settings.dest_dir, parent=self)
         if path:
             self.settings.dest_dir = path
             self.settings.save()
@@ -2038,6 +2110,13 @@ class App(tk.Tk):
         for t in self._selected():
             self.manager.pause(t)
 
+    def _start_now(self) -> None:
+        """A download waiting in the queue: start it now, over the limit of simultaneous ones."""
+        for t in self._selected():
+            if t.status == Status.QUEUED and not t.is_running():
+                t.start()
+        self._refresh(schedule=False)
+
     def _pause_all(self) -> None:
         for t in self.manager.tasks:
             t.pause()
@@ -2053,7 +2132,7 @@ class App(tk.Tk):
             return
         answer = messagebox.askyesnocancel(
             "Excluir", f"Excluir {len(tasks)} download(s) da lista?\n\n"
-            "Sim = excluir e apagar arquivos incompletos\nNão = só tirar da lista")
+            "Sim = excluir e apagar arquivos incompletos\nNão = só tirar da lista", parent=self)
         if answer is None:
             return
         for t in tasks:
@@ -2068,6 +2147,9 @@ class App(tk.Tk):
             if t.status == Status.COMPLETED and t.path and os.path.exists(t.path):
                 open_path(t.path)
                 return
+            if t.status == Status.COMPLETED:
+                self.status_var.set(f"O ficheiro já não está em {t.path or 'lado nenhum'} (foi movido ou apagado).")
+                return
             if t.status in (Status.PAUSED, Status.ERROR):
                 self.manager.resume(t)
 
@@ -2078,6 +2160,8 @@ class App(tk.Tk):
             folder = os.path.dirname(tasks[0].path)  # e.g. the browser's folder
         if os.path.isdir(folder):
             open_path(folder)
+        else:
+            self.status_var.set(f"A pasta já não existe: {folder}")
 
     def _check_updates(self) -> None:
         """Ajuda → Procurar atualizações: check, ask, download (SHA-256 checked), install."""
@@ -2150,7 +2234,7 @@ class App(tk.Tk):
             return
         task = tasks[0]
         text = simpledialog.askstring(
-            "Verificar checksum", "Cole o checksum indicado no site (MD5, SHA-1 ou SHA-256).\n"
+            "Verificar checksum", "Cole o checksum indicado no site (MD5, SHA-1, SHA-256 ou SHA-512).\n"
             "Deixe vazio para ver o SHA-256 deste ficheiro.", parent=self)
         if text is None:
             return
@@ -2167,9 +2251,21 @@ class App(tk.Tk):
                     result = (True, "SHA-256:\n" + after.file_hash(task.path, "sha256"))
             except OSError as exc:
                 result = (False, f"Não consegui ler o ficheiro: {exc}")
-            self.after(0, lambda: (messagebox.showinfo if result[0] else messagebox.showwarning)(
-                "Verificar checksum", f"{task.filename}\n\n{result[1]}", parent=self))
+            results.put(result)
+        # The answer comes back through a queue read by the window: a thread must never touch
+        # the window itself (if it was closed meanwhile, the result was lost with an error).
+        results: queue.Queue = queue.Queue()
         threading.Thread(target=work, daemon=True).start()
+
+        def show():
+            try:
+                ok, msg = results.get_nowait()
+            except queue.Empty:
+                self.after(200, show)
+                return
+            (messagebox.showinfo if ok else messagebox.showwarning)(
+                "Verificar checksum", f"{task.filename}\n\n{msg}", parent=self)
+        self.after(200, show)
 
     def _collect_garbage(self) -> None:
         gc.collect()
@@ -2324,7 +2420,7 @@ class App(tk.Tk):
             f"   {folder}\n\n"
             "Com o Flow Downloads aberto, os downloads do navegador passam a ser feitos por ele.\n\n"
             "Para baixar um vídeo: copie o link, clique no ícone do Flow Downloads na barra do navegador, "
-            "cole o link em 'Baixar vídeo' e escolha a qualidade.")
+            "cole o link em 'Baixar vídeo' e escolha a qualidade.", parent=self)
 
     # ---------------------------------------------------------------- refresh
     def _on_focus(self, event) -> None:
@@ -2349,8 +2445,11 @@ class App(tk.Tk):
         for iid in self.side.get_children("all"):
             self.side.delete(iid)
         for rule in self.settings.category_rules():
-            self.side.insert("all", "end", iid=f"cat:{rule['name']}", text=rule["name"])
-        self.side.insert("all", "end", iid=f"cat:{OTHER}", text=OTHER)
+            iid = f"cat:{rule['name']}"
+            if rule["name"] != OTHER and not self.side.exists(iid):  # a repeated name (older versions)
+                self.side.insert("all", "end", iid=iid, text=rule["name"])
+        if not self.side.exists(f"cat:{OTHER}"):
+            self.side.insert("all", "end", iid=f"cat:{OTHER}", text=OTHER)
         if getattr(self, "pill_buttons", None) and self.settings.filter_style == "pills":
             self._build_pills()
 

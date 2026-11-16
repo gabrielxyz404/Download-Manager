@@ -1116,3 +1116,178 @@ class IdTests(unittest.TestCase):
         ids = {DownloadTask("http://x/a", "/tmp").id for _ in range(2000)}
         ids |= {VideoTask("http://x/v", "/tmp").id for _ in range(500)}
         self.assertEqual(len(ids), 2500)
+
+
+class BadServer(BaseHTTPRequestHandler):
+    """A server with one bad habit at a time (set before each test). Found by testing the
+    engine against 86 kinds of server behaviour."""
+    protocol_version = "HTTP/1.1"
+    data = b""
+    mode = ""
+    hits = 0
+    names = {}  # path -> Content-Disposition name
+
+    def log_message(self, *a):
+        pass
+
+    def do_GET(self):
+        cls = BadServer
+        cls.hits += 1
+        path = self.path.split("?")[0]
+        data = cls.names.get(path, (None, cls.data))[1]
+        name = cls.names.get(path, (None, None))[0]
+        m = re.match(r"bytes=(\d+)-(\d*)", self.headers.get("Range", ""))
+        if cls.mode == "empty416" and m:
+            self.send_response(416)
+            self.send_header("Content-Range", "bytes */0")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+        if cls.mode in ("truncate_norange", "truncate_once") or not m:
+            body = data
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            if name:
+                self.send_header("Content-Disposition", f'attachment; filename="{name}"')
+            self.end_headers()
+            if cls.mode == "truncate_norange" or (cls.mode == "truncate_once" and cls.hits <= 2):
+                self.wfile.write(body[:len(body) // 3])  # then the connection drops
+                self.close_connection = True
+                return
+            self.wfile.write(body)
+            return
+        if cls.mode == "new_version" and cls.hits > 3:
+            data = cls.data2  # the file was replaced on the server
+        a = int(m.group(1))
+        b = min(int(m.group(2)) if m.group(2) else len(data) - 1, len(data) - 1)
+        total = len(data)
+        body = data[a:b + 1]
+        start = a
+        if cls.mode == "shift":
+            start = max(0, a - 4096)
+            body = data[start:start + len(body)]
+        self.send_response(206)
+        self.send_header("Content-Range", f"bytes {start}-{start + len(body) - 1}/{total}")
+        if cls.mode == "short_body":
+            self.send_header("Content-Length", str(max(0, len(body) - 3000)))
+            self.end_headers()
+            self.wfile.write(body[:max(0, len(body) - 3000)])
+            return
+        self.send_header("Content-Length", str(len(body)))
+        if name:
+            self.send_header("Content-Disposition", f'attachment; filename="{name}"')
+        self.end_headers()
+        try:
+            for i in range(0, len(body), 65536):
+                self.wfile.write(body[i:i + 65536])
+                if cls.mode in ("new_version", "same_name"):
+                    time.sleep(0.003)
+        except OSError:
+            pass
+
+
+class BadServerTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        ThreadingHTTPServer.request_queue_size = 64
+        cls.server = ThreadingHTTPServer(("127.0.0.1", 0), BadServer)
+        cls.server.daemon_threads = True
+        threading.Thread(target=cls.server.serve_forever, daemon=True).start()
+        cls.base = f"http://127.0.0.1:{cls.server.server_address[1]}"
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.shutdown()
+
+    def setUp(self):
+        BadServer.data, BadServer.mode, BadServer.hits, BadServer.names = os.urandom(3 * 1024 * 1024), "", 0, {}
+        self.tmp = tempfile.TemporaryDirectory()
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def run_task(self, path="/f.bin", conns=4, secs=60):
+        task = DownloadTask(self.base + path, self.tmp.name, conns)
+        task.start()
+        task.wait(secs)
+        return task
+
+    def test_cut_off_file_is_never_taken_as_complete(self):
+        """A server without ranges that drops the connection before the announced size: the
+        file used to be saved, cut off, as finished (100%)."""
+        BadServer.mode = "truncate_norange"
+        task = self.run_task()
+        self.assertEqual(task.status, Status.ERROR)
+        self.assertIn("caiu antes do fim", task.error)
+        self.assertFalse(task.path and os.path.exists(task.path))
+        BadServer.mode, BadServer.hits = "truncate_once", 0  # it drops only the first time: tried again
+        task = self.run_task("/g.bin")
+        self.assertEqual(task.status, Status.COMPLETED, task.error)
+        with open(task.path, "rb") as f:
+            self.assertEqual(f.read(), BadServer.data)
+
+    def test_wrong_part_from_the_server_is_never_written(self):
+        """Parts that start elsewhere than asked used to be written where asked: a corrupt
+        file marked finished."""
+        BadServer.mode = "shift"
+        task = DownloadTask(self.base + "/s.bin", self.tmp.name, 4)
+        task.start()
+        time.sleep(4)
+        task.pause()
+        task.wait(10)
+        self.assertNotEqual(task.status, Status.COMPLETED)
+
+    def test_file_replaced_on_the_server_is_not_mixed(self):
+        """The server replaced the file (another size) and ignores If-Range: the download starts
+        over with the new version instead of mixing both."""
+        BadServer.data2 = os.urandom(3 * 1024 * 1024 + 777)
+        BadServer.mode = "new_version"
+        task = self.run_task(conns=4)
+        self.assertEqual(task.status, Status.COMPLETED, task.error)
+        with open(task.path, "rb") as f:
+            self.assertEqual(f.read(), BadServer.data2)
+
+    def test_answer_without_the_rest_does_not_flood_the_server(self):
+        """Answers shorter than they say: it asked again thousands of times a second."""
+        BadServer.mode = "short_body"
+        task = DownloadTask(self.base + "/h.bin", self.tmp.name, 2)
+        task.start()
+        time.sleep(5)
+        hits = BadServer.hits
+        task.pause()
+        task.wait(10)
+        self.assertLess(hits, 60, f"{hits} requests in 5 s")
+
+    def test_empty_file_on_a_strict_server(self):
+        """Servers like S3 answer 416 ("bytes */0") to a range on an empty file."""
+        BadServer.mode, BadServer.data = "empty416", b""
+        task = self.run_task("/vazio.txt")
+        self.assertEqual(task.status, Status.COMPLETED, task.error)
+        self.assertEqual(os.path.getsize(task.path), 0)
+
+    def test_names_with_semicolon_quotes_and_windows_paths(self):
+        from email.message import Message
+        from flowdl.engine import _filename_from_headers
+        for cd, want in (('attachment; filename="a;b.zip"', "a;b.zip"),
+                         (r'attachment; filename="say \"hi\".txt"', "say _hi_.txt"),
+                         (r'attachment; filename="C:\Windows\evil.exe"', "evil.exe"),
+                         ("attachment; filename=plain.zip; size=3", "plain.zip")):
+            msg = Message()
+            msg["Content-Disposition"] = cd
+            self.assertEqual(_filename_from_headers(msg, "http://h/x"), want, cd)
+
+    def test_downloads_with_the_same_name_at_once_get_their_own_files(self):
+        """They used to pick the same free name and write into one file."""
+        BadServer.mode = "same_name"
+        BadServer.names = {f"/get{i}": ("same.bin", os.urandom(1024 * 1024 + i)) for i in range(4)}
+        tasks = [DownloadTask(f"{self.base}/get{i}", self.tmp.name, 2) for i in range(4)]
+        for t in tasks:
+            t.start()
+        for t in tasks:
+            t.wait(60)
+        paths = {t.path for t in tasks}
+        self.assertEqual(len(paths), 4)
+        for i, t in enumerate(tasks):
+            self.assertEqual(t.status, Status.COMPLETED, t.error)
+            with open(t.path, "rb") as f:
+                self.assertEqual(f.read(), BadServer.names[f"/get{i}"][1])

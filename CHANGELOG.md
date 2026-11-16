@@ -1,5 +1,29 @@
 # Novidades do Flow Downloads
 
+## 0.9.5
+
+Testes a fundo: o motor contra 86 tipos de servidor, todos os botões e janelas da app, 300 downloads seguidos, e o Brave com 8 downloads ao mesmo tempo. 23 erros corrigidos, cada um com um teste.
+
+**Downloads**
+- Um ficheiro **cortado a meio** (servidores sem partes) já não é dado como concluído: a app tenta de novo do início (3 vezes) e, se não conseguir, diz porquê.
+- Servidores que respondem com **outra parte** do ficheiro, ou que o **substituem a meio** (outro tamanho), já não produzem ficheiros misturados.
+- Uma resposta que acaba sem dados já não faz a app repetir o pedido milhares de vezes por segundo.
+- Ficheiros vazios (0 bytes) em servidores como o Amazon S3; ficheiros comprimidos pelo servidor (gzip) são desempacotados.
+- Retomar num servidor que limita ligações já não dá "o link deixou de funcionar".
+- Downloads começados ao mesmo tempo com o **mesmo nome** já não escrevem no mesmo ficheiro.
+- Nomes com ";" ou aspas (Content-Disposition) ficam certos.
+
+**Brave**
+- Se o Brave parar a extensão enquanto ela espera pela app, o download do Brave **já não fica parado para sempre** (a extensão acorda sozinha de 30 em 30 s). Extensão 0.9.5: recarregue-a em brave://extensions (↻).
+
+**Janela**
+- Uma categoria com o nome de outra já existente **impedia a janela de abrir**: agora é recusada (e listas antigas com nomes repetidos voltam a abrir).
+- "Baixar no navegador" num download concluído **apagava o ficheiro**; "Atualizar link" baixava-o de novo. Corrigido.
+- Cada abertura e fecho da janela deixava ~2 MB presos na memória.
+- O botão de um download **em fila** não fazia nada: agora "Começar já".
+- "Marcar ficheiros como vindos da internet" passa a valer logo, sem reiniciar.
+- Avisos para checksum mal escrito, limites por site inválidos, profundidade inválida, dias do agendador; avisos à frente da janela certa; "Abrir" e "Abrir pasta" dizem quando o ficheiro ou a pasta já não existem; caixas de texto mudam de cor com o tema; janela das categorias com o botão Guardar visível.
+
 ## 0.9.4
 
 - **Corrigido: velocidade a 0 com as ligações a subir (visto: 8 → 21) e downloads mais lentos do que o navegador.** Quando o servidor (ou a internet) parava todas as ligações, a app lia a queda como "precisa de mais ligações", e ao cortar e reabrir as ligações paradas abria ainda mais no servidor. Alguns servidores e routers castigam isso, e o download ficava preso. Agora:
