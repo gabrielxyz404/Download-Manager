@@ -13,6 +13,7 @@ import json
 import secrets
 import socket
 import threading
+from urllib.parse import urlsplit
 from typing import Callable
 
 DEFAULT_PORT = 17890
@@ -33,7 +34,8 @@ def extension_ok(headers: dict) -> bool:
     return version_tuple(headers.get("x-flowdl-ext")) >= version_tuple(MIN_EXTENSION_VERSION)
 MAX_HEADER = 64 * 1024
 MAX_BODY = 2_000_000
-REASONS = {200: "OK", 204: "No Content", 400: "Bad Request", 403: "Forbidden"}
+REASONS = {200: "OK", 204: "No Content", 400: "Bad Request", 403: "Forbidden", 404: "Not Found",
+           500: "Internal Server Error"}
 
 
 def _video_item(data: dict) -> dict:
@@ -80,7 +82,7 @@ def _browser_headers(value) -> dict:
 def _expected(size, mime) -> dict | None:
     try:
         size = int(size or 0)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         size = 0
     mime = (_header_value(mime) or "").split(";")[0].strip().lower()
     if size <= 0 and not mime:
@@ -92,10 +94,15 @@ def _download_item(data: dict) -> dict:
     url = str(data.get("url", ""))
     if not url.startswith(("http://", "https://")):  # (no FTP: the engine speaks HTTP only)
         raise ValueError("url inválida")
+    parts = urlsplit(url)  # raises ValueError for a broken address ("http://[::1/x")
+    if not parts.hostname:
+        raise ValueError("url inválida")
+    parts.port  # (raises ValueError for a bad port)
+    text = lambda v: v if isinstance(v, str) and v else None
     final = str(data.get("final_url") or "")
     by_host = data.get("cookies_by_host") or {}
-    item = {"url": url, "filename": data.get("filename") or None,
-            "referrer": data.get("referrer") or None, "cookies": data.get("cookies") or None,
+    item = {"url": url, "filename": text(data.get("filename")),
+            "referrer": text(data.get("referrer")), "cookies": text(data.get("cookies")),
             # where the link led in the browser (may be a short-lived signed address)
             "final_url": final if final.startswith(("http://", "https://")) else None,
             # the Cookie header the browser sent to each site, as observed by the extension
@@ -134,7 +141,9 @@ def handle_request(method: str, path: str, headers: dict, body: bytes,
     if api is not None and (path.startswith("/request/") or path in ("/control", "/mirror-done", "/check", "/site")):
         try:
             data = json.loads(body or b"{}") if method == "POST" else {}
-        except ValueError:
+        except (ValueError, RecursionError):
+            return 400, {"ok": False}
+        if not isinstance(data, dict):
             return 400, {"ok": False}
         return api(method, path, data)
     if method != "POST" or path not in ("/add", "/video", "/show"):
@@ -144,9 +153,11 @@ def handle_request(method: str, path: str, headers: dict, body: bytes,
             item = {"kind": "show"}
         else:
             data = json.loads(body or b"{}")
+            if not isinstance(data, dict):
+                raise ValueError("esperado um objeto JSON")
             item = _video_item(data) if path == "/video" else _download_item(data)
-    except (ValueError, TypeError, AttributeError) as exc:
-        return 400, {"ok": False, "error": str(exc)}
+    except (ValueError, TypeError, AttributeError, OverflowError, RecursionError) as exc:
+        return 400, {"ok": False, "error": str(exc)[:200]}
     item["extension_ok"] = extension_ok(headers)  # lets the app suggest an update
     on_add(item)
     return 200, {"ok": True, **({"rid": item["rid"]} if "rid" in item else {})}
@@ -265,6 +276,10 @@ class BrowserBridge:
                                            self.on_add, self.api)
         except (OSError, ValueError):
             code, payload = 400, {"ok": False}
+        except Exception as exc:  # never leave the browser waiting with no answer
+            import traceback
+            traceback.print_exc()
+            code, payload = 500, {"ok": False, "error": type(exc).__name__}
         try:
             out = json.dumps(payload).encode()
             conn.sendall(f"HTTP/1.1 {code} {REASONS.get(code, '')}\r\nContent-Type: application/json\r\n{cors}"

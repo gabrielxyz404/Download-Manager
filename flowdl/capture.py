@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import fnmatch
+import re
 import mimetypes
 import urllib.parse
 
@@ -78,7 +79,9 @@ def set_site_skipped(settings, host: str, skipped: bool) -> bool:
     host = (host or "").strip().lower().rstrip(".")
     if host.startswith("www."):
         host = host[4:]
-    if not host or "/" in host or " " in host:
+    # Only a real site name from the popup (before: "*" or any text was stored, and "*"
+    # stopped the app taking any download at all).
+    if not re.fullmatch(r"[a-z0-9_-]+(\.[a-z0-9_-]+)*|\[[0-9a-f:.]+\]", host) or len(host) > 253:
         return False
     sites = list(getattr(settings, "capture_skip_sites", []))
     before = list(sites)

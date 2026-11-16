@@ -100,6 +100,7 @@ def _fetch(url: str, timeout: float = 60) -> bytes:
 def update_yt_dlp() -> tuple[bool, str]:
     """Fetch the newest yt-dlp if it is newer than ours. Returns (ok, message)."""
     import hashlib
+    import http.client
     import io
     import zipfile
     try:
@@ -109,7 +110,7 @@ def update_yt_dlp() -> tuple[bool, str]:
         if not want:
             return False, "não encontrei o checksum oficial do yt-dlp"
         data = _fetch(UPDATE_URL)
-    except OSError as exc:
+    except (OSError, http.client.HTTPException) as exc:
         return False, f"sem ligação ao GitHub ({exc})"
     if hashlib.sha256(data).hexdigest() != want:
         return False, "o ficheiro descarregado não confere com o checksum oficial: não foi usado"
@@ -376,6 +377,8 @@ class VideoTask:
 
     @classmethod
     def from_dict(cls, d: dict) -> "VideoTask":
+        from .engine import clean_record
+        d = clean_record(d)
         t = cls(d["url"], d["dest_dir"], d.get("format", "bv*+ba/b"), d.get("audio_only", False),
                 d.get("title"), d.get("connections", 8), d.get("id"), d.get("headers"),
                 d.get("cookiefile"), d.get("speed_limit", 0), d.get("quality", ""),

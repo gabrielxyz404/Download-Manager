@@ -48,6 +48,7 @@ FIRST_REQUEST = 2 * 1024 * 1024  # the first request already fetches this much
 REQUEST_SECONDS = 2.0     # each later request asks for ~2 s worth of data...
 MIN_REQUEST = 4 * 1024 * 1024  # ...between 4 MB (a new connection must not stop to ask again at once)...
 MAX_REQUEST = 32 * 1024 * 1024  # ...and 32 MB, on a connection that stays open
+MIRROR_REQUEST = 1024 * 1024  # browser-list downloads: shorter requests (see the worker)
 START_CONNECTIONS = 2     # adaptive mode starts small (4 for big files)...
 START_CONNECTIONS_BIG = 4
 BIG_FILE = 64 * 1024 * 1024
@@ -251,8 +252,46 @@ def _headers(extra: dict | None) -> dict:
     return {"User-Agent": USER_AGENT, **(extra or {})}
 
 
+_NUM = (int, float)
+# The kind of each saved field. A damaged or hand-edited list may hold anything: a field of
+# the wrong kind takes its default (before: the window would not open, or no save worked).
+RECORD_KINDS = {
+    "url": str, "dest_dir": str, "connections": int, "filename": (str, type(None)), "id": str,
+    "headers": dict, "speed_limit": _NUM, "final_url": (str, type(None)), "path": (str, type(None)),
+    "size": (int, type(None)), "downloaded": int, "added_at": _NUM, "mirror": bool,
+    "stream_token": (str, type(None)), "rid": (str, type(None)), "awaiting_browser": bool,
+    "expected_hash": (str, type(None)), "check": str, "active_seconds": _NUM, "peak_speed": _NUM,
+    "first_byte_after": (int, float, type(None)), "leftovers": list, "status": str,
+    "title": (str, type(None)), "format": str, "audio_only": bool, "quality": str,
+    "cookiefile": (str, type(None)),
+}
+
+
+def clean_record(d: dict) -> dict:
+    """A saved download with every field of the right kind (wrong ones dropped)."""
+    if not isinstance(d, dict) or not isinstance(d.get("url"), str) or not isinstance(d.get("dest_dir"), str):
+        raise ValueError("damaged download entry")
+    out = {}
+    for k, v in d.items():
+        kind = RECORD_KINDS.get(k)
+        if kind is not None:
+            if isinstance(v, bool) and kind is not bool and not (isinstance(kind, tuple) and bool in kind):
+                continue  # (True is an int in Python: not a size or a time)
+            if not isinstance(v, kind):
+                continue
+            if isinstance(v, float) and (v != v or abs(v) == float("inf")):
+                continue
+            if isinstance(v, int) and not isinstance(v, bool) and v < 0 and k != "first_byte_after":
+                continue
+        out[k] = v
+    return out
+
+
 def host_of(url: str) -> str:
-    return (urllib.parse.urlsplit(url).hostname or "").lower()
+    try:
+        return (urllib.parse.urlsplit(url).hostname or "").lower()
+    except ValueError:  # a broken address ("http://[::1/x"): no site
+        return ""
 
 
 def split_cookies(url: str, headers: dict | None, cookies: dict | None) -> tuple[dict, dict]:
@@ -495,6 +534,7 @@ class DownloadTask:
 
     @classmethod
     def from_dict(cls, d: dict) -> "DownloadTask":
+        d = clean_record(d)
         t = cls(d["url"], d["dest_dir"], d.get("connections", 8), d.get("filename"), d.get("id"),
                 d.get("headers"), d.get("speed_limit", 0), vault.unprotect(d.get("cookies"), {}),
                 d.get("final_url"))
@@ -1371,7 +1411,13 @@ class DownloadTask:
                         continue
                     try:
                         if resp is None:
-                            req_end = min(seg.end, seg.pos + w.request_size() - 1)
+                            size = w.request_size()
+                            if self.mirror:
+                                # Browser-list downloads: short requests, so the next
+                                # connection can take the work right after this one (a long
+                                # request cannot be split and pushes it far from the start).
+                                size = min(size, max(MIRROR_REQUEST, int(w.speed() * 2)))
+                            req_end = min(seg.end, seg.pos + size - 1)
                             with seg.lock:
                                 seg.inflight_end = req_end
                             req_url = self._current_url()

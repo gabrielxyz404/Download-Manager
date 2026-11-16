@@ -569,7 +569,12 @@ class VideoDialog(tk.Toplevel):
         else:
             app.status_var.set("Instalando o yt-dlp...")
             work = video.install_yt_dlp
-        threading.Thread(target=lambda: q.put(work()), daemon=True).start()
+        def run():
+            try:
+                q.put(work())
+            except Exception as exc:  # always an answer, or the window waits forever
+                q.put((False, f"falhou ({type(exc).__name__}: {exc})"))
+        threading.Thread(target=run, daemon=True).start()
 
         def poll():
             try:
@@ -2203,8 +2208,8 @@ class App(tk.Tk):
                 folder = str(config_dir() / "updates")
                 updater.clean_old(folder)  # earlier updates' installers are not needed any more
                 results.put(("ok", updater.download(update, folder)))
-            except (OSError, ValueError) as exc:
-                results.put(("err", str(exc)))
+            except Exception as exc:  # always an answer, or the window waits forever
+                results.put(("err", str(exc) or type(exc).__name__))
         threading.Thread(target=work, daemon=True).start()
 
         def done():

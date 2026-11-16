@@ -12,6 +12,8 @@ from .paths import config_dir, default_download_dir  # noqa: F401 (re-exported)
 
 
 def task_from_dict(d: dict):
+    if not isinstance(d, dict):
+        raise TypeError("not a download")
     if d.get("kind") == "video":
         from .video import VideoTask
         return VideoTask.from_dict(d)
@@ -45,15 +47,35 @@ class DownloadManager:
         """Load the saved list. With ``auto_resume``, downloads that were running when the
         app closed (or the computer crashed / lost power) are queued again."""
         try:
-            data = json.loads(self.db_path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
+            text = self.db_path.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            text = ""  # not text at all: damaged (kept aside below)
+        except OSError:
+            return
+        try:
+            data = json.loads(text)
+        except (ValueError, RecursionError):
+            try:  # a complete list followed by stray bytes (a disk hiccup): keep the list
+                data = json.JSONDecoder().raw_decode(text.lstrip())[0]
+            except (ValueError, RecursionError):
+                data = None
+            from .settings import keep_damaged
+            keep_damaged(self.db_path)
+        tasks = data.get("tasks") if isinstance(data, dict) else None
+        if not isinstance(tasks, list):
+            # Damaged list: kept aside as downloads.json.bad, never silently emptied for good
+            # (before: the next save replaced it with an empty list, or the app would not start).
+            from .settings import keep_damaged
+            keep_damaged(self.db_path)
             return
         active = (Status.QUEUED, Status.CONNECTING, Status.DOWNLOADING)
         self.tasks = []
-        for d in data.get("tasks", []):
+        dropped = False
+        for d in tasks:
             try:
                 task = task_from_dict(d)
-            except (KeyError, TypeError, ValueError):
+            except Exception:  # one damaged entry must not cost the others
+                dropped = True
                 continue
             if auto_resume and d.get("status") in active:
                 task.status = Status.QUEUED
@@ -63,6 +85,9 @@ class DownloadManager:
                 from .engine import _remove_quietly
                 task.leftovers = [p for p in task.leftovers if not _remove_quietly(p)]
             self.tasks.append(task)
+        if dropped:
+            from .settings import keep_damaged
+            keep_damaged(self.db_path)
 
     def save(self) -> None:
         # One save at a time, from reading the list to replacing the file: engine, bridge,
@@ -209,7 +234,7 @@ class DownloadManager:
         with self._lock:
             running = sum(1 for t in self.tasks if t.is_running())
             for t in self.tasks:
-                if running >= self.max_active:
+                if running >= max(1, int(self.max_active or 1)):
                     break
                 if t.status == Status.QUEUED and not t.is_running():
                     t.start()

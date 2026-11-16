@@ -24,6 +24,14 @@ Testes a fundo: o motor contra 86 tipos de servidor, todos os botões e janelas 
 - "Marcar ficheiros como vindos da internet" passa a valer logo, sem reiniciar.
 - Avisos para checksum mal escrito, limites por site inválidos, profundidade inválida, dias do agendador; avisos à frente da janela certa; "Abrir" e "Abrir pasta" dizem quando o ficheiro ou a pasta já não existem; caixas de texto mudam de cor com o tema; janela das categorias com o botão Guardar visível.
 
+**Ficheiros e pedidos estranhos** (testados com milhares de entradas malformadas)
+- Um pedido malformado vindo do próprio computador **fechava a app em segundo plano**: agora é recusado e a app continua.
+- Um ficheiro de configurações ou a lista de downloads **danificados** (editados à mão, falha do disco) **impediam a app de abrir** ou eram **apagados sem aviso**: agora a app abre sempre, cada valor estranho volta ao normal, e o ficheiro danificado fica guardado ao lado (`.bad`). Uma lista com lixo no fim é recuperada inteira.
+- "Procurar atualizações" e "Atualizar suporte a vídeos" **ficavam presos** em "A procurar..." com certas respostas do servidor: agora dizem sempre o que aconteceu.
+- Uma memória de servidores danificada fazia **todos os downloads falharem**; agora é ignorada.
+- "Não capturar neste site" só aceita nomes de sites reais (antes "*" desligava a captura de tudo).
+- No modo Brave: ficheiros vazios e pedidos repetidos depois do fim já não confundem o navegador; downloads visíveis no navegador acompanham melhor o progresso da app.
+
 ## 0.9.4
 
 - **Corrigido: velocidade a 0 com as ligações a subir (visto: 8 → 21) e downloads mais lentos do que o navegador.** Quando o servidor (ou a internet) parava todas as ligações, a app lia a queda como "precisa de mais ligações", e ao cortar e reabrir as ligações paradas abria ainda mais no servidor. Alguns servidores e routers castigam isso, e o download ficava preso. Agora:

@@ -8,6 +8,7 @@ and installs it silently; the installer starts the app again. Loaded only when u
 from __future__ import annotations
 
 import hashlib
+import http.client
 import json
 import os
 import re
@@ -32,8 +33,11 @@ def version_key(v: str) -> tuple:
 def _get(url: str, timeout: float = 30, accept: str = "application/octet-stream") -> bytes:
     from .engine import USER_AGENT
     req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT, "Accept": accept})
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return resp.read(200 * 1024 * 1024)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return resp.read(200 * 1024 * 1024)
+    except http.client.HTTPException as exc:  # a broken answer is a connection problem too
+        raise OSError(f"resposta inválida do servidor ({type(exc).__name__})") from exc
 
 
 class Update:
@@ -43,7 +47,15 @@ class Update:
 
 
 def check(current: str | None = None) -> tuple[Update | None, str]:
-    """(update or None, message for the user)."""
+    """(update or None, message for the user). Never raises: whatever the server answers,
+    the user gets a message (before: an odd answer left "A procurar atualizações..." forever)."""
+    try:
+        return _check(current)
+    except Exception as exc:
+        return None, f"Não consegui procurar atualizações (resposta inesperada: {type(exc).__name__})."
+
+
+def _check(current: str | None = None) -> tuple[Update | None, str]:
     from . import __version__
     current = current or __version__
     try:
@@ -53,12 +65,16 @@ def check(current: str | None = None) -> tuple[Update | None, str]:
             return None, ("Não consegui ver a página de versões (o repositório no GitHub é privado, "
                           "ou ainda não há versões publicadas).")
         return None, f"Não consegui procurar atualizações (HTTP {exc.code})."
-    except (OSError, ValueError) as exc:
+    except (OSError, ValueError, http.client.HTTPException) as exc:
         return None, f"Sem ligação ao GitHub ({exc})."
-    latest = str(data.get("tag_name", "")).lstrip("v")
+    if not isinstance(data, dict):
+        return None, "Não consegui procurar atualizações (resposta inesperada do GitHub)."
+    latest = str(data.get("tag_name", "")).lstrip("v")[:40]
     if not latest or version_key(latest) <= version_key(current):
         return None, f"Está na versão mais recente ({current})."
-    assets = {a.get("name"): a.get("browser_download_url") for a in data.get("assets") or []}
+    raw = data.get("assets") if isinstance(data.get("assets"), list) else []
+    assets = {a.get("name"): a.get("browser_download_url") for a in raw
+              if isinstance(a, dict) and isinstance(a.get("browser_download_url"), str)}
     if INSTALLER not in assets:
         return None, f"A versão {latest} não tem instalador."
     return (Update(latest, assets[INSTALLER], assets.get(SUMS), str(data.get("body") or "")[:2000],
@@ -67,7 +83,10 @@ def check(current: str | None = None) -> tuple[Update | None, str]:
 
 
 def due(settings) -> bool:
-    return time.time() - float(getattr(settings, "update_checked", 0) or 0) > CHECK_EVERY
+    try:
+        return time.time() - float(getattr(settings, "update_checked", 0) or 0) > CHECK_EVERY
+    except (TypeError, ValueError):
+        return True
 
 
 def download(update: Update, folder) -> str:

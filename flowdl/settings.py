@@ -13,6 +13,38 @@ DEFAULT_COLUMNS = ["name", "size", "progress", "speed", "eta"]  # the details pa
 OLD_DEFAULT_COLUMNS = ["name", "size", "progress", "speed", "eta", "conns", "status"]  # up to 0.8.0
 
 
+NULLABLE = {"theme"}  # None is a real value here (older versions)
+
+
+def _same_kind(value, default, key: str) -> bool:
+    if value is None:
+        return default is None or key in NULLABLE
+    if default is None:
+        return True
+    if isinstance(default, bool) or isinstance(value, bool):
+        return isinstance(value, bool) and isinstance(default, bool)
+    if isinstance(default, (int, float)):
+        return isinstance(value, (int, float)) and value == value and abs(value) != float("inf")
+    return isinstance(value, type(default))
+
+
+def _valid_category(c) -> bool:
+    return (isinstance(c, dict) and isinstance(c.get("name"), str) and c["name"].strip() != ""
+            and isinstance(c.get("exts", []), list) and all(isinstance(e, str) for e in c.get("exts", []))
+            and all(isinstance(c.get(k, []), list) and all(isinstance(x, str) for x in c.get(k, []))
+                    for k in ("url_patterns", "name_patterns"))
+            and (c.get("folder") is None or isinstance(c.get("folder"), str)))
+
+
+def keep_damaged(path) -> None:
+    """Keep a copy of a file that could not be read, so nothing is lost for good."""
+    try:
+        import shutil
+        shutil.copyfile(path, path.with_name(path.name + ".bad"))
+    except OSError:
+        pass
+
+
 class Settings:
     def __init__(self) -> None:
         self.path = config_dir() / "settings.json"
@@ -56,11 +88,45 @@ class Settings:
         self.mark_internet = True    # Windows warns before running a downloaded program, as with the browser
         self.category_folders = True   # save each category in its own folder (Downloads/Vídeos...)
         self.categories: list = []     # rules + folders; empty = the defaults (categories.default_rules)
+        self._load()
+
+    def _load(self) -> None:
+        """Read the saved settings. A damaged file (hand edits, a disk problem) never stops the
+        app: each value of the wrong kind keeps its default, and a file that cannot be read at
+        all is kept aside as settings.json.bad (before: the app closed at every start, or the
+        next save silently reset every setting)."""
         try:
-            data = json.loads(self.path.read_text(encoding="utf-8"))
-            self.__dict__.update({k: v for k, v in data.items() if k != "path"})
-        except (OSError, ValueError):
-            pass
+            text = self.path.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            text = ""  # not text at all: damaged (kept aside below)
+        except OSError:
+            return
+        try:
+            data = json.loads(text)
+        except (ValueError, RecursionError):
+            try:  # a complete list followed by stray bytes (a disk hiccup): keep the list
+                data = json.JSONDecoder().raw_decode(text.lstrip())[0]
+            except (ValueError, RecursionError):
+                data = None
+            keep_damaged(self.path)
+        if not isinstance(data, dict):
+            keep_damaged(self.path)
+            return
+        for k, v in data.items():
+            if k == "path" or k.startswith("_"):
+                continue
+            if k in self.__dict__ and not _same_kind(v, self.__dict__[k], k):
+                continue  # wrong kind of value: keep the default
+            self.__dict__[k] = v
+        self.columns = [c for c in self.columns if isinstance(c, str)] or list(DEFAULT_COLUMNS)
+        self.categories = [c for c in self.categories if _valid_category(c)]
+        self.capture_types = [t for t in self.capture_types if isinstance(t, str)]
+        self.capture_skip_sites = [h for h in self.capture_skip_sites if isinstance(h, str)]
+        self.host_limits = {h: n for h, n in self.host_limits.items()
+                            if isinstance(h, str) and isinstance(n, int) and not isinstance(n, bool) and n >= 1}
+        self.connections = max(1, min(32, int(self.connections)))
+        self.max_active = max(1, min(20, int(self.max_active)))
+        self.global_limit_kb = max(0, int(self.global_limit_kb))
 
     def category_rules(self) -> list:
         from .categories import default_rules

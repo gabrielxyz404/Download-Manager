@@ -8,6 +8,7 @@ and, at the end, a normal finished download saved in the browser's folder.
 
 from __future__ import annotations
 
+import os
 import re
 import socket
 import time
@@ -44,7 +45,16 @@ def serve(conn: socket.socket, task, headers: dict, is_alive) -> bool:
                 return False
             time.sleep(0.05)
         size = task.size
+        if task.status == Status.COMPLETED:
+            done_path = task.data_path()
+            if not done_path or not os.path.isfile(done_path):
+                # Asked again after the browser already has the file (the app's copy is gone):
+                # say so, instead of promising the whole file and sending nothing.
+                _send_error(conn, 404, "Not Found")
+                return False
         m = re.match(r"bytes=(\d+)-", headers.get("range", ""))
+        if size == 0:
+            m = None  # an empty file: nothing to resume, always the whole (empty) answer
         if size is None:
             # No size from the server (one stream from the start): sent as it arrives, ended by
             # closing. Before: held until the whole download finished, and given up after 10 min.

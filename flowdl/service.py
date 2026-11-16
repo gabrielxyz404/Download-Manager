@@ -123,9 +123,10 @@ class Service:
         """Cheap check (no engine import) for downloads to resume at start-up."""
         try:
             data = json.loads((config_dir() / "downloads.json").read_text(encoding="utf-8"))
-        except (OSError, ValueError):
+        except (OSError, ValueError, RecursionError):
             return False
-        return any(t.get("status") in ACTIVE for t in data.get("tasks", []))
+        tasks = data.get("tasks") if isinstance(data, dict) else None
+        return isinstance(tasks, list) and any(isinstance(t, dict) and t.get("status") in ACTIVE for t in tasks)
 
     # -------------------------------------------------------------- bridge
     def start_bridge(self, retries: int = 0) -> bool:
@@ -307,7 +308,7 @@ class Service:
             return 200, {"ok": True, "capture": ok, "reason": reason}
         if path == "/site":  # the popup's "capture on this site" switch
             from .capture import set_site_skipped, skipped_site
-            host = str(data.get("host", ""))
+            host = data.get("host") if isinstance(data.get("host"), str) else ""
             if "skip" in data and set_site_skipped(self.settings, host, bool(data["skip"])):
                 self.settings.save()
             return 200, {"ok": True, "host": host,
@@ -554,7 +555,24 @@ class Service:
         return None
 
     def accept_item(self, item: dict) -> bool:
-        """Handle a browser request. Returns True if it needs a window (dialog)."""
+        """Handle a browser request. Returns True if it needs a window (dialog).
+        Never lets one bad request take the whole app down (before: a malformed request
+        from this computer could close the app running in the background)."""
+        try:
+            return self._accept_item(item)
+        except Exception as exc:
+            import traceback
+            log("request not accepted:", repr(exc))
+            traceback.print_exc()
+            rid = item.get("rid") if isinstance(item, dict) else None
+            if rid:
+                try:  # the browser carries on with its own download
+                    self._set_request(rid, state="failed", error="a app não conseguiu aceitar este download")
+                except Exception:
+                    pass
+            return False
+
+    def _accept_item(self, item: dict) -> bool:
         if item.get("kind") == "show":
             return True
         if item.get("kind") == "video" or self.settings.confirm_browser:
@@ -686,11 +704,21 @@ def _instance_lock(wait: float = 0.0, path=None):
     holds it after ``wait`` seconds."""
     import time
     path = path or (config_dir() / "instance.lock")
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        f = open(path, "a+b")
-    except OSError:
-        return True  # cannot even create it (read-only profile?): do not block the app
+    import tempfile
+    from pathlib import Path
+    # If the usual file cannot be opened (a folder in its place, a read-only profile), one
+    # in the temporary folder still keeps a second copy out (before: no protection at all).
+    tag = "".join(c for c in os.path.expanduser("~") if c.isalnum())[-40:]
+    f = None
+    for candidate in (path, Path(tempfile.gettempdir()) / f"flowdl-{tag}.lock"):
+        try:
+            candidate.parent.mkdir(parents=True, exist_ok=True)
+            f = open(candidate, "a+b")
+            break
+        except OSError:
+            continue
+    if f is None:
+        return True  # cannot create either: do not block the app
     deadline = time.monotonic() + wait
     while True:
         try:

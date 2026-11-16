@@ -15,6 +15,12 @@ MAX_AGE = 30 * 24 * 3600
 MAX_HOSTS = 500
 
 
+def _valid(entry) -> bool:
+    num = lambda v: isinstance(v, (int, float)) and not isinstance(v, bool)
+    return (isinstance(entry, dict) and num(entry.get("time")) and num(entry.get("conns"))
+            and entry["conns"] >= 1 and (entry.get("limit") is None or num(entry["limit"])))
+
+
 class HostMemory:
     def __init__(self, path) -> None:
         self.path = path
@@ -24,9 +30,12 @@ class HostMemory:
     def _load(self) -> dict:
         if self._data is None:
             try:
-                self._data = json.loads(self.path.read_text(encoding="utf-8"))
-            except (OSError, ValueError, AttributeError):
-                self._data = {}
+                data = json.loads(self.path.read_text(encoding="utf-8"))
+            except (OSError, ValueError, AttributeError, RecursionError):
+                data = {}
+            # Only well-formed entries (a damaged file must not break downloads).
+            self._data = {h: e for h, e in data.items() if isinstance(h, str) and _valid(e)} \
+                if isinstance(data, dict) else {}
         return self._data
 
     def get(self, host: str) -> dict | None:
@@ -74,9 +83,12 @@ def parse_limits(text: str) -> dict:
 
 def limit_for(limits: dict, url: str) -> int | None:
     """The user's connection limit for this address's site, if any."""
-    import urllib.parse
-    host = (urllib.parse.urlsplit(url).hostname or "").lower()
-    for site, n in (limits or {}).items():
-        if host == site or host.endswith("." + site):
-            return n
+    from .engine import host_of
+    host = host_of(url)
+    if not host or not isinstance(limits, dict):
+        return None
+    for site, n in limits.items():
+        if isinstance(site, str) and isinstance(n, int) and not isinstance(n, bool) and n >= 1 \
+                and (host == site or host.endswith("." + site)):
+            return min(n, 32)
     return None

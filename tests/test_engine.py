@@ -743,8 +743,9 @@ class StallTests(unittest.TestCase):
             self.assertEqual(task.status, Status.COMPLETED, task.error)
             with open(task.data_path(), "rb") as f:
                 self.assertEqual(hashlib.sha256(f.read()).digest(), hashlib.sha256(BIG * 4).digest())
-            # (before: 0.43 on average; 0.8+ here, ~0.7 on slower machines)
-            self.assertGreater(sum(ratios) / len(ratios), 0.6, [round(r, 2) for r in ratios])
+            # (before: 0.43 on average; then 0.59-0.61 with long requests that could not be
+            # split; with short requests near the start, 0.73)
+            self.assertGreater(sum(ratios) / len(ratios), 0.65, [round(r, 2) for r in ratios])
         finally:
             StalledServer.hang_every, StalledServer.rate, StalledServer.data = 3, 3_000_000, None
             server.shutdown()
