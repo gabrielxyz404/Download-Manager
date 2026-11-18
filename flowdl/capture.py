@@ -15,6 +15,12 @@ DEFAULT_TYPES = (
     "wav webm wma wmv xlsx xz z zip zst"
 ).split()
 
+# Small everyday files the browser handles well, even when a server sends them as a plain
+# "file" (application/octet-stream): never taken just because of that.
+KEEP_IN_BROWSER = set(
+    "txt csv json xml html htm css js ics vcf eml torrent srt vtt sub ass log ini cfg md "
+    "jpg jpeg png gif webp svg ico bmp avif heic".split())
+
 # Types that mean "a file to save" when the name says nothing.
 # Servers' "just a file" types: they map to ".bin", which says nothing about the file - so
 # removing "bin" from the list must not stop these downloads from being taken.
@@ -114,13 +120,18 @@ def should_capture(settings, url: str, final_url: str = "", filename: str = "", 
     if getattr(settings, "capture_all_types", False):
         return True
     types = {t.lower().lstrip(".") for t in getattr(settings, "capture_types", DEFAULT_TYPES)}
+    mime = (mime or "").split(";")[0].strip().lower()
     for name in (filename, name_from_url(final_url) if final_url else "", name_from_url(url)):
         ext = extension_of(name)
         if ext and ext not in NOT_A_TYPE:
-            return ext in types
+            if ext in types:
+                return True
+            # A type nobody chose or removed (".dat", ".vhdx", ".pak"...) that the server sends as
+            # "just a file to save": a download, so the app takes it. Seen: a 5 GB ".dat" test
+            # file stayed with the browser. Types removed from the list still stay with it.
+            return ext not in DEFAULT_TYPES and ext not in KEEP_IN_BROWSER and mime in GENERIC_MIMES
     # The browser often does not know the name yet (links like /download?id=7): use the type of
     # content the server announced, checked against the same list when it maps to a file type.
-    mime = (mime or "").split(";")[0].strip().lower()
     if mime in GENERIC_MIMES:
         return True  # "some file" with no name to judge by: a download (the browser saves it too)
     ext = MIME_TYPES.get(mime) or (mimetypes.guess_extension(mime) or "").lstrip(".")

@@ -72,6 +72,21 @@ class CaptureRuleTests(unittest.TestCase):
             self.assertTrue(should_capture(st, "https://a/get?id=7", mime=mime), mime)
         self.assertFalse(should_capture(st, "https://a/get?id=7", mime="application/pdf"))
 
+    def test_unknown_type_sent_as_a_file_is_taken(self):
+        """Seen by the user: testfile.org's 5 GB "testfile.org-5GB.dat" stayed with the browser
+        ("tipo fora da lista da app") while the 1 GB file went to the app."""
+        dat = "https://testfile.org/files-5GB"
+        self.assertTrue(should_capture(S, dat, filename="testfile.org-5GB.dat", mime="application/octet-stream"))
+        self.assertTrue(should_capture(S, "https://a.com/disco.vhdx", mime="binary/octet-stream"))
+        # ...not when the server says what it is, nor for small everyday files
+        self.assertFalse(should_capture(S, dat, filename="testfile.org-5GB.dat", mime="text/plain"))
+        self.assertFalse(should_capture(S, "https://a.com/notas.txt", mime="application/octet-stream"))
+        self.assertFalse(should_capture(S, "https://a.com/foto.jpg", mime="application/octet-stream"))
+        # a type the user removed from the list stays with the browser
+        class NoPdf(S):
+            capture_types = [t for t in DEFAULT_TYPES if t != "pdf"]
+        self.assertFalse(should_capture(NoPdf, "https://a.com/doc.pdf", mime="application/octet-stream"))
+
     def test_all_types_and_skipped_sites(self):
         class All(S):
             capture_all_types = True

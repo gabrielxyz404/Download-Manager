@@ -1,5 +1,9 @@
 # Novidades do Flow Downloads
 
+## 0.9.7
+
+- **Ficheiros de tipos pouco comuns já vão para a app.** Um ficheiro com uma extensão que não está na lista (".dat", ".vhdx", ".pak"...) mas que o site envia como "ficheiro para guardar" ficava com o navegador (visto: o ficheiro de 5 GB do testfile.org, "testfile.org-5GB.dat"). Agora a app fica com ele. Os tipos que tirou da lista continuam com o navegador, e ficheiros pequenos do dia a dia (texto, imagens, legendas) também.
+
 ## 0.9.6
 
 - **Já não cria pastas vazias** ("Compactados", "Vídeos"...) quando o download aparece na lista do Brave: o ficheiro vai para a pasta do navegador e a app já não cria a pasta da categoria.
