@@ -72,6 +72,9 @@ def browser_request(item: dict) -> tuple[dict, dict]:
     return headers, cookies
 
 
+NOTIFY_LEFT_MIN = 20 * 1024 * 1024  # files left to the browser that deserve a word
+
+
 class Service:
     def __init__(self, settings: Settings | None = None, manager=None, port: int = DEFAULT_PORT):
         self.settings = settings or Settings()
@@ -266,6 +269,26 @@ class Service:
             except Exception:
                 pass
 
+    def _tell_left_to_browser(self, url: str, final: str, filename: str, size, reason: str) -> None:
+        """A big file the app leaves to the browser because of its type or site: say so, with
+        the way to change it (seen: the user could not tell why the app "did nothing")."""
+        try:
+            size = int(size or 0)
+        except (TypeError, ValueError, OverflowError):
+            size = 0
+        if size < NOTIFY_LEFT_MIN or self.tray is None or not getattr(self.settings, "tray_notify", True):
+            return
+        from .categories import extension_of, name_from_url
+        name = filename or name_from_url(final or url) or "Download"
+        ext = extension_of(name)
+        how = (f"Para a app ficar com ficheiros .{ext}: Configurações → Navegador → tipos de ficheiro."
+               if reason.startswith("tipo") and ext else
+               "Para mudar: botão do Flow Downloads no navegador → \"Capturar neste site\".")
+        try:
+            self.tray.notify("Este download ficou com o navegador", f"{name} ({reason})\n{how}")
+        except Exception:
+            pass
+
     def _task_for(self, rid: str):
         tid = self.requests.get(rid, {}).get("task")
         return next((t for t in self.manager.tasks if t.id == tid), None) if tid else None
@@ -314,6 +337,8 @@ class Service:
                                 str(data.get("mime", "")), ref)
             reason = "" if ok else ("site ignorado" if skipped_site(self.settings, url, final, ref)
                                     else "tipo fora da lista da app")
+            if not ok:
+                self._tell_left_to_browser(url, final, str(data.get("filename", "")), data.get("size"), reason)
             return 200, {"ok": True, "capture": ok, "reason": reason}
         if path == "/site":  # the popup's "capture on this site" switch
             from .capture import set_site_skipped, skipped_site

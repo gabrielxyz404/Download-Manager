@@ -1,5 +1,10 @@
 # Novidades do Flow Downloads
 
+## 0.9.9
+
+- **Ficheiros grandes arrancam mais depressa.** Num download que aparece na lista do Brave, as ligações novas pediam ao início blocos muito pequenos e demoravam a ganhar velocidade (visto: um ficheiro de 5 GB começava a ~6 MB/s e ficava 16 s atrás do Brave). Agora pedem blocos do tamanho certo desde o início, e os ficheiros grandes começam com 8 ligações em vez de 4.
+- **A app diz porque não ficou com um ficheiro grande.** Quando um ficheiro com mais de 20 MB fica com o navegador por o tipo não estar na lista (ou o site estar ignorado), aparece um aviso a dizer porquê e como mudar. Extensão 0.9.9: recarregue-a em brave://extensions (↻).
+
 ## 0.9.8
 
 - **O Brave já não pergunta duas vezes onde guardar.** Com a opção do Brave "Perguntar onde guardar cada ficheiro" ligada, aparecia uma segunda janela "Salvar como" quando a app ficava com o download. Agora só aparece a do Brave, e o ficheiro fica com o nome que escolheu nela. Extensão 0.9.8: recarregue-a em brave://extensions (↻).

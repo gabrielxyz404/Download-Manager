@@ -1097,15 +1097,17 @@ class ConnectionReuseTests(unittest.TestCase):
         self.download()
         self.assertEqual(KeepAliveServer.first_range, "bytes=0-2097151")  # not a 1-byte probe
 
-    def test_big_files_start_with_four_connections(self):
-        task = DownloadTask(self.base + "/grande.bin", self.tmp.name, 8)
+    def test_big_files_start_with_eight_connections(self):
+        """(4 until 0.9.8: on fast lines, big files waited seconds for the speed to build up)"""
+        task = DownloadTask(self.base + "/grande.bin", self.tmp.name, 16)
         import flowdl.engine as eng
         old = eng.BIG_FILE
         eng.BIG_FILE = 1024 * 1024  # treat our 15 MB test file as "big"
         try:
             task.start()
             time.sleep(1.0)  # before the first speed check (2 s)
-            self.assertEqual(task.active_connections, 4)
+            self.assertEqual(task._target, 8)  # (one may already have finished its small piece)
+            self.assertGreaterEqual(task.active_connections, 6)
         finally:
             eng.BIG_FILE = old
             task.pause()

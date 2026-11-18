@@ -628,6 +628,7 @@ async function handleDownload(item) {
   const verdict = await postJson("/check", {
     url, final_url: finalUrl, filename: item.filename ? item.filename.split(/[\\/]/).pop() : "",
     mime: item.mime || "", referrer: item.referrer || "",
+    size: item.totalBytes > 0 ? item.totalBytes : (item.fileSize > 0 ? item.fileSize : 0),
   }, 2);
   if (verdict && verdict.capture === false) {
     await resumeOriginal();

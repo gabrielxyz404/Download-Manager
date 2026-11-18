@@ -50,7 +50,7 @@ MIN_REQUEST = 4 * 1024 * 1024  # ...between 4 MB (a new connection must not stop
 MAX_REQUEST = 32 * 1024 * 1024  # ...and 32 MB, on a connection that stays open
 MIRROR_REQUEST = 1024 * 1024  # browser-list downloads: shorter requests (see the worker)
 START_CONNECTIONS = 2     # adaptive mode starts small (4 for big files)...
-START_CONNECTIONS_BIG = 4
+START_CONNECTIONS_BIG = 8  # (was 4: fast lines waited seconds for the speed to build up)
 BIG_FILE = 64 * 1024 * 1024
 MEMORY_MIN_SIZE = 8 * 1024 * 1024  # downloads at least this big teach us about their server
 RAMP_INTERVAL = 2.0       # ...measures the speed every 2 s...
@@ -1412,11 +1412,16 @@ class DownloadTask:
                     try:
                         if resp is None:
                             size = w.request_size()
-                            if self.mirror:
+                            # (a new connection: the others' speed as a first guess)
+                            est = w.speed() or self.speed / max(1, self._active_workers)
+                            if self.mirror and est > 0:
                                 # Browser-list downloads: short requests, so the next
                                 # connection can take the work right after this one (a long
                                 # request cannot be split and pushes it far from the start).
-                                size = min(size, max(MIRROR_REQUEST, int(w.speed() * 2)))
+                                # Not before the connection's speed is known: tiny first
+                                # requests kept new connections slow (seen: a 5 GB file started
+                                # at ~6 MB/s and took 16 s longer than the browser).
+                                size = min(size, max(MIRROR_REQUEST, int(est * 2)))
                             req_end = min(seg.end, seg.pos + size - 1)
                             with seg.lock:
                                 seg.inflight_end = req_end

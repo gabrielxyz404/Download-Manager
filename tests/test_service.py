@@ -141,6 +141,23 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(self.svc.requests["rg"]["state"], "failed")
         self.assertTrue(told and "HTTP 403" in told[0], told)
 
+    def test_a_big_file_left_to_the_browser_is_explained(self):
+        """Seen: a mod went to the browser and the user could not tell why the app "did
+        nothing" (its type was not in the list). Big files left to the browser get a notice."""
+        told = []
+        self.svc.tray = type("Tray", (), {"notify": lambda s, title, text, warning=False: told.append(text)})()
+        try:
+            self.settings.capture_types = ["zip"]
+            ask = lambda **kw: self.svc.api("POST", "/check", {"url": "https://a.com/f", "mime": "text/plain", **kw})
+            self.assertFalse(ask(filename="mod.fifamod", size=300 * 1024 * 1024)[1]["capture"])
+            self.assertTrue(told and ".fifamod" in told[0] and "Configurações" in told[0], told)
+            told.clear()
+            ask(filename="notas.txt", size=2000)  # small files: no notice
+            ask(filename="mod.fifamod")           # size unknown (older extension): no notice
+            self.assertEqual(told, [])
+        finally:
+            self.svc.tray = None
+
     def test_has_it_started_is_answered_within_the_limit(self):
         """The browser stops an extension whose request takes over 30 s (and the browser's own
         paused download is then forgotten). Found in an audit: the answer could take 20 + 20 s."""
