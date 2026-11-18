@@ -1,5 +1,9 @@
 # Novidades do Flow Downloads
 
+## 0.9.10
+
+- **Corrigido: download parado a 0 B/s em servidores que só aceitam poucas ligações** (visto no thinkbroadband: "o servidor parou: 4 ligações" e 13 ligações abertas, para sempre). Esses servidores só voltam a enviar quando o número de ligações abertas desce, e a app ficava à espera que as ligações acordassem. Agora, se a paragem durar mais de 2 segundos, a app fecha as ligações a mais e o servidor volta a enviar. Depois de um servidor parar uma vez, a app nunca mais passa do número que ele aceitou nesse download, nem para acabar as últimas partes.
+
 ## 0.9.9
 
 - **Ficheiros grandes arrancam mais depressa.** Num download que aparece na lista do Brave, as ligações novas pediam ao início blocos muito pequenos e demoravam a ganhar velocidade (visto: um ficheiro de 5 GB começava a ~6 MB/s e ficava 16 s atrás do Brave). Agora pedem blocos do tamanho certo desde o início, e os ficheiros grandes começam com 8 ligações em vez de 4.

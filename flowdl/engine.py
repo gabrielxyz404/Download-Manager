@@ -69,6 +69,7 @@ TIMEOUT = 30
 SINGLE_TRIES = 3          # a server that cannot continue mid-file: start over this many times
 CHECKPOINT_S = 5.0        # progress forced onto the disk this often (a power cut loses at most this)
 PROBE_OK_BYTES = 256 * 1024  # a fresh connection that got this much really works (not a trickle)
+OUTAGE_SHED_S = 2.0       # a stop longer than this: close the connections above the new number
 OUTAGE_CALM_S = 90.0      # after the server stopped every connection: fewer connections for this long
 RESCUE_EXTRA = 2          # a stuck piece may add this many connections over the maximum (while
                           # the stuck ones, which leave once they wake, are at most the maximum)
@@ -327,6 +328,7 @@ class _Worker:
         self.quiet_swaps = 0  # replaced for silence with no data in between (backs off)
         self.rescued_at = 0.0  # when its piece was last handed to a fresh connection
         self.retired = False  # its piece went to a fresh connection: leave instead of taking more
+        self.shed = False  # closed during a long stop: more connections than the server takes
         self.rescuer = False  # it was opened to take a stuck connection's piece
         self.answering = False  # the server has started answering the current request
         self.alive = True
@@ -406,6 +408,7 @@ class DownloadTask:
         self.outages = 0  # times every connection went silent together (this download)
         self._target = 1 << 30  # connections wanted now (set by the download loop)
         self._in_outage = False  # every connection stopped together (no cutting / reopening)
+        self._outage_started: float | None = None
         self._tail = False  # the last few seconds of work: stuck pieces are always rescued
         self._accepted_any = True  # the server accepted a connection in this run
         self._wake = threading.Event()  # set when a connection finishes: react at once
@@ -1100,6 +1103,7 @@ class DownloadTask:
             slowed = flowing_at and now - flowing_at > STALL_ALONE_SECONDS
             silent = now - self._last_rx if self._last_rx else 0.0
             self._in_outage = outage_since is not None
+            self._outage_started = outage_since
             with self._lock:
                 busy = [w for w in self._workers if w.alive and w.seg is not None
                         and w.seg.active and w.seg.remaining > 0]
@@ -1297,6 +1301,25 @@ class DownloadTask:
         self.segments = sorted(self.segments + [new], key=lambda s: s.start)
         return new
 
+    def _shed_extra_connections(self, now: float, target: int | None) -> None:
+        """The server stopped every connection, and still sends nothing after a few seconds:
+        close the connections above the new (halved) number. Some servers only send again once
+        fewer connections are open (seen: thinkbroadband, 13 open, 0 B/s for ever, while the
+        app waited for them to wake up). Their pieces go back to the connections that stay."""
+        started = self._outage_started
+        if not self._in_outage or started is None or now - started < OUTAGE_SHED_S or not target:
+            return
+        with self._lock:
+            staying = [w for w in self._workers if w.alive and not w.shed]
+        extra = len(staying) - max(1, target)
+        if extra <= 0:
+            return
+        # The ones that brought the least go: the best connections stay.
+        for w in sorted(staying, key=lambda x: x.total)[:extra]:
+            w.shed = w.retired = w.reconnect = True
+            if w.conn is not None:
+                w.conn.abort()
+
     def _replace_slow_connections(self, now: float, target: int | None = None) -> None:
         """A connection much slower than the others is often stuck on a slow server node.
         Ask it to reconnect (a new connection may land on a faster one)."""
@@ -1309,6 +1332,7 @@ class DownloadTask:
             # (worker, its piece) read once: a worker may drop its piece at any moment
             busy = [(w, w.seg) for w in self._workers if w.alive and w.seg is not None and w.seg.active]
         receiving = sum(1 for w, _ in busy if now - w.last_data < 1.0)
+        self._shed_extra_connections(now, target)
         # When every connection seems stopped, ONE fresh connection tells whether the server
         # stopped (it gets nothing either: then wait) or only some connections are stuck (it
         # gets data at once: rescue goes on, one at a time). Never a crowd of new ones.
@@ -1337,6 +1361,10 @@ class DownloadTask:
                 base = max(base, 3 * self._answer_time)
             limit = min(base * 2 ** w.quiet_swaps, TIMEOUT)
             quiet = now - w.last_data
+            # After the server stopped us once: never above the number it took (a server that
+            # punishes "too many" stopped again for the extra rescuers, near the end).
+            room = min(self.connections, self._target) if self.outages else self.connections
+            extra = 0 if self.outages else RESCUE_EXTRA
             # Rescue only outside an outage and within the maximum + RESCUE_EXTRA (and as many
             # stuck ones still leaving): never more connections than that.
             with self._lock:
@@ -1347,8 +1375,8 @@ class DownloadTask:
             if (quiet > base and now - w.rescued_at > base and not outage and not w.retired
                     and (not self._in_outage or not probing)
                     and not (w.rescuer and w.total < PROBE_OK_BYTES)
-                    and working < self.connections + RESCUE_EXTRA
-                    and alive < 2 * self.connections + RESCUE_EXTRA):  # stuck ones still leaving
+                    and working < room + extra
+                    and alive < 2 * room + extra):  # stuck ones still leaving
                 # Hand what it still has to receive to a fresh connection now, whether or not
                 # the stuck one wakes up (on Windows it may not until its timeout). If it does
                 # wake, its piece is empty and it simply takes other work. No back-off here:
@@ -1399,6 +1427,8 @@ class DownloadTask:
             f = self._fh
             if True:
                 while not self._stop.is_set():
+                    if w.shed:
+                        break  # closed during a long stop: its piece goes back to the others
                     if seg.remaining == 0 and resp is None:
                         seg.active = False
                         if w.retired:
@@ -1515,6 +1545,8 @@ class DownloadTask:
                             continue
                         if w.reconnect:
                             conn.close()
+                            if w.shed:
+                                break
                             w.reconnect = False
                             w.swaps += 1
                             w.last_swap = time.monotonic()
@@ -1524,6 +1556,8 @@ class DownloadTask:
                             seg.inflight_end = -1
                         resp = None
                         conn.close()
+                        if w.shed:
+                            break
                         if w.reconnect and not isinstance(exc, net.HTTPError):
                             # We cut this connection ourselves (it had stopped receiving): just
                             # open a new one now, no waiting and no failed try counted -

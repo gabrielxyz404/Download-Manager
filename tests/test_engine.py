@@ -508,6 +508,56 @@ class OutageServer(BaseHTTPRequestHandler):
             pass
 
 
+class HoldServer(BaseHTTPRequestHandler):
+    """Like thinkbroadband (seen by the user): sends nothing at all while more than LIMIT
+    connections are open, and only again once fewer are open."""
+    protocol_version = "HTTP/1.1"
+    LIMIT = 4
+    lock = threading.Lock()
+    open = 0
+    data = b""  # set by the test
+
+    def log_message(self, *a):
+        pass
+
+    def setup(self):
+        super().setup()
+        with HoldServer.lock:
+            HoldServer.open += 1
+
+    def finish(self):
+        try:
+            super().finish()
+        finally:
+            with HoldServer.lock:
+                HoldServer.open -= 1
+
+    def do_GET(self):
+        import select
+        import socket
+        data = HoldServer.data
+        m = re.match(r"bytes=(\d+)-(\d*)", self.headers.get("Range", ""))
+        a = int(m.group(1)) if m else 0
+        b = min(int(m.group(2)), len(data) - 1) if m and m.group(2) else len(data) - 1
+        self.send_response(206 if m else 200)
+        if m:
+            self.send_header("Content-Range", f"bytes {a}-{b}/{len(data)}")
+        self.send_header("Content-Length", str(b - a + 1))
+        self.send_header("Accept-Ranges", "bytes")
+        self.end_headers()
+        try:
+            for i in range(a, b + 1, 32768):
+                while HoldServer.open > HoldServer.LIMIT:
+                    time.sleep(0.05)
+                    r, _, _ = select.select([self.connection], [], [], 0)
+                    if r and self.connection.recv(1, socket.MSG_PEEK) == b"":
+                        return  # the client closed it (a real server notices)
+                self.wfile.write(data[i:min(i + 32768, b + 1)])
+                time.sleep(0.01)
+        except OSError:
+            pass
+
+
 class PenaltyServer(BaseHTTPRequestHandler):
     """A server (or a home router) that stops sending to EVERY connection for a while when a
     client opens more than LIMIT at once - what a user saw: speed down to 0 three times,
@@ -661,6 +711,35 @@ class StallTests(unittest.TestCase):
                 self.assertEqual(hashlib.sha256(f.read()).digest(), hashlib.sha256(BIG).digest())
         finally:
             OutageServer.outage = 20.0
+            server.shutdown()
+            tmp.cleanup()
+
+    def test_server_that_waits_for_fewer_connections_is_not_waited_on_for_ever(self):
+        """Seen on thinkbroadband: past its limit the server sent nothing, and the app kept all
+        13 connections open waiting for them to wake up: 0 B/s for ever. Now, a stop longer
+        than a moment closes the connections above the new number, and the server sends again."""
+        HoldServer.open, HoldServer.data = 0, BIG * 12
+        ThreadingHTTPServer.request_queue_size = 64
+        server = ThreadingHTTPServer(("127.0.0.1", 0), HoldServer)
+        server.daemon_threads = True
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        tmp = tempfile.TemporaryDirectory()
+        try:
+            task = DownloadTask(f"http://127.0.0.1:{server.server_address[1]}/f.bin", tmp.name, 8)
+            task.start()
+            fewer_at = None
+            t0 = time.monotonic()
+            while task.is_running() and time.monotonic() - t0 < 30:
+                time.sleep(0.2)
+                if fewer_at is None and task.outages and task.active_connections <= HoldServer.LIMIT:
+                    fewer_at = time.monotonic() - t0
+            got = task.downloaded
+            task.pause()
+            task.wait(10)
+            self.assertGreaterEqual(task.outages, 1)
+            self.assertIsNotNone(fewer_at, "kept every connection open while the server waited")
+            self.assertGreater(got, len(HoldServer.data) // 3, "the server never sent again")
+        finally:
             server.shutdown()
             tmp.cleanup()
 
