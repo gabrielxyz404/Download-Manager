@@ -381,10 +381,26 @@ async function waitForApp(rid, original, since = Date.now()) {
       return;
     }
     if (st.state === "started") { // the app is receiving the file: the browser shows the app's copy
+      // The name the browser had for it (chosen in its "Save as" window, when it asks): the
+      // app's copy keeps it, and the browser must not ask a second time where to save it
+      // (seen: with "ask where to save each file" on, Brave asked twice for one download).
+      let name = "";
+      if (original) {
+        try {
+          const [it] = await chrome.downloads.search({ id: original.id });
+          name = it && it.filename ? it.filename.split(/[\\/]/).pop() : "";
+        } catch {}
+      }
       await dropOriginal(original);
       // Noted BEFORE the browser starts it: a tiny file may finish before download() returns.
       await updateStored("streams", (m) => { m[st.stream] = rid; });
-      const id = await chrome.downloads.download({ url: APP + st.stream, conflictAction: "uniquify" });
+      const opts = { url: APP + st.stream, conflictAction: "uniquify", saveAs: false };
+      let id;
+      try {
+        id = await chrome.downloads.download(name ? { ...opts, filename: name } : opts);
+      } catch { // a name the browser will not take as it is: the app's own name instead
+        id = await chrome.downloads.download(opts);
+      }
       await updateStored("mirrors", (m) => { m[id] = rid; });
       if (original) await note(original.label, "baixado pela app ✔");
       return;

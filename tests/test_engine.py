@@ -770,6 +770,26 @@ class HostMemoryTests(unittest.TestCase):
             path.write_text("estragado")
             self.assertIsNone(HostMemory(path).get("lento.com"))  # a damaged file is just ignored
 
+    def test_fewer_connections_after_stops_is_only_for_a_few_hours(self):
+        """Seen: after a big download during which the server stopped, the next downloads from
+        the same server were slow in the app for 30 days (fewer connections) while the
+        browser got its full speed. A refusal limit (403 with more) is still kept."""
+        from flowdl import hostmemory
+        import pathlib
+        with tempfile.TemporaryDirectory() as d:
+            path = pathlib.Path(d) / "hosts.json"
+            mem = hostmemory.HostMemory(path)
+            mem.put("cdn.exemplo.com", 4, None, outage_limit=4)
+            mem.put("recusa.com", 2, 2, outage_limit=1)
+            again = hostmemory.HostMemory(path)
+            self.assertEqual(again.get("cdn.exemplo.com")["limit"], 4)  # right after: careful
+            self.assertEqual(again.get("recusa.com")["limit"], 1)
+            for h in ("cdn.exemplo.com", "recusa.com"):
+                again._load()[h]["time"] -= hostmemory.OUTAGE_LIMIT_AGE + 60
+            self.assertIsNone(again.get("cdn.exemplo.com")["limit"])  # hours later: full speed again
+            self.assertEqual(again.get("cdn.exemplo.com")["conns"], 4)
+            self.assertEqual(again.get("recusa.com")["limit"], 2)  # the server's own limit stays
+
     def test_second_download_from_the_same_server_starts_where_it_paid_off(self):
         from flowdl.hostmemory import HostMemory
         import pathlib

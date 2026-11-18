@@ -1161,11 +1161,11 @@ class DownloadTask:
         if self.host_memory and all(s.remaining == 0 for s in self.segments) and self.size >= MEMORY_MIN_SIZE:
             # Remember for next time (only downloads long enough to have measured something).
             learned = self.server_limit or self._settled_at or target
-            limit = self.server_limit
-            if self.outages >= 2:  # stopped again and again with more: remember to use fewer
-                limit = min(limit or soft_cap, soft_cap)
+            outage_limit = None
+            if self.outages >= 2:  # stopped again and again with more: use fewer for a while
+                outage_limit = soft_cap
                 learned = min(learned, soft_cap)
-            self.host_memory.put(host_of(self._current_url()), learned, limit)
+            self.host_memory.put(host_of(self._current_url()), learned, self.server_limit, outage_limit)
         self._workers = []
         if self._file_changed:
             raise FileChanged()

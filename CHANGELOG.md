@@ -1,5 +1,10 @@
 # Novidades do Flow Downloads
 
+## 0.9.8
+
+- **O Brave já não pergunta duas vezes onde guardar.** Com a opção do Brave "Perguntar onde guardar cada ficheiro" ligada, aparecia uma segunda janela "Salvar como" quando a app ficava com o download. Agora só aparece a do Brave, e o ficheiro fica com o nome que escolheu nela. Extensão 0.9.8: recarregue-a em brave://extensions (↻).
+- **A app já não fica lenta num site durante um mês** depois de um download em que o servidor parou. Quando um servidor parava várias vezes, a app passava a usar menos ligações com ele durante 30 dias, e os downloads seguintes desse site ficavam mais lentos do que no navegador. Agora isso dura só algumas horas. O limite que o próprio servidor impõe (quando recusa mais ligações) continua a ser respeitado.
+
 ## 0.9.7
 
 - **Ficheiros de tipos pouco comuns já vão para a app.** Um ficheiro com uma extensão que não está na lista (".dat", ".vhdx", ".pak"...) mas que o site envia como "ficheiro para guardar" ficava com o navegador (visto: o ficheiro de 5 GB do testfile.org, "testfile.org-5GB.dat"). Agora a app fica com ele. Os tipos que tirou da lista continuam com o navegador, e ficheiros pequenos do dia a dia (texto, imagens, legendas) também.
