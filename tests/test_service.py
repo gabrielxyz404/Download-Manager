@@ -110,6 +110,37 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(self.svc._verdict(task), "ok")
         Handler.delay = 0.0
 
+    def test_browser_list_download_never_creates_a_category_folder(self):
+        """Seen by the user: an empty "Compactados" folder appeared in Downloads after a zip
+        downloaded in Brave's list (the file itself goes to the browser's folder)."""
+        self.settings.show_progress_window = False
+        self.settings.category_folders = True
+        self.svc.apply_category_settings()
+        self.svc.requests["rz"] = {"state": "waiting"}
+        self.svc.add_from_browser({"url": self.base + "/pacote.zip", "rid": "rz", "mirror": True})
+        task = self.svc._task_for("rz")
+        self.assertTrue(_until(lambda: task.path is not None, 10))
+        self.assertEqual(os.path.dirname(task.path), self.tmp.name)
+        task.pause()
+        task.wait(10)
+        self.assertEqual([d for d in os.listdir(self.tmp.name) if os.path.isdir(os.path.join(self.tmp.name, d))], [])
+        # (a download the app keeps, not shown in the browser, still uses the category folder)
+        kept = self.svc.manager.add(self.base + "/outro.zip", self.tmp.name, 2, auto_folder=True)
+        self.assertTrue(_until(lambda: kept.path is not None, 10))
+        self.assertNotEqual(os.path.dirname(kept.path), self.tmp.name)
+        kept.pause()
+        kept.wait(10)
+
+    def test_the_user_is_told_why_the_browser_kept_a_download(self):
+        """Before: the browser simply carried on and nothing said why the app did not take it."""
+        told = []
+        self.svc.tray = type("Tray", (), {"notify": lambda s, title, text, warning=False: told.append(text)})()
+        self.svc.requests["rg"] = {"state": "waiting"}
+        self.svc._give_back("rg", "O site recusou a app (HTTP 403)")
+        self.svc.tray = None
+        self.assertEqual(self.svc.requests["rg"]["state"], "failed")
+        self.assertTrue(told and "HTTP 403" in told[0], told)
+
     def test_has_it_started_is_answered_within_the_limit(self):
         """The browser stops an extension whose request takes over 30 s (and the browser's own
         paused download is then forgotten). Found in an audit: the answer could take 20 + 20 s."""

@@ -256,6 +256,15 @@ class Service:
             self.manager.remove(task, delete_files=True)
             self.events.put(("tick", None))
         self._set_request(rid, state="failed", error=reason)
+        # Say why the app did not take it (before: the browser simply carried on, and the
+        # user could not tell what had happened).
+        if self.tray is not None and getattr(self.settings, "tray_notify", True):
+            name = getattr(task, "filename", None) or "Download"
+            try:
+                self.tray.notify("Este download ficou com o navegador",
+                                 f"{name}\n{reason}", warning=True)
+            except Exception:
+                pass
 
     def _task_for(self, rid: str):
         tid = self.requests.get(rid, {}).get("task")
@@ -589,7 +598,10 @@ class Service:
         headers, cookies = browser_request(item)
         task = self.manager.add(item["url"], self.settings.dest_dir, self.settings.connections,
                                 filename=item.get("filename"), headers=headers, cookies=cookies,
-                                final_url=item.get("final_url"), auto_folder=True,
+                                # Shown in the browser's list: the file ends up in the browser's
+                                # folder, never in a category folder (before: an empty
+                                # "Compactados" / "Vídeos" folder was left behind).
+                                final_url=item.get("final_url"), auto_folder=not item.get("rid"),
                                 page=item.get("referrer") or "", expect=item.get("expect"),
                                 now=bool(item.get("rid")))
         self.bind_request(item.get("rid"), task)

@@ -1,5 +1,10 @@
 # Novidades do Flow Downloads
 
+## 0.9.6
+
+- **Já não cria pastas vazias** ("Compactados", "Vídeos"...) quando o download aparece na lista do Brave: o ficheiro vai para a pasta do navegador e a app já não cria a pasta da categoria.
+- Quando a app **não fica com um download** e o deixa ao navegador (o site recusou a app, falta de espaço...), aparece um **aviso a dizer porquê**. Antes o navegador simplesmente continuava e não se sabia o que tinha acontecido.
+
 ## 0.9.5
 
 Testes a fundo: o motor contra 86 tipos de servidor, todos os botões e janelas da app, 300 downloads seguidos, e o Brave com 8 downloads ao mesmo tempo. 23 erros corrigidos, cada um com um teste.
