@@ -241,10 +241,12 @@ class Service:
         if not rid or rid in self.requests:
             return
         for t in self.manager.tasks:
-            if getattr(t, "rid", None) == rid and t.stream_token:
+            if getattr(t, "rid", None) == rid:
+                # (A download the app keeps has no stream: the extension must still learn it
+                # started, or it hands the file back to the browser - two copies.)
+                stream = f"/stream/{t.stream_token}" if t.stream_token and t.mirror else None
                 with self._req_cond:
-                    self.requests.setdefault(rid, {"state": "started", "task": t.id,
-                                                   "stream": f"/stream/{t.stream_token}"})
+                    self.requests.setdefault(rid, {"state": "started", "task": t.id, "stream": stream})
                 return
 
     def _verdict(self, task) -> str | None:

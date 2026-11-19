@@ -139,10 +139,14 @@ async function rememberBypass(url) {
 async function note(name, text) {
   try {
     const ev = { at: Date.now(), name: name || "", text };
-    const { recentEvents = [] } = await chrome.storage.local.get("recentEvents");
-    // The same download noted again (e.g. "a confirmar…" then "baixado ✔"): replace, not add.
-    const rest = recentEvents.filter((e) => e.name !== ev.name || ev.at - e.at > 120000);
-    await chrome.storage.local.set({ lastEvent: ev, recentEvents: [ev, ...rest].slice(0, 5) });
+    await chrome.storage.local.set({ lastEvent: ev });
+    // Through the same queue as every other stored list: two downloads noted at the same
+    // moment must not overwrite each other.
+    await updateStored("recent", (r) => {
+      // The same download noted again (e.g. "a confirmar…" then "baixado ✔"): replace, not add.
+      const rest = (r.items || []).filter((e) => !ev.name || e.name !== ev.name || ev.at - e.at > 120000);
+      r.items = [ev, ...rest].slice(0, 5);
+    });
   } catch {}
 }
 // Addresses may carry old-style (Latin-1) accents such as %E7, which decodeURIComponent

@@ -154,6 +154,20 @@ class ServiceTests(unittest.TestCase):
             self.assertEqual(os.path.exists(task.path), keeps, version)
             self.assertEqual(bool(getattr(task, "awaiting_browser", False)), not keeps, version)
 
+    def test_a_kept_download_is_still_known_after_a_restart(self):
+        """Found in a review: a download the app keeps (no stream) was unknown to /request after
+        the app restarted, so the extension handed the file back to the browser: two copies."""
+        self.settings.show_progress_window = False
+        self.settings.browser_list = False
+        self.svc.requests["rr"] = {"state": "waiting"}
+        self.svc.add_from_browser({"url": self.base + "/reinicio.bin", "rid": "rr", "mirror": True,
+                                   "extension_version": "0.9.11"})
+        task = self.svc._task_for("rr")
+        self.svc.requests.clear()  # (what a restart forgets)
+        code, ans = self.svc.api("GET", "/request/rr", {})
+        self.assertEqual((code, ans["state"], ans["stream"]), (200, "started", None))
+        self.assertTrue(_until(lambda: not task.is_running(), 15))
+
     def test_the_user_is_told_why_the_browser_kept_a_download(self):
         """Before: the browser simply carried on and nothing said why the app did not take it."""
         told = []

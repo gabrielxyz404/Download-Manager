@@ -48,7 +48,8 @@ $("open").addEventListener("click", async () => {
 $("capture").addEventListener("change", (e) => send({ type: "toggle", enabled: e.target.checked }));
 
 async function lastDownload() {
-  const { lastEvent, recentEvents } = await chrome.storage.local.get(["lastEvent", "recentEvents"]);
+  const { lastEvent, recent } = await chrome.storage.local.get(["lastEvent", "recent"]);
+  const recentEvents = recent && recent.items;
   const when = (at) => {
     const mins = Math.round((Date.now() - at) / 60000);
     return mins < 1 ? "agora mesmo" : `há ${mins} min`;
@@ -56,7 +57,7 @@ async function lastDownload() {
   if (recentEvents && recentEvents.length) {
     // The last few: a download that "did nothing" can be told apart from the ones after it.
     $("last").textContent = "Últimos downloads:\n" +
-      recentEvents.map((e) => `• (${when(e.at)}) ${e.name} — ${e.text}`).join("\n");
+      recentEvents.map((e) => `• (${when(e.at)}) ${e.name || "download"} — ${e.text}`).join("\n");
     $("last").style.whiteSpace = "pre-line";
     return;
   }

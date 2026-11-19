@@ -588,6 +588,22 @@ class GuiTests(unittest.TestCase):
         self.wait_status(task, "Concluído")
         self.assertEqual(os.path.basename(task.path), "meu arquivo.bin")
 
+    def test_confirmed_browser_download_respects_the_browser_list_option(self):
+        """Found in a review: with "ask before downloading" on, the confirm dialog always
+        showed the file in the browser's list too (a second copy), whatever the option."""
+        app = self.open_app()
+        self.svc.settings.browser_list = False
+        for version, kept in (("0.9.11", True), ("0.9.9", False)):
+            rid = "rq" + version
+            self.svc.requests[rid] = {"state": "waiting"}
+            dlg = self.gui.AddDialog(app, self.base + f"/confirmado{version}.bin", rid=rid,
+                                     item={"rid": rid, "extension_version": version})
+            dlg._ok(True)
+            self.assertEqual(self.svc.requests[rid]["stream"] is None, kept, version)
+            task = self.svc._task_for(rid)
+            self.assertEqual(task.mirror, not kept)
+            self.wait_status(task, "Concluído")
+
     def test_checksum_given_when_adding_is_verified_at_the_end(self):
         app = self.open_app()
         for name, given, expect in (("bom.bin", hashlib.sha256(DATA).hexdigest(), "SHA-256 confere"),

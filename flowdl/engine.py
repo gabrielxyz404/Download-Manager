@@ -410,6 +410,7 @@ class DownloadTask:
         self._streaming = 0  # connections currently receiving data
         self._last_rx = 0.0  # when any connection last received data
         self.outages = 0  # times every connection went silent together (this download)
+        self._last_outage_at = 0.0
         self._target = 1 << 30  # connections wanted now (set by the download loop)
         self._in_outage = False  # every connection stopped together (no cutting / reopening)
         self._outage_started: float | None = None
@@ -507,8 +508,14 @@ class DownloadTask:
         before the new one arrives. Seen in a simulation: near the end every connection was
         cut and reopened at once, the server saw more than its limit for an instant, stopped
         everyone again - and so on, for minutes."""
-        if self.outages:
+        if self._touchy():
             self._nap(0.4 + random.random() * 0.8)
+
+    def _touchy(self) -> bool:
+        """The server stopped every connection recently: careful with new connections.
+        Only for a while (a short Wi-Fi drop must not leave the rest of a long download
+        without its usual end-of-download help)."""
+        return bool(self.outages) and time.monotonic() - self._last_outage_at < OUTAGE_CALM_S
 
     def _nap(self, seconds: float) -> None:
         """A connection waiting before it tries again. Woken at once on pause, or when the
@@ -644,6 +651,7 @@ class DownloadTask:
         self._run_started = time.monotonic()
         self._run_from = self.downloaded
         self.first_byte_after = None
+        self.outages = 0  # (counted per run: an old stop says nothing about a resumed download)
         try:
             for attempt in (1, 2):
                 try:
@@ -1127,7 +1135,7 @@ class DownloadTask:
             # (Not on a server that already stopped every connection once: there, everyone
             # silent at the end is that server stopping again, and rescuing / reopening every
             # connection at once is what keeps it stopped - seen in a simulation, for minutes.)
-            self._tail = left <= max(4 * 1024 * 1024, best_speed * 4) and not self.outages
+            self._tail = left <= max(4 * 1024 * 1024, best_speed * 4) and not self._touchy()
             if self._tail and outage_since is not None:
                 outage_since = None
             # Only while most connections still have work, and not at the very end.
@@ -1135,6 +1143,7 @@ class DownloadTask:
                     and outage_since is None and not all(s.remaining == 0 for s in self.segments)):
                 outage_since = now
                 self.outages += 1
+                self._last_outage_at = now
                 if target > 2:
                     target = soft_cap = max(2, target // 2)
                     ramping = False
@@ -1329,12 +1338,14 @@ class DownloadTask:
         if not self._in_outage or started is None or now - started < OUTAGE_SHED_S or not target:
             return
         with self._lock:
-            staying = [w for w in self._workers if w.alive and not w.shed]
+            # (Retired ones are already leaving: they do not count, nor go twice.)
+            staying = [w for w in self._workers if w.alive and not w.shed and not w.retired]
         extra = len(staying) - max(1, target)
         if extra <= 0:
             return
-        # The ones that brought the least go: the best connections stay.
-        for w in sorted(staying, key=lambda x: x.total)[:extra]:
+        # Never the ones receiving right now (a probe that got through); then the ones that
+        # brought the least go: the best connections stay.
+        for w in sorted(staying, key=lambda x: (now - x.last_data < 1.0, x.total))[:extra]:
             w.shed = w.retired = w.reconnect = True
             if w.conn is not None:
                 w.conn.abort()
@@ -1382,8 +1393,9 @@ class DownloadTask:
             quiet = now - w.last_data
             # After the server stopped us once: never above the number it took (a server that
             # punishes "too many" stopped again for the extra rescuers, near the end).
-            room = min(self.connections, self._target) if self.outages else self.connections
-            extra = 0 if self.outages else RESCUE_EXTRA
+            touchy = self._touchy()
+            room = min(self.connections, self._target) if touchy else self.connections
+            extra = 0 if touchy else RESCUE_EXTRA
             # Rescue only outside an outage and within the maximum + RESCUE_EXTRA (and as many
             # stuck ones still leaving): never more connections than that.
             with self._lock:

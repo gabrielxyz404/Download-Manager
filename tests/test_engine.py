@@ -719,8 +719,10 @@ class StallTests(unittest.TestCase):
         13 connections open waiting for them to wake up: 0 B/s for ever. Now, a stop longer
         than a moment closes the connections above the new number, and the server sends again."""
         HoldServer.open, HoldServer.data = 0, BIG * 12
-        ThreadingHTTPServer.request_queue_size = 64
-        server = ThreadingHTTPServer(("127.0.0.1", 0), HoldServer)
+
+        class Server(ThreadingHTTPServer):
+            request_queue_size = 64  # (a subclass: other tests keep the default backlog)
+        server = Server(("127.0.0.1", 0), HoldServer)
         server.daemon_threads = True
         threading.Thread(target=server.serve_forever, daemon=True).start()
         tmp = tempfile.TemporaryDirectory()
@@ -742,6 +744,31 @@ class StallTests(unittest.TestCase):
         finally:
             server.shutdown()
             tmp.cleanup()
+
+    def test_caution_after_a_stop_is_only_for_a_while_and_spares_receivers(self):
+        """Found in a review: one short stop (a Wi-Fi drop) left the rest of a long download
+        without its end-of-download help; and closing extra connections could close the one
+        receiving (a probe) while connections already leaving still counted."""
+        from flowdl import engine
+        task = DownloadTask("http://127.0.0.1:9/f.bin", tempfile.gettempdir(), 8)
+        task.outages, task._last_outage_at = 1, time.monotonic()
+        self.assertTrue(task._touchy())
+        task._last_outage_at -= engine.OUTAGE_CALM_S + 1
+        self.assertFalse(task._touchy())
+
+        class W:
+            def __init__(self, total, receiving=False, retired=False):
+                self.alive, self.shed, self.retired, self.total, self.conn = True, False, retired, total, None
+                self.last_data = time.monotonic() - (0 if receiving else 10)
+                self.reconnect = False
+        probe, big, small, leaving = W(10, receiving=True), W(5000), W(100), W(9000, retired=True)
+        task._workers = [probe, big, small, leaving, W(4000), W(3000)]
+        task._in_outage, task._outage_started = True, time.monotonic() - 5
+        task._shed_extra_connections(time.monotonic(), 3)
+        self.assertFalse(probe.shed)       # receiving: stays
+        self.assertFalse(leaving.shed)     # already leaving: not counted, not shed again
+        self.assertTrue(small.shed)        # brought the least: goes
+        self.assertEqual(sum(w.shed for w in task._workers), 2)  # 5 staying -> 3
 
     def test_server_that_stops_everyone_gets_fewer_connections_not_more(self):
         """Every connection stopping together must never make the app open more (it used to

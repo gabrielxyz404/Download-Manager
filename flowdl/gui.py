@@ -110,11 +110,13 @@ class AddDialog(tk.Toplevel):
 
     def __init__(self, app: "App", url: str = "", filename: str | None = None,
                  headers: dict | None = None, title: str = "Adicionar download", rid: str | None = None,
-                 cookies: dict | None = None, final_url: str | None = None):
+                 cookies: dict | None = None, final_url: str | None = None, item: dict | None = None):
         super().__init__(app)
         self.app, self.headers = app, headers
         self.cookies, self.final_url = cookies, final_url
         self.rid = rid  # set when the download came from the browser
+        # The app keeps browser downloads itself (option "show in the browser's list" off)?
+        self.keep = bool(rid) and app.service.keeps_browser_downloads(item or {})
         self._decided = False
         self.bind("<Destroy>", self._on_destroy)
         self.title(title)
@@ -203,7 +205,7 @@ class AddDialog(tk.Toplevel):
 
                 def resume():
                     self._decided = True
-                    self.app.service.bind_request(self.rid, existing)
+                    self.app.service.bind_request(self.rid, existing, self.keep)
                     self.app.manager.resume(existing)
                     self.destroy()
 
@@ -222,7 +224,7 @@ class AddDialog(tk.Toplevel):
         self._decided = True
         svc = self.app.service
         if start:
-            svc.bind_request(self.rid, task)  # the browser shows it too
+            svc.bind_request(self.rid, task, self.keep)  # the browser shows it too (unless kept)
             if self.app.settings.show_progress_window:
                 ProgressWindow(self.app, task)
         else:
@@ -2379,7 +2381,7 @@ class App(tk.Tk):
             headers, cookies = browser_request(item)
             AddDialog(self, item["url"], item.get("filename"), headers, title="Download do navegador",
                       cookies=cookies, final_url=item.get("final_url"),
-                      rid=item.get("rid"))
+                      rid=item.get("rid"), item=item)
 
     def _poll_service(self) -> None:
         """A download from the browser is handled within 0.1 s (it waits paused in the
@@ -2400,7 +2402,7 @@ class App(tk.Tk):
             self._process_events()  # shows its progress window
 
         def resume():
-            svc.bind_request(rid, existing)  # the browser shows the existing download
+            svc.bind_request(rid, existing, svc.keeps_browser_downloads(item))  # (shown in the browser unless kept)
             self.manager.resume(existing)
             if self.settings.show_progress_window:
                 ProgressWindow(self, existing)

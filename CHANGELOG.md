@@ -1,5 +1,14 @@
 # Novidades do Flow Downloads
 
+## 0.9.12
+
+Correções encontradas numa revisão de código às versões 0.9.10 e 0.9.11:
+- Com a opção "Mostrar os downloads também na lista do navegador" desligada: se a app reiniciasse a meio, o navegador podia voltar a baixar o mesmo ficheiro (duas cópias). E a opção não era respeitada com "Perguntar antes de baixar" ligado, nem ao continuar um download repetido.
+- Uma paragem curta (por exemplo uma falha de Wi-Fi) deixava o resto de um download longo sem a ajuda do fim (a espera aos 99% podia voltar). O cuidado extra depois de uma paragem dura agora só 90 segundos.
+- Ao fechar ligações a mais numa paragem, a app podia fechar justamente a que estava a receber. Já não.
+- Janela da extensão: dois downloads anotados ao mesmo tempo já não se apagam um ao outro na lista dos últimos 5. Extensão 0.9.12: recarregue-a em brave://extensions (↻).
+- Teste de resistência: 300 downloads seguidos, 0 falhados, memória estável.
+
 ## 0.9.11
 
 **Downloads que não param**
