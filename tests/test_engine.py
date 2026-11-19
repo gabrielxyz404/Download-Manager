@@ -508,6 +508,44 @@ class OutageServer(BaseHTTPRequestHandler):
             pass
 
 
+def _wait_until(cond, secs, step=0.1):
+    end = time.monotonic() + secs
+    while time.monotonic() < end:
+        if cond():
+            return True
+        time.sleep(step)
+    return cond()
+
+
+class RobotCheckServer(BaseHTTPRequestHandler):
+    """Like SourceForge: a browser name without a browser behind it gets 403; an honest
+    program name gets the file."""
+    protocol_version = "HTTP/1.1"
+    agents: list = []
+
+    def log_message(self, *a):
+        pass
+
+    def do_GET(self):
+        ua = self.headers.get("User-Agent", "")
+        RobotCheckServer.agents.append(ua)
+        if ua.startswith("Mozilla/"):
+            self.send_response(403)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+        m = re.match(r"bytes=(\d+)-(\d*)", self.headers.get("Range", ""))
+        a = int(m.group(1)) if m else 0
+        b = min(int(m.group(2)), len(DATA) - 1) if m and m.group(2) else len(DATA) - 1
+        self.send_response(206 if m else 200)
+        if m:
+            self.send_header("Content-Range", f"bytes {a}-{b}/{len(DATA)}")
+        self.send_header("Content-Length", str(b - a + 1))
+        self.send_header("Accept-Ranges", "bytes")
+        self.end_headers()
+        self.wfile.write(DATA[a:b + 1])
+
+
 class HoldServer(BaseHTTPRequestHandler):
     """Like thinkbroadband (seen by the user): sends nothing at all while more than LIMIT
     connections are open, and only again once fewer are open."""
@@ -741,6 +779,90 @@ class StallTests(unittest.TestCase):
             self.assertGreaterEqual(task.outages, 1)
             self.assertIsNotNone(fewer_at, "kept every connection open while the server waited")
             self.assertGreater(got, len(HoldServer.data) // 3, "the server never sent again")
+        finally:
+            server.shutdown()
+            tmp.cleanup()
+
+    def test_no_way_to_the_server_for_a_while_does_not_stop_the_download(self):
+        """Found in the audit: with the server (or the internet) gone and every connection
+        refused, the download ended in "Erro" after ~2.5 min and stayed stopped when the
+        line came back; resuming with no line yet failed at once too. (Times shortened.)"""
+        from unittest import mock
+        import socket as sk
+        from flowdl import engine
+
+        class Srv(ThreadingHTTPServer):
+            daemon_threads = True
+            socks: list = []
+
+            def process_request(self, request, addr):
+                self.socks.append(request)
+                super().process_request(request, addr)
+
+            def kill(self):
+                self.shutdown()
+                self.server_close()
+                for c in self.socks:
+                    try:
+                        c.shutdown(sk.SHUT_RDWR)
+                        c.close()
+                    except OSError:
+                        pass
+        StalledServer.hang_every, StalledServer.rate, StalledServer.data = 0, 400_000, BIG
+        probe = sk.socket()
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+        probe.close()
+        tmp = tempfile.TemporaryDirectory()
+        real_nap, real_wait = DownloadTask._nap, None
+        try:
+            with mock.patch.object(engine, "MAX_RETRIES", 1), \
+                    mock.patch.object(DownloadTask, "_nap", lambda self, s: real_nap(self, min(s, 0.3))):
+                srv = Srv(("127.0.0.1", port), StalledServer)
+                threading.Thread(target=srv.serve_forever, daemon=True).start()
+                task = DownloadTask(f"http://127.0.0.1:{port}/f.bin", tmp.name, 4)
+                task.start()
+                self.assertTrue(_wait_until(lambda: task.downloaded > 1_000_000, 20))
+                srv.kill()  # every connection refused / cut from now on
+                time.sleep(6)
+                self.assertTrue(task.is_running(), task.error)
+                self.assertIn("sem ligação", task.connection_note)
+                srv = Srv(("127.0.0.1", port), StalledServer)
+                threading.Thread(target=srv.serve_forever, daemon=True).start()
+                task.wait(60)
+                self.assertEqual(task.status, Status.COMPLETED, task.error)
+                with open(task.path, "rb") as f:
+                    self.assertEqual(hashlib.sha256(f.read()).digest(), hashlib.sha256(BIG).digest())
+                srv.kill()
+        finally:
+            StalledServer.hang_every, StalledServer.rate, StalledServer.data = 3, 3_000_000, None
+            tmp.cleanup()
+
+    def test_a_site_that_refuses_a_disguised_browser_name_gets_an_honest_one(self):
+        """Seen on SourceForge: links pasted in the app got 403 (our default browser-like
+        name, without a browser behind it, looks like a robot); curl got the file."""
+        RobotCheckServer.agents = []
+        server = ThreadingHTTPServer(("127.0.0.1", 0), RobotCheckServer)
+        server.daemon_threads = True
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        tmp = tempfile.TemporaryDirectory()
+        try:
+            task = DownloadTask(f"http://127.0.0.1:{server.server_address[1]}/7z.exe", tmp.name, 4)
+            task.start()
+            task.wait(30)
+            self.assertEqual(task.status, Status.COMPLETED, task.error)
+            with open(task.path, "rb") as f:
+                self.assertEqual(f.read(), DATA)
+            self.assertTrue(RobotCheckServer.agents[0].startswith("Mozilla/"))  # tried as a browser first
+            self.assertTrue(RobotCheckServer.agents[-1].startswith("FlowDownloads/"))
+            # A browser's own name (handed over by the extension) is never replaced.
+            RobotCheckServer.agents = []
+            given = DownloadTask(f"http://127.0.0.1:{server.server_address[1]}/b.exe", tmp.name, 4,
+                                 headers={"User-Agent": "Mozilla/5.0 Brave"})
+            given.start()
+            given.wait(30)
+            self.assertEqual(given.status, Status.ERROR)
+            self.assertEqual(set(RobotCheckServer.agents), {"Mozilla/5.0 Brave"})
         finally:
             server.shutdown()
             tmp.cleanup()

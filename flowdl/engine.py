@@ -45,6 +45,7 @@ MIN_CHUNK = 64 * 1024      # each connection reads pieces of ~0.25 s of data...
 MAX_CHUNK = 1024 * 1024    # ...between 64 KB and 1 MB (few, big pieces = little processor use)
 MIN_SPLIT_SIZE = 512 * 1024  # do not split segments smaller than 2x this
 MAX_RETRIES = 8
+NETWORK_PATIENCE = 30 * 60  # no way to the server at all: keep trying this long
 FIRST_REQUEST = 2 * 1024 * 1024  # the first request already fetches this much
 REQUEST_SECONDS = 2.0     # each later request asks for ~2 s worth of data...
 MIN_REQUEST = 4 * 1024 * 1024  # ...between 4 MB (a new connection must not stop to ask again at once)...
@@ -253,6 +254,14 @@ def _check_expected(expect: dict | None, info: dict) -> None:
         raise RuntimeError(f"o site deu à app outro ficheiro ({info['size']} bytes em vez de {want_size})")
 
 
+def _honest_agent() -> str:
+    from . import __version__
+    return f"FlowDownloads/{__version__}"
+
+
+HONEST_USER_AGENT = _honest_agent()
+
+
 def _headers(extra: dict | None) -> dict:
     return {"User-Agent": USER_AGENT, **(extra or {})}
 
@@ -409,6 +418,7 @@ class DownloadTask:
         self._limit_hit = 0  # >0: the server refused a connection; value = connections it accepts
         self._streaming = 0  # connections currently receiving data
         self._last_rx = 0.0  # when any connection last received data
+        self._net_down = False  # connections are waiting for a way to the server
         self.outages = 0  # times every connection went silent together (this download)
         self._last_outage_at = 0.0
         self._target = 1 << 30  # connections wanted now (set by the download loop)
@@ -647,6 +657,24 @@ class DownloadTask:
         except OSError:
             pass
 
+    def _prepare_patiently(self) -> None:
+        """Resuming with no way to the server yet (e.g. the app resumed downloads when the
+        computer started, before the Wi-Fi was up): wait for the line instead of failing at
+        once (before: "Erro", and the download stayed stopped). A new link that fails is
+        still reported at once (a typo must not wait half an hour)."""
+        started = time.monotonic()
+        while True:
+            try:
+                return self._prepare()
+            except (OSError, http.client.HTTPException) as exc:
+                if (isinstance(exc, net.HTTPError) or self.downloaded <= 0 or self._stop.is_set()
+                        or is_cert_error(exc) or time.monotonic() - started > NETWORK_PATIENCE):
+                    raise
+                self.connection_note = "sem ligação ao servidor: a tentar de novo"
+                self._stop.wait(30)
+                if self._stop.is_set():
+                    raise RuntimeError("pausado") from exc
+
     def _run(self) -> None:
         self._run_started = time.monotonic()
         self._run_from = self.downloaded
@@ -655,7 +683,7 @@ class DownloadTask:
         try:
             for attempt in (1, 2):
                 try:
-                    self._prepare()
+                    self._prepare_patiently()
                     if self.on_change:
                         self.on_change(self)
                     if self._stop.is_set():
@@ -739,6 +767,13 @@ class DownloadTask:
                 if self._final_url and exc.code in (401, 403, 404, 410):
                     # The browser's final address expired already: start again from the link.
                     self._final_url = None
+                    continue
+                if exc.code == 403 and not any(k.lower() == "user-agent" for k in self.headers):
+                    # Our default browser-like name, without a real browser behind it, looks like
+                    # a disguised robot to some sites (seen: SourceForge answers 403 to any
+                    # browser name from a program, and 206 to an honest one). Say who we are,
+                    # once; kept for this download (and its later resumes).
+                    self.headers = {**self.headers, "User-Agent": HONEST_USER_AGENT}
                     continue
                 if exc.code not in TRANSIENT_CODES or attempt == FIRST_TRIES:
                     raise
@@ -1155,6 +1190,8 @@ class DownloadTask:
             if soft_cap < cap and outage_since is None and calm_since and now - calm_since > OUTAGE_CALM_S:
                 soft_cap = cap  # a long calm: more connections may be tried again
                 recheck_at = now
+            if self._net_down:  # (said over the speed-test notes while nothing gets through)
+                self.connection_note = "sem ligação ao servidor: a tentar de novo"
             self._target = target  # connections above this leave when they get the chance
             if not self._stop.is_set():
                 self._replace_slow_connections(now, target)
@@ -1550,6 +1587,7 @@ class DownloadTask:
                             got_this += n
                             w.count(n)
                             self._last_rx = w.last_data
+                            self._net_down = False
                             retries = 0
                             if not w.got_data:
                                 w.got_data = True
@@ -1669,8 +1707,21 @@ class DownloadTask:
                             raise FileChanged()
                         if code in (401, 403, 404, 410):
                             raise RuntimeError(f"HTTP {exc.code}: {exc.reason}") from exc
+                        if code is None and time.monotonic() - (self._last_rx or self._run_started) > 10:
+                            self._net_down = True  # (the window says so while it waits)
                         retries += 1
                         if retries > MAX_RETRIES:
+                            # No way through at all (no internet, router restarting, the
+                            # server's machine down): keep trying, every 30 s, for as long as
+                            # NETWORK_PATIENCE without anything received - before, the download
+                            # stopped with an error after ~2.5 min and stayed stopped once the
+                            # line came back. A server's own answer (HTTP error) is not this.
+                            since = self._last_rx or self._run_started
+                            if code is None and time.monotonic() - since < NETWORK_PATIENCE:
+                                self._net_down = True
+                                self.connection_note = "sem ligação ao servidor: a tentar de novo"
+                                self._nap(30)
+                                continue
                             raise RuntimeError(f"Falha na conexão: {exc}") from exc
                         self._nap(min(2 ** retries, 30))
         except FileChanged:

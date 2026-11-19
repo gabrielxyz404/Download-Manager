@@ -1,5 +1,11 @@
 # Novidades do Flow Downloads
 
+## 0.9.13
+
+- **A internet cai durante minutos: o download já não pára.** Antes, se o servidor ou a internet ficassem inacessíveis (sem rede, router a reiniciar) mais de ~2,5 minutos, o download acabava em "Erro: Falha na conexão" e não continuava quando a ligação voltava. Agora a app continua a tentar (de 30 em 30 s, até 30 minutos sem receber nada) e mostra "sem ligação ao servidor: a tentar de novo"; quando a ligação volta, continua de onde estava. O mesmo ao retomar downloads quando o PC liga antes de o Wi-Fi estar pronto.
+- **SourceForge e outros sites com verificação de robôs**: links colados na app davam "HTTP 403". A app apresentava-se com um nome de navegador sem ser um navegador, e esses sites recusam isso. Agora, se o primeiro pedido for recusado, a app apresenta-se com o seu próprio nome (FlowDownloads) e o download funciona. Downloads vindos do Brave continuam a usar a identidade do Brave.
+- Testado com ficheiros reais (GitHub, PyPI, npm, SourceForge): todos completos e iguais ao original. Num ficheiro de 906 MB num servidor rápido, a app foi tão rápida como uma ligação única.
+
 ## 0.9.12
 
 Correções encontradas numa revisão de código às versões 0.9.10 e 0.9.11:
