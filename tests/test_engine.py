@@ -888,9 +888,9 @@ class StallTests(unittest.TestCase):
         task._in_outage, task._outage_started = True, time.monotonic() - 5
         task._shed_extra_connections(time.monotonic(), 3)
         self.assertFalse(probe.shed)       # receiving: stays
-        self.assertFalse(leaving.shed)     # already leaving: not counted, not shed again
+        self.assertTrue(leaving.shed)      # stuck and already replaced: closed, not counted
         self.assertTrue(small.shed)        # brought the least: goes
-        self.assertEqual(sum(w.shed for w in task._workers), 2)  # 5 staying -> 3
+        self.assertEqual(sum(w.shed for w in task._workers), 3)  # 5 staying -> 3, + the retired one
 
     def test_server_that_stops_everyone_gets_fewer_connections_not_more(self):
         """Every connection stopping together must never make the app open more (it used to

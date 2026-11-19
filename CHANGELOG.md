@@ -1,5 +1,10 @@
 # Novidades do Flow Downloads
 
+## 0.9.15
+
+- Corrigido: num servidor que só aceita poucas ligações, a app às vezes voltava logo ao número de ligações que o tinha feito parar (e o download andava aos soluços). Duas causas: numa paragem abriam-se várias ligações de teste em vez de uma, e a paragem era anotada depois de outra regra já ter reaberto todas as ligações. Também passam a fechar-se as ligações presas que já tinham sido substituídas.
+- Configurações → Navegador: o texto da opção "Mostrar também na lista do navegador" ficava cortado na janela. Encurtado, e um teste novo verifica em todas as páginas das Configurações que nenhum texto passa da borda.
+
 ## 0.9.14
 
 - Corrigido: em servidores que param cada resposta a meio (e obrigam a pedir de novo), a 0.9.11 tinha ficado 8 vezes mais lenta (43 s → 5 min num teste). A app voltou a esperar 6 s (em vez de 4) antes de concluir que o servidor parou toda a gente; os servidores com limite de ligações (thinkbroadband) continuam a terminar igual.

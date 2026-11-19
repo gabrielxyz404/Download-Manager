@@ -1190,6 +1190,11 @@ class DownloadTask:
                                                or busy_now < max(2, target // 2)):
                 outage_since = None  # data flowing again (or only the last pieces are left)
                 calm_since = now
+            # (Known at once, in this same pass: the check below cuts silent connections, and
+            # both fire at 6 s - before, every connection was sometimes cut and reopened in the
+            # very pass that found the server had stopped us, straight back over its limit.)
+            self._in_outage = outage_since is not None
+            self._outage_started = outage_since
             if soft_cap < cap and outage_since is None and calm_since and now - calm_since > OUTAGE_CALM_S:
                 soft_cap = cap  # a long calm: more connections may be tried again
                 recheck_at = now
@@ -1378,8 +1383,14 @@ class DownloadTask:
         if not self._in_outage or started is None or now - started < OUTAGE_SHED_S or not target:
             return
         with self._lock:
-            # (Retired ones are already leaving: they do not count, nor go twice.)
+            # Retired ones (stuck, their piece already given to a fresh connection) are of no
+            # use and still count at the server: always closed, and not counted as staying.
+            leaving = [w for w in self._workers if w.alive and not w.shed and w.retired]
             staying = [w for w in self._workers if w.alive and not w.shed and not w.retired]
+        for w in leaving:
+            w.shed = w.reconnect = True
+            if w.conn is not None:
+                w.conn.abort()
         extra = len(staying) - max(1, target)
         if extra <= 0:
             return
@@ -1461,6 +1472,11 @@ class DownloadTask:
                     w.retired = True  # when it wakes, it leaves: its replacement took its place
                     with self._lock:
                         self._rescued.append(self._add_segment(rest))
+                    if self._in_outage:
+                        # Only ONE probe while the server has stopped everyone (before: one per
+                        # silent connection in the same pass - straight back to the number the
+                        # server had just stopped us for).
+                        probing = True
             if self._in_outage and quiet < TIMEOUT:
                 # The server stopped every connection: cutting them and opening new ones only
                 # adds connections at the server (the old ones linger there), which is what

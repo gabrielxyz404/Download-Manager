@@ -1392,8 +1392,8 @@ class SettingsDialog(tk.Toplevel):
             self._check("Perguntar antes de baixar (em vez de começar logo)", app.confirm_var,
                         lambda: self._set("confirm_browser", app.confirm_var.get()))
             self._setting_check("Mostrar a janela de progresso", "show_progress_window")
-            self._setting_check("Mostrar os downloads também na lista do navegador (o ficheiro fica na pasta "
-                                "do navegador). Desligado: a app guarda-o, e o disco só o grava uma vez", "browser_list")
+            self._setting_check("Mostrar também na lista do navegador (desligado: só a app guarda o ficheiro)",
+                                "browser_list")
             self._row("Tipos de ficheiro apanhados e sites ignorados", "Editar...", lambda: CaptureDialog(app))
             self._row("Como instalar a extensão no Brave / Chrome / Edge", "Ver...", app._extension_help)
             self._head("Área de transferência")

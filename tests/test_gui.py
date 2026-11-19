@@ -604,6 +604,29 @@ class GuiTests(unittest.TestCase):
             self.assertEqual(task.mirror, not kept)
             self.wait_status(task, "Concluído")
 
+    def test_no_settings_text_is_cut_off(self):
+        """Seen in the audit: a long option text ran past the window's edge (half of it was
+        never visible). Every section, light and dark: nothing wider than the window."""
+        app = self.open_app()
+        win = app.open_settings()
+        pump(app, 0.3)
+
+        def walk(w):
+            for c in w.winfo_children():
+                yield c
+                yield from walk(c)
+        cut = []
+        for section in self.gui.SettingsDialog.SECTIONS:
+            win.show(section)
+            pump(app, 0.2)
+            right = win.winfo_rootx() + win.winfo_width()
+            for c in walk(win):
+                text = str(c.cget("text")) if "text" in c.keys() else ""
+                if text and c.winfo_ismapped() and c.winfo_rootx() + c.winfo_reqwidth() > right + 2:
+                    cut.append((section, text[:60]))
+        win.destroy()
+        self.assertEqual(cut, [])
+
     def test_checksum_given_when_adding_is_verified_at_the_end(self):
         app = self.open_app()
         for name, given, expect in (("bom.bin", hashlib.sha256(DATA).hexdigest(), "SHA-256 confere"),
