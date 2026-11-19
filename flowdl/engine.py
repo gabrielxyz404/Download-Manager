@@ -19,6 +19,7 @@ import http.client
 import json
 import ssl
 import os
+import random
 import zlib
 import re
 import threading
@@ -63,13 +64,16 @@ SLOW_MIN_AGE = 5.0        # ...for 5 s or more is reconnected (at most MAX_SWAPS
 MAX_SWAPS = 2
 STALL_SECONDS = 6.0       # a connection that receives nothing for this long is replaced at once
 STALL_ALONE_SECONDS = 4.0 # ...or for this long while the other connections are receiving
-ENDGAME_MIN_PIECE = 32 * 1024   # near the end, help connections that still need...
-ENDGAME_MIN_ETA = 1.5           # ...more than 1.5 s to finish their piece
+ENDGAME_MIN_PIECE = 512 * 1024  # near the end, help connections that still need...
+ENDGAME_KEEP = 64 * 1024        # (what the slow one keeps, at least)
+ENDGAME_MIN_ETA = 3.0           # ...more than 3 s to finish their piece (smaller pieces cost a
+                                # new request each, on a fresh connection a slow start too)
 TIMEOUT = 30
 SINGLE_TRIES = 3          # a server that cannot continue mid-file: start over this many times
 CHECKPOINT_S = 5.0        # progress forced onto the disk this often (a power cut loses at most this)
 PROBE_OK_BYTES = 256 * 1024  # a fresh connection that got this much really works (not a trickle)
-OUTAGE_SHED_S = 2.0       # a stop longer than this: close the connections above the new number
+OUTAGE_SILENT_S = 4.0     # every connection silent this long: the server (or the line) stopped
+OUTAGE_SHED_S = 1.0       # a stop longer than this: close the connections above the new number
 OUTAGE_CALM_S = 90.0      # after the server stopped every connection: fewer connections for this long
 RESCUE_EXTRA = 2          # a stuck piece may add this many connections over the maximum (while
                           # the stuck ones, which leave once they wake, are at most the maximum)
@@ -496,6 +500,15 @@ class DownloadTask:
         self.status = Status.CONNECTING
         self._thread = threading.Thread(target=self._run, name=f"dl-{self.id}", daemon=True)
         self._thread.start()
+
+    def _settle(self) -> None:
+        """Before reopening a connection we cut: on a server that stopped us before, wait a
+        moment (a little different for each connection), so it counts the old one as gone
+        before the new one arrives. Seen in a simulation: near the end every connection was
+        cut and reopened at once, the server saw more than its limit for an instant, stopped
+        everyone again - and so on, for minutes."""
+        if self.outages:
+            self._nap(0.4 + random.random() * 0.8)
 
     def _nap(self, seconds: float) -> None:
         """A connection waiting before it tries again. Woken at once on pause, or when the
@@ -1111,11 +1124,14 @@ class DownloadTask:
             # The very end: what is left would take a few seconds at the best speed. Stuck pieces
             # there are rescued at once - never taken for the server stopping.
             left = sum(seg.remaining for seg in self.segments)
-            self._tail = left <= max(4 * 1024 * 1024, best_speed * 4)
+            # (Not on a server that already stopped every connection once: there, everyone
+            # silent at the end is that server stopping again, and rescuing / reopening every
+            # connection at once is what keeps it stopped - seen in a simulation, for minutes.)
+            self._tail = left <= max(4 * 1024 * 1024, best_speed * 4) and not self.outages
             if self._tail and outage_since is not None:
                 outage_since = None
             # Only while most connections still have work, and not at the very end.
-            if ((silent > STALL_SECONDS or slowed) and busy_now >= max(2, target // 2) and not self._tail
+            if ((silent > OUTAGE_SILENT_S or slowed) and busy_now >= max(2, target // 2) and not self._tail
                     and outage_since is None and not all(s.remaining == 0 for s in self.segments)):
                 outage_since = now
                 self.outages += 1
@@ -1279,15 +1295,18 @@ class DownloadTask:
                 remaining = s.remaining
             speed = max(w.speed(), 1.0)
             eta = remaining / speed
-            if remaining >= 2 * ENDGAME_MIN_PIECE and eta > best_eta:
+            if remaining >= ENDGAME_MIN_PIECE + ENDGAME_KEEP and eta > best_eta:
                 best, best_eta, best_speed = s, eta, speed
         if best is None:
             return None
         share = best_speed / (best_speed + max(fast, best_speed))  # slow one keeps this fraction
         with best.lock:
-            if best.remaining < 2 * ENDGAME_MIN_PIECE:
+            if best.remaining < ENDGAME_MIN_PIECE + ENDGAME_KEEP:
                 return None
-            keep = max(ENDGAME_MIN_PIECE, min(best.remaining // 2, int(best.remaining * share)))
+            # The slow one keeps only what it finishes as soon as a fast one would (however
+            # little); the piece taken is worth a new request (ENDGAME_MIN_PIECE at least).
+            keep = max(ENDGAME_KEEP, min(best.remaining // 2, int(best.remaining * share)))
+            keep = min(keep, best.remaining - ENDGAME_MIN_PIECE)
             mid = best.pos + keep
             new = Segment(mid, best.end)
             best.end = mid - 1
@@ -1421,6 +1440,8 @@ class DownloadTask:
         conn = w.conn = w.conn or net.Connection(TIMEOUT)
         resp = w.resp
         seg = w.seg
+        if resp is None:
+            self._settle()  # (a server that stopped us before: see _settle)
         try:
             # Unbuffered: every chunk goes straight to the operating system, so nothing
             # sits in a Python buffer that would be lost if the app is killed.
@@ -1547,6 +1568,7 @@ class DownloadTask:
                             conn.close()
                             if w.shed:
                                 break
+                            self._settle()
                             w.reconnect = False
                             w.swaps += 1
                             w.last_swap = time.monotonic()
@@ -1565,6 +1587,7 @@ class DownloadTask:
                             # piece goes back to the others.
                             if self._active_workers > self._target and not self._in_outage:
                                 break
+                            self._settle()
                             w.reconnect = False
                             w.swaps += 1
                             w.last_swap = w.last_data = time.monotonic()

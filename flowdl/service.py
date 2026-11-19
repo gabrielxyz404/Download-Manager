@@ -188,12 +188,25 @@ class Service:
             self.requests[rid] = {**state, "at": time.monotonic()}
             self._req_cond.notify_all()
 
-    def bind_request(self, rid: str | None, task) -> None:
+    def keeps_browser_downloads(self, item: dict) -> bool:
+        """Browser downloads the app keeps in its own folder (not shown in the browser's
+        list): the setting is off, and the extension understands that answer (0.9.11+)."""
+        from .bridge import version_tuple
+        return (not getattr(self.settings, "browser_list", True)
+                and version_tuple(item.get("extension_version")) >= version_tuple("0.9.11"))
+
+    def bind_request(self, rid: str | None, task, keep: bool = False) -> None:
         """The download asked by the browser has started: tell the extension where to get it."""
         if not rid:
             return
-        task.mirror = True
         task.rid = rid
+        if keep:
+            # The app keeps the file: the extension only drops the browser's own copy once
+            # the site really sends data (no stream, nothing shown in the browser's list).
+            self._set_request(rid, state="started", task=task.id, stream=None)
+            self.manager.save()
+            return
+        task.mirror = True
         task.stream_token = task.stream_token or secrets.token_urlsafe(16)
         self._set_request(rid, state="started", task=task.id, stream=f"/stream/{task.stream_token}")
         self.manager.save()
@@ -626,10 +639,11 @@ class Service:
                                 # Shown in the browser's list: the file ends up in the browser's
                                 # folder, never in a category folder (before: an empty
                                 # "Compactados" / "Vídeos" folder was left behind).
-                                final_url=item.get("final_url"), auto_folder=not item.get("rid"),
+                                final_url=item.get("final_url"),
+                                auto_folder=not item.get("rid") or self.keeps_browser_downloads(item),
                                 page=item.get("referrer") or "", expect=item.get("expect"),
                                 now=bool(item.get("rid")))
-        self.bind_request(item.get("rid"), task)
+        self.bind_request(item.get("rid"), task, self.keeps_browser_downloads(item))
         if self.settings.show_progress_window:
             self.pending.append({"kind": "progress", "task": task.id})
             return True

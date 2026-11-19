@@ -138,7 +138,11 @@ async function rememberBypass(url) {
 // does not work on a user's computer, this says where it stopped.
 async function note(name, text) {
   try {
-    await chrome.storage.local.set({ lastEvent: { at: Date.now(), name: name || "", text } });
+    const ev = { at: Date.now(), name: name || "", text };
+    const { recentEvents = [] } = await chrome.storage.local.get("recentEvents");
+    // The same download noted again (e.g. "a confirmar…" then "baixado ✔"): replace, not add.
+    const rest = recentEvents.filter((e) => e.name !== ev.name || ev.at - e.at > 120000);
+    await chrome.storage.local.set({ lastEvent: ev, recentEvents: [ev, ...rest].slice(0, 5) });
   } catch {}
 }
 // Addresses may carry old-style (Latin-1) accents such as %E7, which decodeURIComponent
@@ -380,6 +384,11 @@ async function waitForApp(rid, original, since = Date.now()) {
       await postApp("/control", { rid, action: "cancel" });
       return;
     }
+    if (st.state === "started" && !st.stream) { // the app keeps the file (not shown in the browser's list)
+      await dropOriginal(original);
+      if (original) await note(original.label, "baixado pela app ✔ (guardado pela app)");
+      return;
+    }
     if (st.state === "started") { // the app is receiving the file: the browser shows the app's copy
       // The name the browser had for it (chosen in its "Save as" window, when it asks): the
       // app's copy keeps it, and the browser must not ask a second time where to save it
@@ -589,6 +598,11 @@ async function handleDownload(item) {
                                         : "deixado ao navegador: o ficheiro foi criado pela própria página (" + scheme + ":)");
   }
   if (passThrough.delete(url) || passThrough.delete(finalUrl)) return;
+  if (item.byExtensionId && item.byExtensionId !== chrome.runtime.id) {
+    // Started by another extension (it may need the file itself, or made it in the browser):
+    // never taken over.
+    return note(label, "deixado ao navegador: pedido por outra extensão");
+  }
   if (item.incognito) { // private window: nothing of it goes to the app's list or history
     return note(label, "deixado ao navegador: janela privada");
   }

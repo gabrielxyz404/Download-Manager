@@ -34,6 +34,7 @@ const FILES = {};
 for (let i = 0; i < 8; i++) FILES[`multi${i}.zip`] = crypto.randomBytes(2_500_000);
 FILES["tiny.zip"] = crypto.randomBytes(3000);
 FILES["restart.zip"] = crypto.randomBytes(3_000_000);
+FILES["kept.zip"] = crypto.randomBytes(2_500_000);
 let slowStart = false; // the restart test: the site answers the app slowly at first
 const site = http.createServer((req, res) => {
   if (req.url === "/") {
@@ -67,10 +68,11 @@ function ping() {
     r.on("error", () => resolve(false)); r.on("timeout", () => { r.destroy(); resolve(false); });
   });
 }
-async function startApp() {
+async function startApp(extra = {}) {
   fs.mkdirSync(path.join(CFG, "FlowDownloads"), { recursive: true });
   fs.writeFileSync(path.join(CFG, "FlowDownloads", "settings.json"),
-                   JSON.stringify({ dest_dir: DL, background_hint_shown: true, show_progress_window: false, max_active: 3 }));
+                   JSON.stringify({ dest_dir: DL, background_hint_shown: true, show_progress_window: false, max_active: 3,
+                                    category_folders: false, ...extra }));
   app = spawn(APP_PY, [path.join(ROOT, "Flow Downloads.pyw"), "--background"],
               { env: { ...process.env, XDG_CONFIG_HOME: CFG, APPDATA: CFG }, stdio: "inherit" });
   return waitFor(ping, 10000);
@@ -143,6 +145,23 @@ const leftovers = () => (fs.existsSync(DL) ? fs.readdirSync(DL, { recursive: tru
   const restartOk = await waitFor(onDisk, 90000, 1000);
   check("O navegador pára a extensão a meio: o download termina intacto (não fica parado)", restartOk,
         restartOk ? "" : "o ficheiro não chegou à pasta do navegador em 90 s");
+
+  // 4. "Show downloads in the browser's list" off: the app keeps the file (one copy on disk),
+  //    and the browser's own download is dropped, not completed a second time.
+  slowStart = false;
+  if (app) app.kill();
+  spawnSync("pkill", ["-f", "Flow Downloads.pyw"]);
+  await waitFor(async () => !(await ping()), 10000);
+  check("App reinicia com a opção desligada", await startApp({ browser_list: false }));
+  await page.click("#kept");
+  const keptFile = path.join(DL, "kept.zip");
+  const keptOk = await waitFor(() => fs.existsSync(keptFile) && fs.readFileSync(keptFile).equals(FILES["kept.zip"]), 60000, 500);
+  check("Lista do navegador desligada: a app guarda o ficheiro, intacto", keptOk);
+  await sleep(1500);
+  const inBrowser = (await all()).filter((d) => d.state === "complete" && d.filename && same(d.filename, "kept.zip"));
+  check("…e o navegador não grava uma segunda cópia", inBrowser.length === 0, `${inBrowser.length} cópias no navegador`);
+  const stuck = (await all()).filter((d) => (d.url || "").includes("kept") && d.state === "in_progress");
+  check("…nem fica com um download parado", stuck.length === 0, stuck.map((d) => `${d.state}:${d.paused}`).join(","));
 
   await ctx.close();
   if (app) app.kill();

@@ -159,6 +159,7 @@ def handle_request(method: str, path: str, headers: dict, body: bytes,
     except (ValueError, TypeError, AttributeError, OverflowError, RecursionError) as exc:
         return 400, {"ok": False, "error": str(exc)[:200]}
     item["extension_ok"] = extension_ok(headers)  # lets the app suggest an update
+    item["extension_version"] = str(headers.get("x-flowdl-ext", ""))[:20]
     on_add(item)
     return 200, {"ok": True, **({"rid": item["rid"]} if "rid" in item else {})}
 

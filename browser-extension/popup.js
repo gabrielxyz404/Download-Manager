@@ -48,14 +48,23 @@ $("open").addEventListener("click", async () => {
 $("capture").addEventListener("change", (e) => send({ type: "toggle", enabled: e.target.checked }));
 
 async function lastDownload() {
-  const { lastEvent } = await chrome.storage.local.get("lastEvent");
+  const { lastEvent, recentEvents } = await chrome.storage.local.get(["lastEvent", "recentEvents"]);
+  const when = (at) => {
+    const mins = Math.round((Date.now() - at) / 60000);
+    return mins < 1 ? "agora mesmo" : `há ${mins} min`;
+  };
+  if (recentEvents && recentEvents.length) {
+    // The last few: a download that "did nothing" can be told apart from the ones after it.
+    $("last").textContent = "Últimos downloads:\n" +
+      recentEvents.map((e) => `• (${when(e.at)}) ${e.name} — ${e.text}`).join("\n");
+    $("last").style.whiteSpace = "pre-line";
+    return;
+  }
   if (!lastEvent) {
     $("last").textContent = "Último download: a extensão ainda não viu nenhum.";
     return;
   }
-  const mins = Math.round((Date.now() - lastEvent.at) / 60000);
-  const when = mins < 1 ? "agora mesmo" : `há ${mins} min`;
-  $("last").textContent = `Último download (${when}): ${lastEvent.name} — ${lastEvent.text}`;
+  $("last").textContent = `Último download (${when(lastEvent.at)}): ${lastEvent.name} — ${lastEvent.text}`;
 }
 
 // "Capture on this site": the site of the open tab, added to / removed from the app's skip list.

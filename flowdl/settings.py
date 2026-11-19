@@ -67,6 +67,10 @@ class Settings:
         self.browser_integration = True
         self.confirm_browser = False  # browser downloads start at once, with a progress window
         self.show_progress_window = True
+        # Browser downloads the app takes also appear in the browser's own list, saved in the
+        # browser's folder (off: the app keeps them, like other download managers - one copy
+        # written to disk, and no second "Save as" when the browser asks where to save).
+        self.browser_list = True
         self.auto_resume = True
         self.run_in_background = True
         self.background_hint_shown = False

@@ -131,6 +131,29 @@ class ServiceTests(unittest.TestCase):
         kept.pause()
         kept.wait(10)
 
+    def test_browser_downloads_can_stay_out_of_the_browser_list(self):
+        """Option "show downloads in the browser's list" off: the app keeps the file (one copy
+        on disk, no second "Save as" in a browser that asks where to save). The extension is
+        told "started" with no stream once data arrives, and only then drops its own copy."""
+        Handler.delay = 0.0
+        self.settings.show_progress_window = False
+        self.settings.browser_list = False
+        for version, keeps in (("0.9.11", True), ("0.9.9", False)):  # (older extensions: as before)
+            rid = "rk" + version
+            self.svc.requests[rid] = {"state": "waiting"}
+            self.svc.add_from_browser({"url": self.base + f"/fica{version}.bin", "rid": rid, "mirror": True,
+                                       "extension_version": version})
+            code, ans = self.svc.api("GET", f"/request/{rid}", {})
+            self.assertEqual((code, ans["state"]), (200, "started"))
+            task = self.svc._task_for(rid)
+            self.assertEqual(ans["stream"] is None, keeps, version)
+            self.assertEqual(task.mirror, not keeps)
+            self.assertTrue(_until(lambda: not task.is_running(), 15))
+            self.assertEqual(task.status, "Concluído")
+            # kept: the finished file is the app's; shown in the browser: it waits for the browser
+            self.assertEqual(os.path.exists(task.path), keeps, version)
+            self.assertEqual(bool(getattr(task, "awaiting_browser", False)), not keeps, version)
+
     def test_the_user_is_told_why_the_browser_kept_a_download(self):
         """Before: the browser simply carried on and nothing said why the app did not take it."""
         told = []

@@ -1,5 +1,19 @@
 # Novidades do Flow Downloads
 
+## 0.9.11
+
+**Downloads que não param**
+- Servidores que só aceitam poucas ligações (como o thinkbroadband): já não ficam presos no fim. Antes, perto do fim, a app cortava e reabria todas as ligações ao mesmo tempo, o servidor via ligações a mais por um instante e parava toda a gente outra vez - e assim por minutos. Agora, num servidor que já parou uma vez, cada ligação espera um instante antes de reabrir, e o fim do download é tratado como o resto. Num simulador desse servidor: 2 min 34 s antes, 33 s agora.
+- A app percebe mais depressa que o servidor parou toda a gente (4 s em vez de 6) e fecha as ligações a mais logo a seguir.
+- Fim do download: deixou de partir o que falta em pedaços minúsculos (cada um custava um pedido novo); uma ligação lenta continua a ser ajudada (ideia do Gopeed, reescrita por nós).
+- Comparado lado a lado com a 0.9.10 em servidores rápidos, lentos, que castigam ou com quedas: a mesma velocidade.
+
+**Navegador**
+- Nova opção em Configurações → Navegador: **"Mostrar os downloads também na lista do navegador"**. Desligada, a app guarda o ficheiro ela própria (como o IDM): o disco só o grava uma vez e o navegador não pergunta uma segunda vez onde guardar. Extensão 0.9.11: recarregue-a em brave://extensions (↻).
+- Correção: com "Perguntar onde guardar cada ficheiro" ligado no Brave, a segunda janela "Salvar como" continuava a aparecer (o Brave pergunta sempre, mesmo quando a extensão pede para não perguntar). Desligue essa opção do Brave, ou a nova opção acima.
+- A janela da extensão mostra os **últimos 5 downloads** e o que aconteceu a cada um.
+- Downloads pedidos por outras extensões ficam sempre com o navegador.
+
 ## 0.9.10
 
 - **Corrigido: download parado a 0 B/s em servidores que só aceitam poucas ligações** (visto no thinkbroadband: "o servidor parou: 4 ligações" e 13 ligações abertas, para sempre). Esses servidores só voltam a enviar quando o número de ligações abertas desce, e a app ficava à espera que as ligações acordassem. Agora, se a paragem durar mais de 2 segundos, a app fecha as ligações a mais e o servidor volta a enviar. Depois de um servidor parar uma vez, a app nunca mais passa do número que ele aceitou nesse download, nem para acabar as últimas partes.
