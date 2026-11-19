@@ -73,7 +73,10 @@ TIMEOUT = 30
 SINGLE_TRIES = 3          # a server that cannot continue mid-file: start over this many times
 CHECKPOINT_S = 5.0        # progress forced onto the disk this often (a power cut loses at most this)
 PROBE_OK_BYTES = 256 * 1024  # a fresh connection that got this much really works (not a trickle)
-OUTAGE_SILENT_S = 4.0     # every connection silent this long: the server (or the line) stopped
+# Every connection silent this long: the server (or the line) stopped. (Not shorter than
+# STALL_SECONDS: tried 4 s, and a server that stalls each answer after a while became 8x
+# slower - the stop was declared before the usual swap of a silent connection could act.)
+OUTAGE_SILENT_S = STALL_SECONDS
 OUTAGE_SHED_S = 1.0       # a stop longer than this: close the connections above the new number
 OUTAGE_CALM_S = 90.0      # after the server stopped every connection: fewer connections for this long
 RESCUE_EXTRA = 2          # a stuck piece may add this many connections over the maximum (while

@@ -1,5 +1,10 @@
 # Novidades do Flow Downloads
 
+## 0.9.14
+
+- Corrigido: em servidores que param cada resposta a meio (e obrigam a pedir de novo), a 0.9.11 tinha ficado 8 vezes mais lenta (43 s → 5 min num teste). A app voltou a esperar 6 s (em vez de 4) antes de concluir que o servidor parou toda a gente; os servidores com limite de ligações (thinkbroadband) continuam a terminar igual.
+- Bateria de 86 servidores problemáticos repetida com o motor novo: 73 passam (2 mais do que antes); os restantes são servidores que mentem sobre o ficheiro, onde o certo é dar erro.
+
 ## 0.9.13
 
 - **A internet cai durante minutos: o download já não pára.** Antes, se o servidor ou a internet ficassem inacessíveis (sem rede, router a reiniciar) mais de ~2,5 minutos, o download acabava em "Erro: Falha na conexão" e não continuava quando a ligação voltava. Agora a app continua a tentar (de 30 em 30 s, até 30 minutos sem receber nada) e mostra "sem ligação ao servidor: a tentar de novo"; quando a ligação volta, continua de onde estava. O mesmo ao retomar downloads quando o PC liga antes de o Wi-Fi estar pronto.
