@@ -52,6 +52,7 @@ class HostMemory:
         calm = entry.pop("outage_limit", None)
         if calm and time.time() - entry.get("time", 0) <= OUTAGE_LIMIT_AGE:
             entry["limit"] = min(entry["limit"], calm) if entry.get("limit") else calm
+            entry["outage"] = True  # (the engine then asks for whole pieces: see engine)
         return entry
 
     def put(self, host: str, connections: int, limit: int | None, outage_limit: int | None = None) -> None:

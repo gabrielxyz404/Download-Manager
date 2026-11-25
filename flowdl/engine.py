@@ -40,6 +40,7 @@ USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/120.0 Safari/537.36"
 )
+MB = 1024 * 1024
 CHUNK_SIZE = 256 * 1024
 MIN_CHUNK = 64 * 1024      # each connection reads pieces of ~0.25 s of data...
 MAX_CHUNK = 1024 * 1024    # ...between 64 KB and 1 MB (few, big pieces = little processor use)
@@ -424,6 +425,7 @@ class DownloadTask:
         self._net_down = False  # connections are waiting for a way to the server
         self.outages = 0  # times every connection went silent together (this download)
         self._last_outage_at = 0.0
+        self._punishing_host = False
         self._target = 1 << 30  # connections wanted now (set by the download loop)
         self._in_outage = False  # every connection stopped together (no cutting / reopening)
         self._outage_started: float | None = None
@@ -433,6 +435,12 @@ class DownloadTask:
         self.server_limit: int | None = None  # connections the server accepts, when it refuses more
         self.connection_note = ""  # shown in the list: speed test / limit found
         self.reconnections = 0  # slow connections replaced
+        # Diagnostic ("Copiar diagnóstico"): what happened, second by second, in the last run.
+        self.requests = 0  # range requests sent (this run)
+        self._diag: deque = deque(maxlen=900)  # one row per second (the last 15 min)
+        self._diag_events: deque = deque(maxlen=300)
+        self._diag_note = ""
+        self._diag_at = 0.0
         # Where the link led (after redirects): signed links there may expire; self.url, the
         # link the user/browser started from, is asked again for a fresh one when that happens.
         self._final_url: str | None = final_url if final_url and final_url != url else None
@@ -683,6 +691,12 @@ class DownloadTask:
         self._run_from = self.downloaded
         self.first_byte_after = None
         self.outages = 0  # (counted per run: an old stop says nothing about a resumed download)
+        self.requests = 0
+        self._diag.clear()
+        self._diag_events.clear()
+        self._diag_note = ""
+        self._diag_at = 0.0
+        self._event(f"início: {self.downloaded // MB} MB já baixados, máx. {self.connections} ligações")
         try:
             for attempt in (1, 2):
                 try:
@@ -714,11 +728,51 @@ class DownloadTask:
                 self.error = str(exc) or exc.__class__.__name__
                 self.status = Status.ERROR
         finally:
+            self._event(f"fim: {self.status}" + (f" ({self.error})" if self.error else ""))
             self.speed = 0.0
             self.active_seconds += time.monotonic() - self._run_started
             self._save_state()
             if self.on_done:
                 self.on_done(self)
+
+    def _event(self, text: str) -> None:
+        t = time.monotonic() - self._run_started if self._run_started else 0.0
+        self._diag_events.append((t, text))
+
+    def _diag_row(self, now: float, target: int) -> None:
+        """One line per second of the run (see diagnostic())."""
+        if now - self._diag_at < 1.0:
+            return
+        self._diag_at = now
+        if self.connection_note != self._diag_note:
+            self._diag_note = self.connection_note
+            if self.connection_note:
+                self._event(f"nota: {self.connection_note}")
+        with self._lock:
+            alive = sum(1 for w in self._workers if w.alive)
+            receiving = sum(1 for w in self._workers if w.alive and now - w.last_data < 1.0)
+        self._diag.append((now - self._run_started, self.downloaded // MB, self.speed / MB, alive,
+                           receiving, target, self.requests, self._in_outage))
+
+    def diagnostic(self) -> str:
+        """What happened in the last run, as text to paste in a message: second by second
+        (MB done, speed, open connections, receiving ones, connections wanted, requests sent)
+        and the events (stops, connections cut / replaced, errors). No address or cookies:
+        only the server's name."""
+        from . import __version__
+        lines = [f"Flow Downloads {__version__} - diagnóstico",
+                 f"servidor: {host_of(self._current_url())}  tamanho: "
+                 f"{(self.size or 0) / MB:.0f} MB  estado: {self.status}"
+                 + (f"  erro: {self.error}" if self.error else ""),
+                 f"ligações máx.: {self.connections}  paragens: {self.outages}  "
+                 f"substituídas: {self.reconnections}  pedidos: {self.requests}  "
+                 f"limite do servidor: {self.server_limit}",
+                 "", "eventos (segundos desde o início):"]
+        lines += [f"{t:7.1f}  {text}" for t, text in list(self._diag_events)]
+        lines += ["", "   seg      MB    MB/s  abertas  a receber  alvo  pedidos  parado"]
+        lines += [f"{t:6.0f}  {mb:6d}  {sp:6.1f}  {alive:7d}  {rx:9d}  {tg:4d}  {rq:7d}  {'sim' if out else ''}"
+                  for t, mb, sp, alive, rx, tg, rq, out in list(self._diag)]
+        return "\n".join(lines)
 
     def _discard_progress(self) -> None:
         for p in (self._part_path, self._state_path):
@@ -1063,6 +1117,11 @@ class DownloadTask:
         self.connection_note = "testando velocidade" if ramping else ""
         self.server_limit = None
         known = self.host_memory.get(host_of(self._current_url())) if self.host_memory else None
+        # (Stopped us again and again on an earlier download, a few hours ago at most.)
+        self._punishing_host = bool(known and known.get("limit") and known.get("outage"))
+        if known:
+            self._event(f"memória do servidor: {known.get('conns')} ligações, limite {known.get('limit')}"
+                        + (", já nos parou (pedidos longos)" if self._punishing_host else ""))
         if known:
             # This server taught us before: start where it paid off (and within its limit),
             # still measuring and adapting from there.
@@ -1182,6 +1241,8 @@ class DownloadTask:
                 outage_since = now
                 self.outages += 1
                 self._last_outage_at = now
+                self._event(f"paragem do servidor #{self.outages}: {self._active_workers} ligações, "
+                            f"nada recebido há {silent:.0f} s")
                 if target > 2:
                     target = soft_cap = max(2, target // 2)
                     ramping = False
@@ -1190,6 +1251,7 @@ class DownloadTask:
                                                or busy_now < max(2, target // 2)):
                 outage_since = None  # data flowing again (or only the last pieces are left)
                 calm_since = now
+                self._event(f"voltou a receber: {self._active_workers} ligações")
             # (Known at once, in this same pass: the check below cuts silent connections, and
             # both fire at 6 s - before, every connection was sometimes cut and reopened in the
             # very pass that found the server had stopped us, straight back over its limit.)
@@ -1201,6 +1263,7 @@ class DownloadTask:
             if self._net_down:  # (said over the speed-test notes while nothing gets through)
                 self.connection_note = "sem ligação ao servidor: a tentar de novo"
             self._target = target  # connections above this leave when they get the chance
+            self._diag_row(now, target)
             if not self._stop.is_set():
                 self._replace_slow_connections(now, target)
                 while self._rescued:  # pieces taken from stuck connections: a fresh one each
@@ -1387,6 +1450,8 @@ class DownloadTask:
             # use and still count at the server: always closed, and not counted as staying.
             leaving = [w for w in self._workers if w.alive and not w.shed and w.retired]
             staying = [w for w in self._workers if w.alive and not w.shed and not w.retired]
+        if leaving:
+            self._event(f"fechadas {len(leaving)} ligações presas já substituídas")
         for w in leaving:
             w.shed = w.reconnect = True
             if w.conn is not None:
@@ -1396,6 +1461,7 @@ class DownloadTask:
             return
         # Never the ones receiving right now (a probe that got through); then the ones that
         # brought the least go: the best connections stay.
+        self._event(f"fechadas {extra} ligações a mais (fica com {max(1, target)})")
         for w in sorted(staying, key=lambda x: (now - x.last_data < 1.0, x.total))[:extra]:
             w.shed = w.retired = w.reconnect = True
             if w.conn is not None:
@@ -1458,7 +1524,7 @@ class DownloadTask:
                     and (not self._in_outage or not probing)
                     and not (w.rescuer and w.total < PROBE_OK_BYTES)
                     and working < room + extra
-                    and alive < 2 * room + extra):  # stuck ones still leaving
+                    and alive < room + extra):  # (open ones, stuck included: never above the maximum)
                 # Hand what it still has to receive to a fresh connection now, whether or not
                 # the stuck one wakes up (on Windows it may not until its timeout). If it does
                 # wake, its piece is empty and it simply takes other work. No back-off here:
@@ -1470,6 +1536,14 @@ class DownloadTask:
                 if rest is not None:
                     w.rescued_at = now
                     w.retired = True  # when it wakes, it leaves: its replacement took its place
+                    # ...and it is closed now: left open, stuck ones piled up at the server (seen
+                    # on Windows: 15 open with a maximum of 8, and a server that stops everyone
+                    # above its limit never sent again).
+                    w.reconnect = True
+                    self.reconnections += 1  # (a stuck connection replaced)
+                    self._event(f"ligação parada há {quiet:.0f} s: substituída ({rest.remaining // MB} MB passam a outra)")
+                    if w.conn is not None:
+                        w.conn.abort()
                     with self._lock:
                         self._rescued.append(self._add_segment(rest))
                     if self._in_outage:
@@ -1489,6 +1563,7 @@ class DownloadTask:
                 w.last_data = now
                 w.quiet_swaps += 1
                 self.reconnections += 1
+                self._event(f"ligação parada há {quiet:.0f} s: cortada e reaberta")
                 if w.conn is not None:
                     w.conn.abort()
         if len(live) < 3:
@@ -1541,6 +1616,13 @@ class DownloadTask:
                                 # requests kept new connections slow (seen: a 5 GB file started
                                 # at ~6 MB/s and took 16 s longer than the browser).
                                 size = min(size, max(MIRROR_REQUEST, int(est * 2)))
+                            if (self._touchy() or self._punishing_host) and not self.mirror:
+                                # A server that stopped us: one long request per connection (its
+                                # whole piece), as other download managers do - many requests
+                                # look like a robot to such servers (seen: thinkbroadband).
+                                # (Not in browser-list mode: the browser reads from the start,
+                                # and long requests there made it wait - 23 s -> 33 s simulated.)
+                                size = seg.end - seg.pos + 1
                             req_end = min(seg.end, seg.pos + size - 1)
                             with seg.lock:
                                 seg.inflight_end = req_end
@@ -1550,6 +1632,7 @@ class DownloadTask:
                                 hdrs["If-Range"] = self.validator  # only bytes of the same version
                             w.answering = False
                             sent = w.last_data = time.monotonic()  # waiting for the answer starts now
+                            self.requests += 1
                             resp = conn.get(req_url, hdrs, seg.pos, req_end, cookies=self.cookies)
                             w.answering = True
                             w.last_data = now_ = time.monotonic()
@@ -1663,6 +1746,8 @@ class DownloadTask:
                             w.reset_speed()
                             continue
                         code = exc.code if isinstance(exc, net.HTTPError) else None
+                        self._event(f"erro numa ligação: {f'HTTP {code}' if code else type(exc).__name__}"
+                                    f" {str(exc)[:80]}")
                         refused = isinstance(exc, ConnectionRefusedError)
                         if conn.address and not isinstance(exc, net.HTTPError):
                             conn.address = None  # that address failed: let the system choose

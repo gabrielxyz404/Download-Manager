@@ -233,6 +233,22 @@ class GuiTests(unittest.TestCase):
             app._global_limit()
         self.assertEqual(GLOBAL_LIMITER.rate, 0)
 
+    def test_connections_per_download_setting(self):
+        """Configurações -> Downloads: the maximum for new downloads (before, only the "+"
+        window had it), and the "+" window starts from it."""
+        app = self.open_app()
+        try:
+            with mock.patch.object(self.gui.simpledialog, "askinteger", return_value=12):
+                app._connections()
+            self.assertEqual(self.svc.settings.connections, 12)
+            self.assertIn('"connections": 12', read_text(self.svc.settings.path))
+            dlg = self.gui.AddDialog(app)
+            self.assertEqual(dlg.conns.get(), 12)
+            dlg.destroy()
+        finally:
+            self.svc.settings.connections = 8
+            self.svc.settings.save()
+
     def test_delete_removes_unfinished_files(self):
         Handler.delay = 0.05
         app = self.open_app()
@@ -538,6 +554,23 @@ class GuiTests(unittest.TestCase):
         with mock.patch.object(self.gui, "open_path") as op:
             app._open_folder()
         op.assert_called_once_with(self.dl)
+
+    def test_copy_diagnostic(self):
+        """What happened, second by second, to paste in a message: never the link itself
+        (it may carry a key) nor cookies."""
+        app = self.open_app()
+        app.add_download(self.base + "/f.bin?token=SECRET", self.dl, 2)
+        task = self.svc.manager.tasks[0]
+        self.assertTrue(pump(app, 15, lambda: task.status == "Concluído"))
+        self.select(task)
+        app._copy_diagnostic()
+        text = app.clipboard_get()
+        self.assertIn("diagnóstico", text)
+        self.assertIn("início:", text)
+        self.assertIn("fim: Concluído", text)
+        self.assertNotIn("SECRET", text)
+        self.assertNotIn("f.bin", text)
+        self.assertIn("Diagnóstico copiado", app.status_var.get())
 
     def test_clipboard_link_detected_when_window_gets_focus(self):
         app = self.open_app()

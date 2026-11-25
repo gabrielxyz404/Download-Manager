@@ -1374,6 +1374,8 @@ class SettingsDialog(tk.Toplevel):
             self._row("Categorias, regras e pastas", "Editar...", lambda: CategoriesDialog(app))
             self._head("Fila")
             self._row(f"Downloads ao mesmo tempo: {app.manager.max_active}", "Alterar...", app._max_active)
+            self._row(f"Ligações por download (novos downloads): {st.connections}", "Alterar...",
+                      app._connections)
             self._check("Retomar downloads ao abrir o Flow Downloads", app.resume_var,
                         lambda: self._set("auto_resume", app.resume_var.get()))
             self._head("Quando terminar")
@@ -1758,6 +1760,7 @@ class App(tk.Tk):
         self.ctx.add_command(label="Pausar", command=self._pause)
         self.ctx.add_command(label="Limitar velocidade...", command=self._task_limit)
         self.ctx.add_command(label="Copiar endereço", command=self._copy_url)
+        self.ctx.add_command(label="Copiar diagnóstico", command=self._copy_diagnostic)
         self.ctx.add_command(label="Verificar checksum...", command=self._verify_checksum)
         self.ctx.add_command(label="Atualizar link...", command=self._update_link)
         self.ctx.add_command(label="Baixar no navegador", command=self._to_browser)
@@ -2089,6 +2092,16 @@ class App(tk.Tk):
             self.settings.save()
             self.manager.tick()
 
+    def _connections(self) -> None:
+        n = simpledialog.askinteger(
+            "Ligações por download", "Quantas ligações por download, no máximo?\n"
+            "(8 como o IDM; a app usa menos quando mais não ajudam)",
+            initialvalue=self.settings.connections, minvalue=1, maxvalue=32, parent=self)
+        if n:
+            self.settings.connections = n
+            self.settings.save()
+            self.status_var.set(f"Novos downloads: até {n} ligações")
+
     def _global_limit(self) -> None:
         kb = simpledialog.askinteger(
             "Limitador de velocidade", "Velocidade máxima total em KB/s (0 = sem limite):",
@@ -2289,6 +2302,17 @@ class App(tk.Tk):
             self.clipboard_clear()
             self.clipboard_append(tasks[0].url)
             self._last_clip = tasks[0].url
+
+    def _copy_diagnostic(self) -> None:
+        """What happened in the download, second by second, to paste in a message (no address
+        or cookies in it: see DownloadTask.diagnostic)."""
+        tasks = self._selected()
+        if tasks:
+            self.clipboard_clear()
+            text = tasks[0].diagnostic()
+            self.clipboard_append(text)
+            self._last_clip = text
+            self.status_var.set("Diagnóstico copiado: cola-o numa mensagem")
 
     def _context_menu(self, event) -> None:
         row = self.tree.identify_row(event.y)

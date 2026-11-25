@@ -1,5 +1,16 @@
 # Novidades do Flow Downloads
 
+## 0.9.16
+
+**Thinkbroadband (e servidores parecidos): parava, voltava e parava outra vez**
+- As ligações presas que a app substituía ficavam abertas no servidor até acordarem (viu-se 15 ligações abertas com o máximo em 8). Agora são fechadas no momento em que são substituídas, e a app nunca passa do máximo de ligações.
+- Depois de uma paragem, cada ligação pede o seu pedaço inteiro de uma vez, em vez de muitos pedidos seguidos (muitos pedidos parecem um robô a alguns servidores, que param toda a gente). A app lembra-se disso para esse servidor durante 6 horas. Num servidor de teste que castiga quem faz muitos pedidos: 49,5 s com 3 paragens → 23 s com 1.
+- Dois testes automáticos novos: um servidor que só serve as ligações mais antigas, e um servidor que castiga muitos pedidos.
+
+**Novo: "Copiar diagnóstico"** (botão direito num download). Copia o que aconteceu no download segundo a segundo: velocidade, ligações abertas e a receber, pedidos, paragens, ligações substituídas e erros. Não inclui o link nem os cookies, só o nome do servidor. Serve para colar numa mensagem quando um download se porta mal.
+
+**Novo: Configurações → Downloads → "Ligações por download"**. Antes só se mudava na janela "+".
+
 ## 0.9.15
 
 - Corrigido: num servidor que só aceita poucas ligações, a app às vezes voltava logo ao número de ligações que o tinha feito parar (e o download andava aos soluços). Duas causas: numa paragem abriam-se várias ligações de teste em vez de uma, e a paragem era anotada depois de outra regra já ter reaberto todas as ligações. Também passam a fechar-se as ligações presas que já tinham sido substituídas.

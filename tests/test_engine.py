@@ -9,7 +9,7 @@ import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from flowdl import engine
-from flowdl.engine import DownloadTask, Status
+from flowdl.engine import RESCUE_EXTRA, DownloadTask, Status
 from flowdl.manager import DownloadManager
 
 DATA = os.urandom(5 * 1024 * 1024 + 123)
@@ -552,7 +552,7 @@ class HoldServer(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     LIMIT = 4
     lock = threading.Lock()
-    open = 0
+    open = peak = 0
     data = b""  # set by the test
 
     def log_message(self, *a):
@@ -562,6 +562,7 @@ class HoldServer(BaseHTTPRequestHandler):
         super().setup()
         with HoldServer.lock:
             HoldServer.open += 1
+            HoldServer.peak = max(HoldServer.peak, HoldServer.open)
 
     def finish(self):
         try:
@@ -592,6 +593,106 @@ class HoldServer(BaseHTTPRequestHandler):
                         return  # the client closed it (a real server notices)
                 self.wfile.write(data[i:min(i + 32768, b + 1)])
                 time.sleep(0.01)
+        except OSError:
+            pass
+
+
+class FirstComeServer(BaseHTTPRequestHandler):
+    """Sends only to the LIMIT oldest open connections; newer ones get nothing until an older
+    one closes (a server that serves a fixed number of connections per address). Stuck
+    connections that the app replaces but leaves open keep newer ones waiting for ever."""
+    protocol_version = "HTTP/1.1"
+    LIMIT = 4
+    lock = threading.Lock()
+    order: list = []
+    peak = 0
+    data = b""
+
+    def log_message(self, *a):
+        pass
+
+    def setup(self):
+        super().setup()
+        with FirstComeServer.lock:
+            FirstComeServer.order.append(self)
+            FirstComeServer.peak = max(FirstComeServer.peak, len(FirstComeServer.order))
+
+    def finish(self):
+        try:
+            super().finish()
+        finally:
+            with FirstComeServer.lock:
+                FirstComeServer.order.remove(self)
+
+    def _my_turn(self):
+        with FirstComeServer.lock:
+            return self in FirstComeServer.order[:FirstComeServer.LIMIT]
+
+    def do_GET(self):
+        import select
+        import socket
+        data = FirstComeServer.data
+        m = re.match(r"bytes=(\d+)-(\d*)", self.headers.get("Range", ""))
+        a = int(m.group(1)) if m else 0
+        b = min(int(m.group(2)), len(data) - 1) if m and m.group(2) else len(data) - 1
+        self.send_response(206 if m else 200)
+        if m:
+            self.send_header("Content-Range", f"bytes {a}-{b}/{len(data)}")
+        self.send_header("Content-Length", str(b - a + 1))
+        self.send_header("Accept-Ranges", "bytes")
+        self.end_headers()
+        try:
+            for i in range(a, b + 1, 32768):
+                while not self._my_turn():
+                    time.sleep(0.05)
+                    r, _, _ = select.select([self.connection], [], [], 0)
+                    if r and self.connection.recv(1, socket.MSG_PEEK) == b"":
+                        return  # the client closed it
+                self.wfile.write(data[i:min(i + 32768, b + 1)])
+                time.sleep(0.01)
+        except OSError:
+            pass
+
+
+class RateServer(BaseHTTPRequestHandler):
+    """Stops sending to every connection for STALL seconds when a client asks more than LIMIT
+    times in 10 s (what thinkbroadband seemed to do: fine at first, then stop after stop while
+    the app asked for piece after piece; one long request per connection does not trip it)."""
+    protocol_version = "HTTP/1.1"
+    LIMIT, STALL = 12, 10.0
+    lock = threading.Lock()
+    asked: list = []
+    stall_until = 0.0
+    stalls = 0
+    data = b""
+
+    def log_message(self, *a):
+        pass
+
+    def do_GET(self):
+        cls = RateServer
+        now = time.monotonic()
+        with cls.lock:
+            cls.asked = [t for t in cls.asked if now - t < 10] + [now]
+            if len(cls.asked) > cls.LIMIT and now >= cls.stall_until:
+                cls.stall_until = now + cls.STALL
+                cls.stalls += 1
+        data = cls.data
+        m = re.match(r"bytes=(\d+)-(\d*)", self.headers.get("Range", ""))
+        a = int(m.group(1)) if m else 0
+        b = min(int(m.group(2)), len(data) - 1) if m and m.group(2) else len(data) - 1
+        self.send_response(206 if m else 200)
+        if m:
+            self.send_header("Content-Range", f"bytes {a}-{b}/{len(data)}")
+        self.send_header("Content-Length", str(b - a + 1))
+        self.send_header("Accept-Ranges", "bytes")
+        self.end_headers()
+        try:
+            for i in range(a, b + 1, 65536):
+                while time.monotonic() < cls.stall_until:
+                    time.sleep(0.05)
+                self.wfile.write(data[i:min(i + 65536, b + 1)])
+                time.sleep(0.02)
         except OSError:
             pass
 
@@ -756,7 +857,7 @@ class StallTests(unittest.TestCase):
         """Seen on thinkbroadband: past its limit the server sent nothing, and the app kept all
         13 connections open waiting for them to wake up: 0 B/s for ever. Now, a stop longer
         than a moment closes the connections above the new number, and the server sends again."""
-        HoldServer.open, HoldServer.data = 0, BIG * 12
+        HoldServer.open, HoldServer.peak, HoldServer.data = 0, 0, BIG * 12
 
         class Server(ThreadingHTTPServer):
             request_queue_size = 64  # (a subclass: other tests keep the default backlog)
@@ -768,9 +869,11 @@ class StallTests(unittest.TestCase):
             task = DownloadTask(f"http://127.0.0.1:{server.server_address[1]}/f.bin", tmp.name, 8)
             task.start()
             fewer_at = None
+            peak_app = 0
             t0 = time.monotonic()
             while task.is_running() and time.monotonic() - t0 < 30:
                 time.sleep(0.2)
+                peak_app = max(peak_app, task.active_connections)
                 if fewer_at is None and task.outages and task.active_connections <= HoldServer.LIMIT:
                     fewer_at = time.monotonic() - t0
             got = task.downloaded
@@ -779,6 +882,61 @@ class StallTests(unittest.TestCase):
             self.assertGreaterEqual(task.outages, 1)
             self.assertIsNotNone(fewer_at, "kept every connection open while the server waited")
             self.assertGreater(got, len(HoldServer.data) // 3, "the server never sent again")
+            # Seen on Windows: 15 open with a maximum of 8 - stuck ones replaced but left open.
+            self.assertLessEqual(peak_app, 8, "more connections than the maximum")
+        finally:
+            server.shutdown()
+            tmp.cleanup()
+
+    def test_replaced_stuck_connections_are_closed_not_left_open(self):
+        """Seen on Windows (thinkbroadband): 15 connections open with a maximum of 8. Stuck
+        connections were replaced but left open, so the server kept counting them and the
+        replacements got nothing either. Now a replaced connection is closed at once."""
+        FirstComeServer.order, FirstComeServer.peak, FirstComeServer.data = [], 0, BIG * 12
+
+        class Server(ThreadingHTTPServer):
+            request_queue_size = 64
+        server = Server(("127.0.0.1", 0), FirstComeServer)
+        server.daemon_threads = True
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        tmp = tempfile.TemporaryDirectory()
+        try:
+            task = DownloadTask(f"http://127.0.0.1:{server.server_address[1]}/f.bin", tmp.name, 8)
+            task.start()
+            crowded = 0
+            t0 = time.monotonic()
+            while task.is_running() and time.monotonic() - t0 < 40:
+                time.sleep(0.1)
+                # (a moment over is a closed connection the server has not noticed yet)
+                crowded += len(FirstComeServer.order) > 8 + RESCUE_EXTRA
+            done = task.status == Status.COMPLETED
+            task.pause()
+            task.wait(10)
+            self.assertTrue(done, "never finished")
+            self.assertLessEqual(crowded, 3, "stuck ones left open at the server")
+        finally:
+            server.shutdown()
+            tmp.cleanup()
+
+    def test_server_that_punishes_many_requests_is_asked_less_after_a_stop(self):
+        """Seen on thinkbroadband: stop, recover, stop again. After a stop the app asked for
+        piece after piece and tripped the server again; now each connection asks for its whole
+        piece in one request after a stop. (Simulated: 49.5 s with 3 stops -> 23 s with 1.)"""
+        RateServer.asked, RateServer.stall_until, RateServer.stalls = [], 0.0, 0
+        RateServer.data = BIG * 12
+
+        class Server(ThreadingHTTPServer):
+            request_queue_size = 64
+        server = Server(("127.0.0.1", 0), RateServer)
+        server.daemon_threads = True
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        tmp = tempfile.TemporaryDirectory()
+        try:
+            task = DownloadTask(f"http://127.0.0.1:{server.server_address[1]}/f.bin", tmp.name, 8)
+            task.start()
+            task.wait(90)
+            self.assertEqual(task.status, Status.COMPLETED, task.error)
+            self.assertLessEqual(RateServer.stalls, 2, "stopped by the server again and again")
         finally:
             server.shutdown()
             tmp.cleanup()
@@ -1012,10 +1170,12 @@ class HostMemoryTests(unittest.TestCase):
             mem.put("recusa.com", 2, 2, outage_limit=1)
             again = hostmemory.HostMemory(path)
             self.assertEqual(again.get("cdn.exemplo.com")["limit"], 4)  # right after: careful
+            self.assertTrue(again.get("cdn.exemplo.com").get("outage"))  # (then: whole-piece requests)
             self.assertEqual(again.get("recusa.com")["limit"], 1)
             for h in ("cdn.exemplo.com", "recusa.com"):
                 again._load()[h]["time"] -= hostmemory.OUTAGE_LIMIT_AGE + 60
             self.assertIsNone(again.get("cdn.exemplo.com")["limit"])  # hours later: full speed again
+            self.assertFalse(again.get("cdn.exemplo.com").get("outage"))
             self.assertEqual(again.get("cdn.exemplo.com")["conns"], 4)
             self.assertEqual(again.get("recusa.com")["limit"], 2)  # the server's own limit stays
 
