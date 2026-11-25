@@ -10,6 +10,8 @@
 - O conteúdo do formulário fica cifrado na lista de downloads, como os cookies, e é apagado quando o download termina. Não aparece no "Copiar diagnóstico".
 - Extensão 0.9.13: recarregue-a em brave://extensions (↻).
 
+**Corrigido (Windows):** quando algo corria mal a meio de um download, o ficheiro .part ficava aberto. No Windows isso trancava-o, e o fim desse download (ou de quando fosse retomado) dava "Sem permissão para gravar". Agora o ficheiro é sempre fechado. Encontrado pelos testes automáticos no Windows.
+
 **Corrigido:** "Retomar" clicado logo a seguir a "Pausar" era ignorado. Nesse instante a app ainda está a guardar o estado do download. Na janela de progresso, o botão também demorava a passar de "Pausar" a "Retomar".
 
 ## 0.9.18

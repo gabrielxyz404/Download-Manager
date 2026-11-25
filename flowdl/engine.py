@@ -1157,235 +1157,242 @@ class DownloadTask:
             os.close(sync_fd)
             raise _disk(exc, self._part_path) from exc
         self._fh_lock = threading.Lock()
-        self._rescued: list = []
-        self._workers = []
+        try:
+            self._rescued: list = []
+            self._workers = []
 
-        # A server name with several addresses (CDNs): spread the connections over them, so
-        # one busy machine or a per-address limit does not hold every connection back.
-        url = self._current_url()
-        parts = urllib.parse.urlsplit(url)
-        port = parts.port or (443 if parts.scheme == "https" else 80)
-        ips = [] if net._proxy_for(parts.scheme, parts.hostname or "") else net.addresses(parts.hostname or "", port)
-        # Only addresses of the kind (IPv4 / IPv6) that the first connection really reached:
-        # many computers list IPv6 addresses that do not work, and a connection sent there
-        # would wait for nothing. The address that worked goes first.
-        working = getattr(self, "_first_peer", None) if first is not None else None
-        if working is None:
-            ips = []  # nothing proven yet: let the system choose, as before
-        else:
-            ips = [working] + [ip for ip in ips if ip != working and (":" in ip) == (":" in working)]
-        self.server_addresses = len(ips)
-        turn = [1]  # the first connection (the initial request) is already on the first address
-
-        def spawn(seg: Segment, conn=None, resp=None, rescuer: bool = False) -> None:
-            if conn is None and len(ips) > 1 and host_of(self._current_url()) == (parts.hostname or "").lower():
-                conn = net.Connection(TIMEOUT)
-                conn.address = ((parts.hostname or "").lower(), ips[turn[0] % len(ips)])
-                turn[0] += 1
-            w = _Worker(seg, conn, resp)
-            w.rescuer = rescuer
-            with self._lock:
-                self._active_workers += 1
-                self._workers.append(w)
-            t = threading.Thread(target=self._worker, args=(w,), daemon=True)
-            threads.append(t)
-            t.start()
-
-        # Server speed test: start with a few connections (more for big files) and double
-        # them while the total speed keeps growing. Stop when more connections stop helping
-        # (the line or the server is saturated) or when the server refuses them (its limit).
-        # Keep measuring: if the speed drops later, try more connections again.
-        cap = self.connections
-        start_n = START_CONNECTIONS_BIG if self.size >= BIG_FILE else START_CONNECTIONS
-        target = min(start_n, cap)
-        ramping = target < cap
-        ramp_at = time.monotonic() + RAMP_INTERVAL
-        ramp_speed: float | None = None
-        best_speed = 0.0
-        recheck_at = 0.0
-        self.connection_note = "testando velocidade" if ramping else ""
-        self.server_limit = None
-        known = self.host_memory.get(host_of(self._current_url())) if self.host_memory else None
-        # (Stopped us again and again on an earlier download, a few hours ago at most.)
-        self._punishing_host = bool(known and known.get("limit") and known.get("outage"))
-        self._few_requests = bool(known and known.get("few_requests"))
-        if known:
-            self._event(f"memória do servidor: {known.get('conns')} ligações, limite {known.get('limit')}"
-                        + (", já nos parou (pedidos longos)" if self._punishing_host else "")
-                        + (", conta os pedidos (pedidos longos)" if self._few_requests else ""))
-        if known:
-            # This server taught us before: start where it paid off (and within its limit),
-            # still measuring and adapting from there.
-            if known.get("limit"):
-                cap = min(cap, known["limit"])
-            target = max(target, min(cap, known.get("conns", target)))
-            ramping = target < cap
-            self.connection_note = f"começa com {target} (conhecido)" if not ramping else "testando velocidade"
-        self._settled_at = 0
-        limit_refreshes = self._refreshes
-        soft_cap = cap           # lowered after the server stopped for every connection
-        outage_since = None      # when every connection went silent (None: data flowing)
-        flowing_at = 0.0         # last moment the speed was at least 10% of the best
-        calm_since = 0.0         # when data came back after the last such stop
-
-        if first is not None:
-            seg0 = self.segments[0]
-            seg0.active = True
-            seg0.inflight_end = min(seg0.end, int(re.match(r"bytes \d+-(\d+)/",
-                                                           first[1].headers["Content-Range"]).group(1)))
-            spawn(seg0, *first)
-        # Resuming (no first answer yet in this run): one connection until the server has
-        # accepted one - a server that allows few connections answers extra ones with 403,
-        # which would look like an expired link and stop the download for good.
-        self._accepted_any = first is not None
-        allowed = lambda: target if self._accepted_any else 1  # noqa: E731
-        for seg in self.segments:
-            if seg.remaining > 0 and not seg.active and self._active_workers < allowed():
-                seg.active = True
-                spawn(seg)
-        # The other first connections start now, not after the first half-second check (in
-        # browser mode the file is one piece, so the loop above starts only one).
-        while self._active_workers < allowed() and not self._stop.is_set():
-            new_seg = self._split_largest()
-            if new_seg is None:
-                break
-            spawn(new_seg)
-
-        while True:
-            self._wake.wait(0.5)
-            self._wake.clear()
-            self.downloaded = sum(s.pos - s.start for s in self.segments)
-            self._update_speed()
-            if self._worker_error or self._file_changed or self._disk_problem:
-                self._stop.set()
-            now = time.monotonic()
-            if self._limit_hit:
-                self.server_limit = max(1, self._limit_hit)
-                self._limit_hit = 0
-                limit_refreshes = self._refreshes
-                target, ramping = self.server_limit, False
-                self.connection_note = f"servidor aceita {self.server_limit}"
-            elif self.server_limit is not None and self._refreshes != limit_refreshes:
-                # The "limit" was the link expiring (refusals just before a fresh address):
-                # forget it and test more connections again with the new address.
-                self.server_limit = None
-                ramping, ramp_speed = target < cap, None
-                ramp_at = now + RAMP_INTERVAL
-                self.connection_note = "testando velocidade" if ramping else ""
-            elif ramping and now >= ramp_at and outage_since is None:
-                current = self._recent_speed(1.5)
-                if ramp_speed is None or current > ramp_speed * RAMP_MIN_GAIN:
-                    ramp_speed = current
-                    target = min(cap, target * 2)
-                    ramp_at = now + RAMP_INTERVAL
-                    ramping = target < cap
-                    if not ramping:
-                        self.connection_note = ""
-                else:
-                    ramping = False  # more connections did not make it faster
-                    self._settled_at = self._active_workers
-                    self.connection_note = f"{self._active_workers} conexões bastam"
-                    recheck_at = now + RECHECK_INTERVAL
-            elif (not ramping and self.server_limit is None and target < min(cap, soft_cap)
-                  and recheck_at and now >= recheck_at):
-                # Speed dropped a lot since the best moment? Test more connections again -
-                # but not when it dropped to (almost) nothing: that is the server or the line
-                # stopping, and more connections only get stuck too (seen: 8 -> 21 at 0 B/s).
-                current = self._recent_speed(3.0)
-                recheck_at = now + RECHECK_INTERVAL
-                if best_speed and best_speed * 0.2 < current < best_speed * RECHECK_DROP:
-                    ramp_speed, ramping = current, True
-                    target = min(cap, target * 2)
-                    ramp_at = now + RAMP_INTERVAL
-                    self.connection_note = "testando velocidade"
-            if self._samples and now - self._samples[0][0] >= 2.5:
-                # Over a full window only: a short one right at the start (the first answer
-                # arriving at once) gave a huge "best", and everything after looked like a stop.
-                best_speed = max(best_speed, self._recent_speed(3.0))
-            # Every connection silent for a while: the server (or the line) stopped. Some servers
-            # do that to clients with "too many" connections, and on some lines many connections
-            # stall together: use half as many for a while, as a browser-like client would.
-            # (Not only total silence: such a server often lets a trickle through between stops.)
-            recent = self._recent_speed(3.0)
-            if not best_speed or recent >= best_speed * 0.1:
-                flowing_at = now
-            slowed = flowing_at and now - flowing_at > STALL_ALONE_SECONDS
-            silent = now - self._last_rx if self._last_rx else 0.0
-            self._in_outage = outage_since is not None
-            self._outage_started = outage_since
-            with self._lock:
-                busy = [w for w in self._workers if w.alive and w.seg is not None
-                        and w.seg.active and w.seg.remaining > 0]
-            busy_now = len(busy)
-            # The very end: what is left would take a few seconds at the best speed. Stuck pieces
-            # there are rescued at once - never taken for the server stopping.
-            left = sum(seg.remaining for seg in self.segments)
-            # (Not on a server that already stopped every connection once: there, everyone
-            # silent at the end is that server stopping again, and rescuing / reopening every
-            # connection at once is what keeps it stopped - seen in a simulation, for minutes.)
-            self._tail = left <= max(4 * 1024 * 1024, best_speed * 4) and not self._touchy()
-            if self._tail and outage_since is not None:
-                outage_since = None
-            # Only while most connections still have work, and not at the very end.
-            if ((silent > OUTAGE_SILENT_S or slowed) and busy_now >= max(2, target // 2) and not self._tail
-                    and outage_since is None and not all(s.remaining == 0 for s in self.segments)):
-                outage_since = now
-                self.outages += 1
-                self._last_outage_at = now
-                self._event(f"paragem do servidor #{self.outages}: {self._active_workers} ligações, "
-                            f"nada recebido há {silent:.0f} s")
-                if target > 2:
-                    target = soft_cap = max(2, target // 2)
-                    ramping = False
-                    self.connection_note = f"o servidor parou: {target} ligações"
-            elif outage_since is not None and ((best_speed and recent >= best_speed * 0.3)
-                                               or busy_now < max(2, target // 2)):
-                outage_since = None  # data flowing again (or only the last pieces are left)
-                calm_since = now
-                self._event(f"voltou a receber: {self._active_workers} ligações")
-            # (Known at once, in this same pass: the check below cuts silent connections, and
-            # both fire at 6 s - before, every connection was sometimes cut and reopened in the
-            # very pass that found the server had stopped us, straight back over its limit.)
-            self._in_outage = outage_since is not None
-            self._outage_started = outage_since
-            if soft_cap < cap and outage_since is None and calm_since and now - calm_since > OUTAGE_CALM_S:
-                soft_cap = cap  # a long calm: more connections may be tried again
-                recheck_at = now
-            if self._net_down:  # (said over the speed-test notes while nothing gets through)
-                self.connection_note = "sem ligação ao servidor: a tentar de novo"
-            self._target = target  # connections above this leave when they get the chance
-            self._diag_row(now, target)
-            if not self._stop.is_set():
-                self._replace_slow_connections(now, target)
-                while self._rescued:  # pieces taken from stuck connections: a fresh one each
-                    spawn(self._rescued.pop(), rescuer=True)
-                # Dynamic segmentation: keep `target` connections busy (not while the server has
-                # stopped every connection: new ones would only add to what it punishes).
-                while self._active_workers < allowed() and (not self._in_outage or self._active_workers == 0):
-                    new_seg = self._split_largest()
-                    if new_seg is None:
-                        break
-                    spawn(new_seg)
-            if all(s.remaining == 0 for s in self.segments):
-                self._naps.set()  # complete: no connection may keep it waiting
-            if time.monotonic() - last_save > CHECKPOINT_S:
-                self._checkpoint(sync_fd)
-                last_save = time.monotonic()
-            if not any(t.is_alive() for t in threads):
-                break
-            if all(s.remaining == 0 for s in self.segments):
-                complete_since = complete_since or time.monotonic()
-                if time.monotonic() - complete_since > 1.0:
-                    break  # every byte is here: do not wait for a connection that is stuck
+            # A server name with several addresses (CDNs): spread the connections over them, so
+            # one busy machine or a per-address limit does not hold every connection back.
+            url = self._current_url()
+            parts = urllib.parse.urlsplit(url)
+            port = parts.port or (443 if parts.scheme == "https" else 80)
+            ips = [] if net._proxy_for(parts.scheme, parts.hostname or "") else net.addresses(parts.hostname or "", port)
+            # Only addresses of the kind (IPv4 / IPv6) that the first connection really reached:
+            # many computers list IPv6 addresses that do not work, and a connection sent there
+            # would wait for nothing. The address that worked goes first.
+            working = getattr(self, "_first_peer", None) if first is not None else None
+            if working is None:
+                ips = []  # nothing proven yet: let the system choose, as before
             else:
-                complete_since = None
+                ips = [working] + [ip for ip in ips if ip != working and (":" in ip) == (":" in working)]
+            self.server_addresses = len(ips)
+            turn = [1]  # the first connection (the initial request) is already on the first address
 
-        with self._fh_lock:
-            self._fh.close()  # a straggler that wakes up later finds it closed and just leaves
-        self.downloaded = sum(s.pos - s.start for s in self.segments)
-        if not all(s.remaining == 0 for s in self.segments):
-            self._checkpoint(sync_fd)  # paused / stopped: where to continue (complete: not needed)
-        os.close(sync_fd)
+            def spawn(seg: Segment, conn=None, resp=None, rescuer: bool = False) -> None:
+                if conn is None and len(ips) > 1 and host_of(self._current_url()) == (parts.hostname or "").lower():
+                    conn = net.Connection(TIMEOUT)
+                    conn.address = ((parts.hostname or "").lower(), ips[turn[0] % len(ips)])
+                    turn[0] += 1
+                w = _Worker(seg, conn, resp)
+                w.rescuer = rescuer
+                with self._lock:
+                    self._active_workers += 1
+                    self._workers.append(w)
+                t = threading.Thread(target=self._worker, args=(w,), daemon=True)
+                threads.append(t)
+                t.start()
+
+            # Server speed test: start with a few connections (more for big files) and double
+            # them while the total speed keeps growing. Stop when more connections stop helping
+            # (the line or the server is saturated) or when the server refuses them (its limit).
+            # Keep measuring: if the speed drops later, try more connections again.
+            cap = self.connections
+            start_n = START_CONNECTIONS_BIG if self.size >= BIG_FILE else START_CONNECTIONS
+            target = min(start_n, cap)
+            ramping = target < cap
+            ramp_at = time.monotonic() + RAMP_INTERVAL
+            ramp_speed: float | None = None
+            best_speed = 0.0
+            recheck_at = 0.0
+            self.connection_note = "testando velocidade" if ramping else ""
+            self.server_limit = None
+            known = self.host_memory.get(host_of(self._current_url())) if self.host_memory else None
+            # (Stopped us again and again on an earlier download, a few hours ago at most.)
+            self._punishing_host = bool(known and known.get("limit") and known.get("outage"))
+            self._few_requests = bool(known and known.get("few_requests"))
+            if known:
+                self._event(f"memória do servidor: {known.get('conns')} ligações, limite {known.get('limit')}"
+                            + (", já nos parou (pedidos longos)" if self._punishing_host else "")
+                            + (", conta os pedidos (pedidos longos)" if self._few_requests else ""))
+            if known:
+                # This server taught us before: start where it paid off (and within its limit),
+                # still measuring and adapting from there.
+                if known.get("limit"):
+                    cap = min(cap, known["limit"])
+                target = max(target, min(cap, known.get("conns", target)))
+                ramping = target < cap
+                self.connection_note = f"começa com {target} (conhecido)" if not ramping else "testando velocidade"
+            self._settled_at = 0
+            limit_refreshes = self._refreshes
+            soft_cap = cap           # lowered after the server stopped for every connection
+            outage_since = None      # when every connection went silent (None: data flowing)
+            flowing_at = 0.0         # last moment the speed was at least 10% of the best
+            calm_since = 0.0         # when data came back after the last such stop
+
+            if first is not None:
+                seg0 = self.segments[0]
+                seg0.active = True
+                seg0.inflight_end = min(seg0.end, int(re.match(r"bytes \d+-(\d+)/",
+                                                               first[1].headers["Content-Range"]).group(1)))
+                spawn(seg0, *first)
+            # Resuming (no first answer yet in this run): one connection until the server has
+            # accepted one - a server that allows few connections answers extra ones with 403,
+            # which would look like an expired link and stop the download for good.
+            self._accepted_any = first is not None
+            allowed = lambda: target if self._accepted_any else 1  # noqa: E731
+            for seg in self.segments:
+                if seg.remaining > 0 and not seg.active and self._active_workers < allowed():
+                    seg.active = True
+                    spawn(seg)
+            # The other first connections start now, not after the first half-second check (in
+            # browser mode the file is one piece, so the loop above starts only one).
+            while self._active_workers < allowed() and not self._stop.is_set():
+                new_seg = self._split_largest()
+                if new_seg is None:
+                    break
+                spawn(new_seg)
+
+            while True:
+                self._wake.wait(0.5)
+                self._wake.clear()
+                self.downloaded = sum(s.pos - s.start for s in self.segments)
+                self._update_speed()
+                if self._worker_error or self._file_changed or self._disk_problem:
+                    self._stop.set()
+                now = time.monotonic()
+                if self._limit_hit:
+                    self.server_limit = max(1, self._limit_hit)
+                    self._limit_hit = 0
+                    limit_refreshes = self._refreshes
+                    target, ramping = self.server_limit, False
+                    self.connection_note = f"servidor aceita {self.server_limit}"
+                elif self.server_limit is not None and self._refreshes != limit_refreshes:
+                    # The "limit" was the link expiring (refusals just before a fresh address):
+                    # forget it and test more connections again with the new address.
+                    self.server_limit = None
+                    ramping, ramp_speed = target < cap, None
+                    ramp_at = now + RAMP_INTERVAL
+                    self.connection_note = "testando velocidade" if ramping else ""
+                elif ramping and now >= ramp_at and outage_since is None:
+                    current = self._recent_speed(1.5)
+                    if ramp_speed is None or current > ramp_speed * RAMP_MIN_GAIN:
+                        ramp_speed = current
+                        target = min(cap, target * 2)
+                        ramp_at = now + RAMP_INTERVAL
+                        ramping = target < cap
+                        if not ramping:
+                            self.connection_note = ""
+                    else:
+                        ramping = False  # more connections did not make it faster
+                        self._settled_at = self._active_workers
+                        self.connection_note = f"{self._active_workers} conexões bastam"
+                        recheck_at = now + RECHECK_INTERVAL
+                elif (not ramping and self.server_limit is None and target < min(cap, soft_cap)
+                      and recheck_at and now >= recheck_at):
+                    # Speed dropped a lot since the best moment? Test more connections again -
+                    # but not when it dropped to (almost) nothing: that is the server or the line
+                    # stopping, and more connections only get stuck too (seen: 8 -> 21 at 0 B/s).
+                    current = self._recent_speed(3.0)
+                    recheck_at = now + RECHECK_INTERVAL
+                    if best_speed and best_speed * 0.2 < current < best_speed * RECHECK_DROP:
+                        ramp_speed, ramping = current, True
+                        target = min(cap, target * 2)
+                        ramp_at = now + RAMP_INTERVAL
+                        self.connection_note = "testando velocidade"
+                if self._samples and now - self._samples[0][0] >= 2.5:
+                    # Over a full window only: a short one right at the start (the first answer
+                    # arriving at once) gave a huge "best", and everything after looked like a stop.
+                    best_speed = max(best_speed, self._recent_speed(3.0))
+                # Every connection silent for a while: the server (or the line) stopped. Some servers
+                # do that to clients with "too many" connections, and on some lines many connections
+                # stall together: use half as many for a while, as a browser-like client would.
+                # (Not only total silence: such a server often lets a trickle through between stops.)
+                recent = self._recent_speed(3.0)
+                if not best_speed or recent >= best_speed * 0.1:
+                    flowing_at = now
+                slowed = flowing_at and now - flowing_at > STALL_ALONE_SECONDS
+                silent = now - self._last_rx if self._last_rx else 0.0
+                self._in_outage = outage_since is not None
+                self._outage_started = outage_since
+                with self._lock:
+                    busy = [w for w in self._workers if w.alive and w.seg is not None
+                            and w.seg.active and w.seg.remaining > 0]
+                busy_now = len(busy)
+                # The very end: what is left would take a few seconds at the best speed. Stuck pieces
+                # there are rescued at once - never taken for the server stopping.
+                left = sum(seg.remaining for seg in self.segments)
+                # (Not on a server that already stopped every connection once: there, everyone
+                # silent at the end is that server stopping again, and rescuing / reopening every
+                # connection at once is what keeps it stopped - seen in a simulation, for minutes.)
+                self._tail = left <= max(4 * 1024 * 1024, best_speed * 4) and not self._touchy()
+                if self._tail and outage_since is not None:
+                    outage_since = None
+                # Only while most connections still have work, and not at the very end.
+                if ((silent > OUTAGE_SILENT_S or slowed) and busy_now >= max(2, target // 2) and not self._tail
+                        and outage_since is None and not all(s.remaining == 0 for s in self.segments)):
+                    outage_since = now
+                    self.outages += 1
+                    self._last_outage_at = now
+                    self._event(f"paragem do servidor #{self.outages}: {self._active_workers} ligações, "
+                                f"nada recebido há {silent:.0f} s")
+                    if target > 2:
+                        target = soft_cap = max(2, target // 2)
+                        ramping = False
+                        self.connection_note = f"o servidor parou: {target} ligações"
+                elif outage_since is not None and ((best_speed and recent >= best_speed * 0.3)
+                                                   or busy_now < max(2, target // 2)):
+                    outage_since = None  # data flowing again (or only the last pieces are left)
+                    calm_since = now
+                    self._event(f"voltou a receber: {self._active_workers} ligações")
+                # (Known at once, in this same pass: the check below cuts silent connections, and
+                # both fire at 6 s - before, every connection was sometimes cut and reopened in the
+                # very pass that found the server had stopped us, straight back over its limit.)
+                self._in_outage = outage_since is not None
+                self._outage_started = outage_since
+                if soft_cap < cap and outage_since is None and calm_since and now - calm_since > OUTAGE_CALM_S:
+                    soft_cap = cap  # a long calm: more connections may be tried again
+                    recheck_at = now
+                if self._net_down:  # (said over the speed-test notes while nothing gets through)
+                    self.connection_note = "sem ligação ao servidor: a tentar de novo"
+                self._target = target  # connections above this leave when they get the chance
+                self._diag_row(now, target)
+                if not self._stop.is_set():
+                    self._replace_slow_connections(now, target)
+                    while self._rescued:  # pieces taken from stuck connections: a fresh one each
+                        spawn(self._rescued.pop(), rescuer=True)
+                    # Dynamic segmentation: keep `target` connections busy (not while the server has
+                    # stopped every connection: new ones would only add to what it punishes).
+                    while self._active_workers < allowed() and (not self._in_outage or self._active_workers == 0):
+                        new_seg = self._split_largest()
+                        if new_seg is None:
+                            break
+                        spawn(new_seg)
+                if all(s.remaining == 0 for s in self.segments):
+                    self._naps.set()  # complete: no connection may keep it waiting
+                if time.monotonic() - last_save > CHECKPOINT_S:
+                    self._checkpoint(sync_fd)
+                    last_save = time.monotonic()
+                if not any(t.is_alive() for t in threads):
+                    break
+                if all(s.remaining == 0 for s in self.segments):
+                    complete_since = complete_since or time.monotonic()
+                    if time.monotonic() - complete_since > 1.0:
+                        break  # every byte is here: do not wait for a connection that is stuck
+                else:
+                    complete_since = None
+
+        finally:
+            # Always closed, whatever happened above: on Windows an open handle (an error in
+            # the middle, e.g.) kept the file locked - the end of this download, or of a resumed
+            # one, then failed with "Sem permissão para gravar" (found by the Windows tests).
+            with self._fh_lock:
+                self._fh.close()  # a straggler that wakes up later finds it closed and just leaves
+            self.downloaded = sum(s.pos - s.start for s in self.segments)
+            try:
+                if not all(s.remaining == 0 for s in self.segments):
+                    self._checkpoint(sync_fd)  # paused / stopped: where to continue (complete: not needed)
+            finally:
+                os.close(sync_fd)
         if self.host_memory and all(s.remaining == 0 for s in self.segments) and self.size >= MEMORY_MIN_SIZE:
             # Remember for next time (only downloads long enough to have measured something).
             learned = self.server_limit or self._settled_at or target

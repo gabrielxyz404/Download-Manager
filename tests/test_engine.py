@@ -144,7 +144,7 @@ class EngineTests(unittest.TestCase):
             task.start()
             time.sleep(1.0)
             real_save = task._save_state
-            task._save_state = lambda: (time.sleep(0.5), real_save())[1]  # (a slow disk)
+            task._save_state = lambda *a: (time.sleep(0.5), real_save(*a))[1]  # (a slow disk)
             task.pause()
             for _ in range(100):
                 if task.status == Status.PAUSED:
@@ -157,6 +157,33 @@ class EngineTests(unittest.TestCase):
             task.wait(30)
             self.assertEqual(task.status, Status.COMPLETED, task.diagnostic())
             self.assertFileOk(task.path)
+        finally:
+            Handler.delay = 0.0
+
+    def test_file_is_closed_even_when_the_download_fails_midway(self):
+        """Windows CI: an error in the middle left the .part open; on Windows an open file
+        cannot be renamed, so the download (or the next resume) ended in "Sem permissão"."""
+        Handler.delay = 0.05
+        try:
+            task = DownloadTask(self.base + "/big.bin", self.tmp.name, 4)
+            calls = []
+            real = task._update_speed
+
+            def failing():
+                calls.append(1)
+                if len(calls) == 3:
+                    raise RuntimeError("falha a meio")
+                return real()
+            task._update_speed = failing
+            task.start()
+            task.wait(30)
+            self.assertEqual(task.status, Status.ERROR)
+            self.assertTrue(task._fh.closed)
+            if os.path.isdir("/proc/self/fd"):
+                part = os.path.realpath(task._part_path)
+                held = [f for f in os.listdir("/proc/self/fd")
+                        if os.path.realpath(os.path.join("/proc/self/fd", f)) == part]
+                self.assertEqual(held, [])
         finally:
             Handler.delay = 0.0
 
