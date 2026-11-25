@@ -121,6 +121,19 @@ class DiskProblem(Exception):
     plain message (its progress is kept) instead of being retried as a network error."""
 
 
+def _retry_in_use(fn, tries: int = 20):
+    """Windows: a file closed a moment ago can stay "in use by another process" for a short
+    while (the antivirus or the indexer looking at it). Resuming right after a pause hit
+    that: "Sem permissão para gravar". Try again for a few seconds before giving up."""
+    for attempt in range(tries):
+        try:
+            return fn()
+        except PermissionError:
+            if os.name != "nt" or attempt == tries - 1:
+                raise
+            time.sleep(0.25)
+
+
 def _disk(exc: OSError, path: str) -> DiskProblem:
     from .system import disk_message
     return DiskProblem(disk_message(exc, os.path.dirname(os.path.abspath(path)) or path))
@@ -532,8 +545,11 @@ class DownloadTask:
     def start(self) -> None:
         if self.is_running() and self._stop.is_set():
             # Paused a moment ago and still closing (saving its state): resume right after,
-            # instead of ignoring the click.
+            # instead of ignoring the click - once its connections have left too.
             self._thread.join(10)
+            until = time.monotonic() + 5
+            while any(w.alive for w in self._workers) and time.monotonic() < until:
+                time.sleep(0.05)
         if self.is_running() or self.status == Status.COMPLETED:
             return
         self._stop.clear()
@@ -1038,7 +1054,11 @@ class DownloadTask:
                     length = resp.headers.get("Content-Length")
                     expected = int(length) if length and length.strip().isdigit() else 0
                     self.downloaded = 0
-                    with open(self._part_path, "wb") as f:
+                    try:
+                        out = _retry_in_use(lambda: open(self._part_path, "wb"))
+                    except OSError as exc:
+                        raise _disk(exc, self._part_path) from exc
+                    with out as f:
                         while not self._stop.is_set():
                             chunk = resp.read(CHUNK_SIZE)
                             if not chunk:
@@ -1119,12 +1139,19 @@ class DownloadTask:
         threads: list[threading.Thread] = []
         last_save = time.monotonic()
         complete_since = None
-        sync_fd = os.open(self._part_path, os.O_RDWR | getattr(os, "O_BINARY", 0))
+        try:
+            sync_fd = _retry_in_use(lambda: os.open(self._part_path, os.O_RDWR | getattr(os, "O_BINARY", 0)))
+        except OSError as exc:
+            raise _disk(exc, self._part_path) from exc
         # One file handle shared by all connections (writes take turns; the disk is far faster
         # than the network). The download can then end the moment every byte is there, without
         # waiting for a straggling connection: on Windows a file still open in another thread
         # cannot be renamed, which kept finished downloads waiting.
-        self._fh = open(self._part_path, "r+b", buffering=0)
+        try:
+            self._fh = _retry_in_use(lambda: open(self._part_path, "r+b", buffering=0))
+        except OSError as exc:
+            os.close(sync_fd)
+            raise _disk(exc, self._part_path) from exc
         self._fh_lock = threading.Lock()
         self._rescued: list = []
         self._workers = []
