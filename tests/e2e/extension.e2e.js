@@ -60,7 +60,18 @@ function sendPaced(res, body) {
   tick();
 }
 
+const postBodies = [];
 const site = http.createServer((req, res) => {
+  if (req.method === "POST" && req.body === undefined) { // a form: its fields first
+    const parts = [];
+    req.on("data", (c) => parts.push(c));
+    req.on("end", () => {
+      req.body = Buffer.concat(parts).toString();
+      postBodies.push(`${req.url} ${req.body} ${req.headers["content-type"] || ""} ${req.headers.origin || ""}`);
+      site.emit("request", req, res);
+    });
+    return;
+  }
   if (req.url === "/") { // the browser's identity
     browserUA = req.headers["user-agent"] || "";
     browserCH = req.headers["sec-ch-ua"] || "";
@@ -68,7 +79,8 @@ const site = http.createServer((req, res) => {
   if (req.url === "/") {
     res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Set-Cookie": "sessao=abc123; Path=/" });
     return res.end(links + ' <a id="cdn" href="/redir/cdn.zip">cdn</a> <a id="notas" href="/files/notas.txt">notas</a> <a id="semnome" href="/get?id=7">semnome</a> <a id="relatorio2" href="/files/relatorio2.zip">relatorio2</a> <a id="acento" href="/files/Atualiza%E7%E3o_FC27.zip">acento</a> <a id="umavez" href="/once/mod_umavez.zip">umavez</a> <a id="cloudflare" href="/ua/protegido.zip">cloudflare</a> <a id="pagina" href="/page/patch.zip">pagina</a> <a id="desisto" href="/slowstart/desisto.zip">desisto</a>' +
-                   '<form id="formpost" method="post" action="/files/formulario.zip"><button id="postbtn">post</button></form>');
+                   '<form id="formpost" method="post" action="/files/formulario.zip"><input name="ano" value="2025 e 2026"><button id="postbtn">post</button></form>' +
+                   '<form id="formmulti" method="post" enctype="multipart/form-data" action="/files/formmulti.zip"><input name="x" value="1"><button id="multibtn">multi</button></form>');
   }
   if (req.url === "/setcdn") { // the file server's own login cookie (a different site: localhost)
     res.writeHead(200, { "Content-Type": "text/html", "Set-Cookie": "cdn=1; Path=/" });
@@ -368,15 +380,30 @@ const sameAsBig = (file) => fs.existsSync(file) && fs.readFileSync(file).equals(
   check("…e apaga a cópia temporária", await waitFor(() => leftovers().length === 0, 5000), leftovers().join(","));
   await waitFor(() => windows("cancelar.zip").length === 0, 5000);
 
-  // 3b. A form (POST) download: only the browser can repeat it, so it stays in the browser.
-  const n2 = (await all()).length;
+  // 3b. A form (POST) download: the app sends the same form (fields, type, origin) and
+  // downloads the file; a multipart form (it may carry files) stays with the browser.
+  const beforeForm = (await byUrl()).map((d) => d.id);
   await page.click("#postbtn");
+  // (the app's copy goes to the browser's list, as for links: the browser gets it from the app)
+  let formItem = await newest(beforeForm);
+  formItem = formItem && await finished(formItem.id);
+  check("Download de formulário (POST) baixado pela app e entregue inteiro ao navegador",
+        !!formItem && formItem.state === "complete" && sameAsBig(formItem.filename),
+        (formItem ? formItem.filename : "") + " | " + appMethods.filter((m) => m.includes("formulario")).join(", "));
+  const forms = postBodies.filter((b) => b.startsWith("/files/formulario.zip "));
+  check("…com o mesmo formulário que o navegador enviou",
+        forms.length === 2 && forms[0] === forms[1] && forms[1].includes("ano=2025+e+2026") &&
+        forms[1].includes("application/x-www-form-urlencoded") && forms[1].includes(SITE), forms.join(" || "));
+  check("…e o formulário não fica guardado em texto na lista", !fs.readFileSync(path.join(CFG, "FlowDownloads", "downloads.json"), "utf8").includes("ano="));
+  await page.goto(SITE + "/");
+  const n2 = (await all()).length;
+  await page.click("#multibtn");
   await waitFor(async () => (await all()).length > n2, 10000);
-  const posted = (await all()).find((d) => d.url.endsWith("/formulario.zip"));
-  await waitFor(async () => { const l = await all(); const p2 = l.find((d) => d.url.endsWith("/formulario.zip")); return p2 && p2.state === "complete"; }, 10000);
-  check("Download de formulário (POST) fica com o navegador", !!posted && !posted.url.startsWith(APP) &&
-        !appTasks().some((t) => (t.filename || "").includes("formulario")),
-        appMethods.filter((m) => m.includes("formulario")).join(", "));
+  await waitFor(async () => { const l = await all(); const p2 = l.find((d) => d.url.endsWith("/formmulti.zip")); return p2 && p2.state === "complete"; }, 10000);
+  const multi = (await all()).find((d) => d.url.endsWith("/formmulti.zip"));
+  check("Formulário com ficheiros (multipart) fica com o navegador", !!multi && multi.state === "complete" &&
+        !appTasks().some((t) => (t.filename || "").includes("formmulti")),
+        appMethods.filter((m) => m.includes("formmulti")).join(", "));
   await page.goto(SITE + "/");
 
   // 3b'. A type not in the app's list (.txt): the browser keeps it, without re-downloading.

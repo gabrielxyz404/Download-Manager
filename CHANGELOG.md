@@ -1,5 +1,15 @@
 # Novidades do Flow Downloads
 
+## 0.9.19
+
+**Novo: downloads gerados por formulários** (exportações, relatórios, alguns sites de alojamento de ficheiros). Antes ficavam sempre com o navegador.
+- A extensão guarda o que o formulário enviou e a app envia exatamente o mesmo pedido: os campos, o tipo e a origem.
+- Se o formulário leva a um endereço normal, a app baixa esse endereço com várias ligações, sem enviar o formulário outra vez.
+- Se o ficheiro vem na própria resposta do formulário, a app usa uma só ligação. Repetir o formulário para pedir partes podia gerar outro ficheiro ou repetir uma ação.
+- Ficam com o navegador, como antes: formulários com ficheiros anexados (multipart), formulários acima de 1 MB e janelas privadas.
+- O conteúdo do formulário fica cifrado na lista de downloads, como os cookies, e é apagado quando o download termina. Não aparece no "Copiar diagnóstico".
+- Extensão 0.9.13: recarregue-a em brave://extensions (↻).
+
 ## 0.9.18
 
 **Novo: a app instala o ffmpeg sozinha.** Sem ele o YouTube fica em 360p e não há conversão para MP3. Antes era preciso instalá-lo à mão (winget).

@@ -65,6 +65,28 @@ class BridgeRequestTests(unittest.TestCase):
         code, _p, added = self.call("/add", '{"url": "http://a.com/f.zip", "browser_size": 1e999}')
         self.assertEqual(code, 200)  # (an impossible size is ignored)
 
+    def test_forms_from_the_extension(self):
+        """A file made by a form: the app repeats the POST. Only GET/POST, a body of 1 MB at
+        most, valid base64; the body is not kept in plain text anywhere (see the engine)."""
+        import base64
+        ok = {"url": "https://a.com/export", "method": "POST", "body_b64": base64.b64encode(b"a=1&b=2").decode(),
+              "content_type": "application/x-www-form-urlencoded", "origin": "https://a.com"}
+        code, _p, added = self.call("/add", json.dumps(ok))
+        self.assertEqual(code, 200)
+        self.assertEqual(added[0]["post"], {"body": b"a=1&b=2", "type": "application/x-www-form-urlencoded",
+                                            "origin": "https://a.com"})
+        for bad in ({"method": "PUT"}, {"body_b64": "não é base64!"},
+                    {"body_b64": base64.b64encode(b"x" * 1_000_001).decode()}):
+            code, _p, added = self.call("/add", json.dumps({**ok, **bad}))
+            self.assertEqual(code, 400, list(bad))
+            self.assertEqual(added, [])
+        code, _p, added = self.call("/add", json.dumps({**ok, "origin": "javascript:x", "content_type": "a\r\nX: y"}))
+        self.assertEqual(code, 200)
+        self.assertEqual(added[0]["post"]["origin"], "")
+        self.assertNotIn("\n", added[0]["post"]["type"])
+        code, _p, added = self.call("/add", json.dumps({"url": "https://a.com/f.zip"}))
+        self.assertNotIn("post", added[0])  # (an ordinary link: GET)
+
     def test_an_unexpected_failure_still_gets_an_answer(self):
         """Before: the connection stayed open with no answer until the browser gave up."""
         def broken(item):

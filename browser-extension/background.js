@@ -222,16 +222,63 @@ chrome.tabs.onRemoved.addListener((tabId) => chrome.storage.session.remove("medi
 const BROWSER_HEADERS = ["accept", "sec-ch-ua", "sec-ch-ua-mobile", "sec-ch-ua-platform", "sec-fetch-dest",
                          "sec-fetch-mode", "sec-fetch-site", "sec-fetch-user", "upgrade-insecure-requests", "dnt"];
 
+// Forms (POST) that may produce a file: their body, so the app can send the same request.
+// Only simple forms (fields or raw data, up to 1 MB): uploads stay with the browser. Kept
+// for a minute, in memory only, never in private windows.
+const forms = new Map(); // url -> { body_b64, time }
+const FORM_MAX = 1000000;
+
+function toBase64(bytes) {
+  let s = "";
+  for (let i = 0; i < bytes.length; i += 0x8000) s += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  return btoa(s);
+}
+
+function rememberForm(details) {
+  if (details.method !== "POST" || details.incognito || !details.requestBody) return;
+  const rb = details.requestBody;
+  let bytes = null;
+  if (rb.formData) {
+    // (Chromium gives the fields of both kinds of form here; only the plain kind can be
+    // rebuilt exactly - multipart forms are marked by their content type later.)
+    const params = new URLSearchParams();
+    for (const [k, values] of Object.entries(rb.formData)) for (const v of values) params.append(k, v);
+    bytes = new TextEncoder().encode(params.toString());
+  } else if (rb.raw && rb.raw.every((p) => p.bytes)) {
+    const parts = rb.raw.map((p) => new Uint8Array(p.bytes));
+    const total = parts.reduce((n, p) => n + p.length, 0);
+    if (total > FORM_MAX) return;
+    bytes = new Uint8Array(total);
+    let at = 0;
+    for (const p of parts) { bytes.set(p, at); at += p.length; }
+  }
+  if (!bytes || bytes.length > FORM_MAX) return;
+  forms.delete(details.url);
+  forms.set(details.url, { body_b64: toBase64(bytes), raw: !rb.formData, time: Date.now() });
+  if (forms.size > 50) forms.delete(forms.keys().next().value);
+}
+
+chrome.webRequest.onBeforeRequest.addListener(
+  rememberForm, { urls: ["http://*/*", "https://*/*"], types: ["main_frame", "sub_frame"] }, ["requestBody"]
+);
+
+function formFor(url) {
+  const f = forms.get(url);
+  return f && Date.now() - f.time < SEEN_MS ? f : null;
+}
+
 function remember(details) {
   const header = (name) => (details.requestHeaders || []).find((h) => h.name.toLowerCase() === name);
   const cookie = header("cookie"), ua = header("user-agent"), lang = header("accept-language");
+  const ctype = header("content-type"), origin = header("origin");
   const hdrs = {};
   for (const h of details.requestHeaders || []) {
     if (BROWSER_HEADERS.includes(h.name.toLowerCase()) && h.value) hdrs[h.name.toLowerCase()] = h.value;
   }
   seen.delete(details.url); // re-added at the end: the map stays in order of age (oldest first)
   seen.set(details.url, { method: details.method, cookie: cookie ? cookie.value : null,
-                          ua: ua ? ua.value : null, lang: lang ? lang.value : null, hdrs, time: Date.now() });
+                          ua: ua ? ua.value : null, lang: lang ? lang.value : null, hdrs,
+                          ctype: ctype ? ctype.value : "", origin: origin ? origin.value : "", time: Date.now() });
   if (seen.size > 300) {
     const old = Date.now() - SEEN_MS;
     for (const [k, v] of seen) if (v.time < old || seen.size > 300) seen.delete(k);
@@ -276,9 +323,9 @@ async function cookiesByHost(urls) {
 // short-lived signed address): the app uses the latter, and the link to get a fresh one.
 // ``original``: the browser's own download of this file, paused while the app checks that
 // the site lets it download (null when there is none, e.g. the right-click menu).
-async function sendToApp(url, filename, referrer, finalUrl = "", original = null, received = null) {
+async function sendToApp(url, filename, referrer, finalUrl = "", original = null, received = null, form = null) {
   const cookies_by_host = await cookiesByHost([url, finalUrl || url]);
-  const watched = seenFor(finalUrl || url) || seenFor(url) || {};
+  const watched = (form ? seenFor(url) : null) || seenFor(finalUrl || url) || seenFor(url) || {};
   const res = await postJson("/add", {
     url, final_url: finalUrl && finalUrl !== url ? finalUrl : "", filename, referrer,
     cookies_by_host, mirror: true,
@@ -289,6 +336,8 @@ async function sendToApp(url, filename, referrer, finalUrl = "", original = null
     // what the browser itself is receiving: the app checks it gets the same file
     browser_size: received ? received.size : 0,
     browser_type: received ? received.type : "",
+    // a file made by a form: the app sends the same POST (see formFor)
+    ...(form ? { method: "POST", body_b64: form.body_b64, content_type: form.type, origin: form.origin } : {}),
   });
   if (!res) return false;
   if (original) original.rid = res.rid;
@@ -613,8 +662,20 @@ async function handleDownload(item) {
   const bypass = await bypassed([url, finalUrl]);
   if (bypass) return note(label, "deixado ao navegador: " + bypass);
   const watched = seenFor(url) || seenFor(finalUrl);
-  if (watched && watched.method !== "GET") {
-    return note(label, "deixado ao navegador: veio de um formulário (" + watched.method + ")");
+  let form = null, sendUrl = url;
+  const landed = finalUrl !== url ? seenFor(finalUrl) : null;
+  if (watched && watched.method !== "GET" && landed && landed.method === "GET") {
+    // The form led to an ordinary address: that one is downloaded (the form is not sent again).
+    sendUrl = finalUrl;
+  } else if (watched && watched.method !== "GET") {
+    // A form: the app repeats it only when it is a plain one the extension saw whole.
+    const f = watched.method === "POST" ? formFor(url) : null;
+    const type = (watched.ctype || "").toLowerCase();
+    const plain = f && (f.raw ? !type.startsWith("multipart/") : type.startsWith("application/x-www-form-urlencoded"));
+    if (!plain) {
+      return note(label, "deixado ao navegador: veio de um formulário que a app não pode repetir (" + watched.method + ")");
+    }
+    form = { body_b64: f.body_b64, type: watched.ctype, origin: watched.origin || "" };
   }
   if (!(await isEnabled())) return note(label, "deixado ao navegador: a captura está desligada");
   // Pause (not cancel) the browser's download right away: it is only dropped once the app is
@@ -663,7 +724,7 @@ async function handleDownload(item) {
   if (original.cancelled) return; // cancelled in the browser while the app was being asked
   const name = item.filename ? item.filename.split(/[\\/]/).pop() : "";
   const received = { size: item.totalBytes > 0 ? item.totalBytes : 0, type: item.mime || "" };
-  if (!(await sendToApp(url, name, item.referrer || "", finalUrl, original, received))) {
+  if (!(await sendToApp(sendUrl, name, item.referrer || "", finalUrl, original, received, form))) {
     await resumeOriginal();
     return note(label, "o Brave baixou sozinho: não consegui enviar à app — " +
                 (lastFailure || checkProblem || "sem resposta"));

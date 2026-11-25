@@ -122,13 +122,15 @@ class DownloadManager:
             start: bool = True, filename: str | None = None,
             headers: dict | None = None, cookies: dict | None = None,
             final_url: str | None = None, auto_folder: bool = False,
-            page: str = "", expect: dict | None = None, now: bool = False) -> DownloadTask:
+            page: str = "", expect: dict | None = None, now: bool = False,
+            post: dict | None = None) -> DownloadTask:
         """``auto_folder``: ``dest_dir`` is only the base; the category folder inside it is
         chosen once the real file name is known."""
         task = DownloadTask(url.strip(), dest_dir or default_download_dir(), connections,
                             filename=sanitize_filename(filename) if filename else None,
                             headers=headers, cookies=cookies, final_url=final_url)
         task.expect = expect  # what the browser received: the app must get the same file
+        task.post = post  # (a form's POST, repeated by the app: see DownloadTask.post)
         if auto_folder and self.folder_rules is not None:
             from .categories import folder_for
             base, rules = task.dest_dir, self.folder_rules

@@ -68,6 +68,7 @@ class Response:
         self.url = url
         self.status = raw.status
         self.headers = raw.headers
+        self.posted = False
 
     def read1(self, n: int) -> bytes:
         """Whatever has arrived (at most n bytes): low latency, but small pieces."""
@@ -257,14 +258,18 @@ class Connection:
         self.requests = 0
 
     def get(self, url: str, headers: dict, start: int | None = None, end: int | None = None,
-            cookies: dict | None = None) -> Response:
+            cookies: dict | None = None, post: dict | None = None) -> Response:
         """GET ``url`` (optionally a byte range), following redirects. Raises HTTPError for
         4xx/5xx answers. The previous response must have been read to the end; otherwise
         the connection is closed and a new one is opened.
 
         ``cookies`` maps a host to the Cookie header the browser sends to that host. Like a
         browser, each request only carries the cookies of its own host, and credentials given
-        in ``headers`` are not passed on when a redirect leads to another host."""
+        in ``headers`` are not passed on when a redirect leads to another host.
+
+        ``post`` ({"body": bytes, "type": content type}): send a form's POST instead (no
+        range). After a 301/302/303 the browser asks the new address with a plain GET, and
+        so do we; 307/308 repeat the POST."""
         if self.response is not None and not self.response.finished:
             self.close()
         if self.aborted:  # cut on purpose while idle or before this request: start clean
@@ -293,13 +298,19 @@ class Connection:
                     hdrs["Cookie"] = cookies[host.lower()]
             if self.via_proxy_http:
                 hdrs.update(getattr(self, "proxy_headers", {}))
-            if start is not None:
+            if start is not None and post is None:
                 hdrs["Range"] = f"bytes={start}-{'' if end is None else end}"
-            raw = self._send(target, hdrs)
+            if post is not None:
+                hdrs["Content-Type"] = post.get("type") or "application/x-www-form-urlencoded"
+                if post.get("origin"):
+                    hdrs["Origin"] = post["origin"]
+            raw = self._send(target, hdrs, post["body"] if post is not None else None)
             self.requests += 1
             if raw.status in REDIRECTS and raw.getheader("Location"):
                 raw.read()  # small body; keeps the connection reusable
                 url = urllib.parse.urljoin(url, raw.getheader("Location"))
+                if raw.status not in (307, 308):
+                    post = None  # (a browser follows with GET)
                 continue
             if raw.status >= 400:
                 try:
@@ -310,13 +321,14 @@ class Connection:
                 raise HTTPError(raw.status, raw.reason, url, parse_retry_after(raw.getheader("Retry-After")),
                                 raw.getheader("Content-Range") or "")
             self.response = Response(raw, url)
+            self.response.posted = post is not None  # (the form's answer itself, not a GET)
             return self.response
         raise HTTPError(310, "redirecionamentos a mais", url)
 
-    def _send(self, target: str, headers: dict) -> http.client.HTTPResponse:
+    def _send(self, target: str, headers: dict, body: bytes | None = None) -> http.client.HTTPResponse:
         for attempt in (1, 2):
             try:
-                self.conn.request("GET", target, headers=headers)
+                self.conn.request("GET" if body is None else "POST", target, body=body, headers=headers)
                 try:  # which of the server's addresses we reached (before it may be closed)
                     self.peer = self.conn.sock.getpeername()[0] if self.conn.sock else None
                 except OSError:

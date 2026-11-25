@@ -1,3 +1,4 @@
+import base64
 import hashlib
 import json
 import os
@@ -1769,3 +1770,106 @@ class BadServerTests(unittest.TestCase):
             self.assertEqual(t.status, Status.COMPLETED, t.error)
             with open(t.path, "rb") as f:
                 self.assertEqual(f.read(), BadServer.names[f"/get{i}"][1])
+
+
+class FormServer(BaseHTTPRequestHandler):
+    """A site whose form (POST) makes a file: /direct answers the POST with the file itself
+    (and refuses GET: a form used once); /redirect answers 303 to /file (an ordinary,
+    range-capable address); /keep answers 307 to /direct (the POST must be repeated)."""
+    protocol_version = "HTTP/1.1"
+    data = b""
+    lock = threading.Lock()
+    posts: list = []
+    gets: list = []
+
+    def log_message(self, *a):
+        pass
+
+    def _send(self, code, body=b"", headers=()):
+        self.send_response(code)
+        for k, v in headers:
+            self.send_header(k, v)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_POST(self):
+        body = self.rfile.read(int(self.headers.get("Content-Length") or 0))
+        with FormServer.lock:
+            FormServer.posts.append((self.path, body, self.headers.get("Content-Type"), self.headers.get("Origin")))
+        if self.path == "/redirect":
+            return self._send(303, headers=[("Location", "/file")])
+        if self.path == "/keep":
+            return self._send(307, headers=[("Location", "/direct")])
+        if self.path == "/direct" and body == b"report=2025&format=csv":
+            return self._send(200, FormServer.data, [("Content-Disposition", 'attachment; filename="relatorio.csv"'),
+                                                     ("Accept-Ranges", "bytes")])
+        self._send(400, b"bad form")
+
+    def do_GET(self):
+        with FormServer.lock:
+            FormServer.gets.append((self.path, self.headers.get("Range")))
+        if self.path != "/file":
+            return self._send(405, b"POST only")
+        data = FormServer.data
+        m = re.match(r"bytes=(\d+)-(\d*)", self.headers.get("Range", ""))
+        if not m:
+            return self._send(200, data, [("Accept-Ranges", "bytes")])
+        a = int(m.group(1))
+        b = min(int(m.group(2)) if m.group(2) else len(data) - 1, len(data) - 1)
+        self._send(206, data[a:b + 1], [("Content-Range", f"bytes {a}-{b}/{len(data)}"), ("Accept-Ranges", "bytes")])
+
+
+class FormDownloadTests(unittest.TestCase):
+    FORM = {"body": b"report=2025&format=csv", "type": "application/x-www-form-urlencoded",
+            "origin": "https://site.exemplo"}
+
+    def setUp(self):
+        FormServer.data, FormServer.posts, FormServer.gets = BIG, [], []
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), FormServer)
+        self.server.daemon_threads = True
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.addCleanup(self.server.shutdown)
+
+    def run_form(self, path):
+        task = DownloadTask(f"http://127.0.0.1:{self.server.server_address[1]}{path}", self.tmp.name, 8)
+        task.post = dict(self.FORM)
+        task.start()
+        task.wait(60)
+        self.assertEqual(task.status, Status.COMPLETED, task.error)
+        with open(task.path, "rb") as f:
+            self.assertEqual(hashlib.sha256(f.read()).digest(), hashlib.sha256(BIG).digest())
+        return task
+
+    def test_file_in_the_forms_own_answer(self):
+        """The form is sent once, exactly as the browser did, and the file comes whole on
+        one connection (repeating a form for pieces could make another file)."""
+        task = self.run_form("/direct")
+        self.assertEqual(task.filename, "relatorio.csv")
+        self.assertEqual(FormServer.posts, [("/direct", self.FORM["body"], self.FORM["type"], self.FORM["origin"])])
+        self.assertEqual(FormServer.gets, [])
+
+    def test_form_that_leads_to_an_address_uses_many_connections(self):
+        task = self.run_form("/redirect")
+        self.assertEqual(len(FormServer.posts), 1)  # the form only once...
+        self.assertGreater(len(FormServer.gets), 1)  # ...then the address, in pieces
+        self.assertTrue(all(r for _p, r in FormServer.gets))
+
+    def test_307_repeats_the_form(self):
+        self.run_form("/keep")
+        self.assertEqual([p for p, *_ in FormServer.posts], ["/keep", "/direct"])
+        self.assertEqual(FormServer.posts[1][1], self.FORM["body"])
+
+    def test_form_kept_encrypted_and_dropped_when_done(self):
+        task = DownloadTask("http://127.0.0.1:1/direct", self.tmp.name, 8)
+        task.post = dict(self.FORM)
+        saved = json.dumps(task.to_dict())
+        self.assertNotIn("report=2025", saved)
+        self.assertNotIn(base64.b64encode(self.FORM["body"]).decode(), saved)
+        again = DownloadTask.from_dict(json.loads(saved))
+        self.assertEqual(again.post, self.FORM)
+        task.status = Status.COMPLETED
+        self.assertIsNone(task.to_dict()["post"])
+        self.assertNotIn("report", task.diagnostic())

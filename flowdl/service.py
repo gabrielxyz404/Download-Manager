@@ -627,7 +627,8 @@ class Service:
         if item.get("kind") == "video" or self.settings.confirm_browser:
             self.pending.append(item)
             return True
-        existing = self.manager.find_duplicate(item["url"], item.get("final_url"))
+        # (a form asked again - an export, a report - is a new file, not a duplicate)
+        existing = None if item.get("post") else self.manager.find_duplicate(item["url"], item.get("final_url"))
         if existing is not None:  # ask: resume / open the existing one, or download again
             self.pending.append({"kind": "duplicate", "item": item, "task": existing.id})
             return True
@@ -644,7 +645,7 @@ class Service:
                                 final_url=item.get("final_url"),
                                 auto_folder=not item.get("rid") or self.keeps_browser_downloads(item),
                                 page=item.get("referrer") or "", expect=item.get("expect"),
-                                now=bool(item.get("rid")))
+                                now=bool(item.get("rid")), post=item.get("post"))
         self.bind_request(item.get("rid"), task, self.keeps_browser_downloads(item))
         if self.settings.show_progress_window:
             self.pending.append({"kind": "progress", "task": task.id})

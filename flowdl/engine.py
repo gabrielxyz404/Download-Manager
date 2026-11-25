@@ -15,6 +15,7 @@ How it works (same idea used by IDM):
 
 from __future__ import annotations
 
+import base64
 import http.client
 import json
 import ssl
@@ -456,6 +457,12 @@ class DownloadTask:
         # link the user/browser started from, is asked again for a fresh one when that happens.
         self._final_url: str | None = final_url if final_url and final_url != url else None
         self._refresh_lock = threading.Lock()
+        # A file made by a form (POST): {"body": bytes, "type": content type}, sent again
+        # exactly as the browser did. If its answer IS the file, the download uses one
+        # connection (repeating a form for pieces could make another file or repeat an
+        # action); if it leads to an ordinary address, that address is downloaded as usual.
+        self.post: dict | None = None
+        self._post_direct = False
         self._progress_at_refresh = -1
         self._fruitless_refreshes = 0
         self.validator: str | None = None  # this version of the file (see validator_of)
@@ -585,6 +592,12 @@ class DownloadTask:
             "leftovers": [p for p in self.leftovers if os.path.exists(p)],
             "active_seconds": round(self.active_seconds, 2), "peak_speed": round(self.peak_speed),
             "first_byte_after": self.first_byte_after,
+            # (encrypted like the cookies: a form may carry personal data; dropped once done)
+            "post": vault.protect_cached({"body": base64.b64encode(self.post["body"]).decode(),
+                                          "type": self.post.get("type") or "",
+                                          "origin": self.post.get("origin") or ""})
+            if self.post and self.status != Status.COMPLETED else None,
+            "post_direct": self._post_direct,
         }
 
     @classmethod
@@ -607,6 +620,14 @@ class DownloadTask:
         t.leftovers = [p for p in d.get("leftovers", []) if isinstance(p, str)
                        and p.endswith((".part", ".part.json"))]
         t.peak_speed = d.get("peak_speed", 0.0)
+        post = vault.unprotect(d.get("post"), None)
+        if isinstance(post, dict) and isinstance(post.get("body"), str):
+            try:
+                t.post = {"body": base64.b64decode(post["body"]), "type": str(post.get("type") or ""),
+                          "origin": str(post.get("origin") or "")}
+            except ValueError:
+                t.post = None
+        t._post_direct = bool(d.get("post_direct")) and t.post is not None
         t.first_byte_after = d.get("first_byte_after")
         t.after_ran = d.get("status") == Status.COMPLETED  # never again for an old download
         status = d.get("status", Status.PAUSED)
@@ -820,6 +841,15 @@ class DownloadTask:
         conn = net.Connection(TIMEOUT)
         for attempt in range(1, FIRST_TRIES + 1):
             try:
+                if self.post and (self._post_direct or self._final_url is None):
+                    # (the range only reaches the address the form leads to, if any: see net)
+                    resp = conn.get(self.url, self._headers_for(self.url), 0, FIRST_REQUEST - 1,
+                                    cookies=self.cookies, post=self.post)
+                    self._first_peer = conn.peer
+                    self._post_direct = resp.posted
+                    self._event("formulário: o ficheiro veio na própria resposta (uma ligação)" if resp.posted
+                                else "formulário: levou a um endereço normal (várias ligações)")
+                    break
                 resp = conn.get(self._current_url(), self._headers_for(self._current_url()), 0,
                                 FIRST_REQUEST - 1, cookies=self.cookies)
                 self._first_peer = conn.peer  # the server address that answered
@@ -870,6 +900,11 @@ class DownloadTask:
             conn.close()
             raise
         self._final_url = info["url"]
+        if self._post_direct:
+            # The form's own answer: one connection, no ranges, from the start on a restart.
+            self._final_url = None
+            info["resumable"] = False
+            self.segments = []
         if self.segments and self.validator and info["validator"] and info["validator"] != self.validator:
             # an interrupted download of an older version of this file
             conn.close()
@@ -925,6 +960,9 @@ class DownloadTask:
         with self._refresh_lock:
             if self._current_url() != failed_url:
                 return False  # another connection already got a fresh address
+            if self.post:
+                # (asking the form again could make another file: not behind the user's back)
+                raise RuntimeError("O endereço dado pelo formulário expirou: baixe outra vez no site")
             done = sum(s.pos - s.start for s in self.segments)
             info = probe(self.url, self.headers, self.cookies)
             if info["size"] != self.size or (self.validator and info["validator"]
@@ -981,8 +1019,12 @@ class DownloadTask:
                 got = expected = 0
                 try:
                     if resp is None or resp.status == 206:  # need the whole body in one answer
-                        resp = conn.get(self._current_url(), self._headers_for(self._current_url()),
-                                        cookies=self.cookies)
+                        if self._post_direct:
+                            resp = conn.get(self.url, self._headers_for(self.url), cookies=self.cookies,
+                                            post=self.post)
+                        else:
+                            resp = conn.get(self._current_url(), self._headers_for(self._current_url()),
+                                            cookies=self.cookies)
                     # A server may compress the file although we asked it not to (the browser
                     # would unpack it): unpack it too, or the saved file is the compressed one.
                     encoding = (resp.headers.get("Content-Encoding") or "").strip().lower()

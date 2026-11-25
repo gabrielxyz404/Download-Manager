@@ -115,6 +115,7 @@ class AddDialog(tk.Toplevel):
         self.app, self.headers = app, headers
         self.cookies, self.final_url = cookies, final_url
         self.rid = rid  # set when the download came from the browser
+        self.item = item  # (the browser's request: e.g. a form's POST to repeat)
         # The app keeps browser downloads itself (option "show in the browser's list" off)?
         self.keep = bool(rid) and app.service.keeps_browser_downloads(item or {})
         self._decided = False
@@ -195,7 +196,8 @@ class AddDialog(tk.Toplevel):
             conns = 8
         same_link = url == self.url_original
         if not getattr(self, "_dup_checked", False):
-            existing = self.app.manager.find_duplicate(url, self.final_url if same_link else None)
+            existing = None if same_link and (self.item or {}).get("post") else \
+                self.app.manager.find_duplicate(url, self.final_url if same_link else None)
             if existing is not None:
                 self._dup_checked = True
                 self.withdraw()
@@ -216,7 +218,8 @@ class AddDialog(tk.Toplevel):
                                      self.name.get().strip() or None, self.headers,
                                      cookies=self.cookies, final_url=self.final_url if same_link else None,
                                      auto_folder=bool(self.auto.get()),
-                                     page=(self.headers or {}).get("Referer", ""), now=bool(self.rid))
+                                     page=(self.headers or {}).get("Referer", ""), now=bool(self.rid),
+                                     post=(self.item or {}).get("post") if same_link else None)
         from .after import algo_for, clean_hash
         wanted = clean_hash(self.checksum.get())
         if wanted and algo_for(wanted):
@@ -2112,13 +2115,13 @@ class App(tk.Tk):
 
     # ---------------------------------------------------------------- actions
     def add_download(self, url, folder, conns, start=True, filename=None, headers=None,
-                     cookies=None, final_url=None, auto_folder=False, page="", now=False):
+                     cookies=None, final_url=None, auto_folder=False, page="", now=False, post=None):
         self.settings.dest_dir = folder or self.settings.dest_dir
         self.settings.connections = conns
         self.settings.save()
         task = self.manager.add(url, folder, conns, start=start, filename=filename, headers=headers,
                                 cookies=cookies, final_url=final_url, auto_folder=auto_folder, page=page,
-                                now=now)
+                                now=now, post=post)
         self._last_clip = url
         self.status_var.set(f"Adicionado: {filename or url}")
         self._refresh(schedule=False)
