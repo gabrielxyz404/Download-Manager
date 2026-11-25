@@ -715,7 +715,8 @@ class ProgressWindow(tk.Toplevel):
         self._update()
 
     def _toggle(self) -> None:
-        if self.task.is_running() or self.task.status == Status.QUEUED:
+        if (self.task.is_running() and self.task.status not in (Status.PAUSED, Status.ERROR)) \
+                or self.task.status == Status.QUEUED:
             self.app.manager.pause(self.task)  # also one waiting in the queue
         else:
             self.app.manager.resume(self.task)
@@ -729,7 +730,9 @@ class ProgressWindow(tk.Toplevel):
         if not self.winfo_exists():
             return
         t = self.task
-        running = t.is_running()
+        # (Paused already, while its thread is still saving and closing: say so at once -
+        # seen on Windows, the button kept saying "Pausar" for a moment after the pause.)
+        running = t.is_running() and t.status not in (Status.PAUSED, Status.ERROR)
         status = t.status
         if status == Status.ERROR and t.error:
             status = f"Erro: {t.error}"

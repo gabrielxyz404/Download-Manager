@@ -530,6 +530,10 @@ class DownloadTask:
         return self._thread is not None and self._thread.is_alive()
 
     def start(self) -> None:
+        if self.is_running() and self._stop.is_set():
+            # Paused a moment ago and still closing (saving its state): resume right after,
+            # instead of ignoring the click.
+            self._thread.join(10)
         if self.is_running() or self.status == Status.COMPLETED:
             return
         self._stop.clear()

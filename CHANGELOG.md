@@ -10,6 +10,8 @@
 - O conteúdo do formulário fica cifrado na lista de downloads, como os cookies, e é apagado quando o download termina. Não aparece no "Copiar diagnóstico".
 - Extensão 0.9.13: recarregue-a em brave://extensions (↻).
 
+**Corrigido:** "Retomar" clicado logo a seguir a "Pausar" era ignorado. Nesse instante a app ainda está a guardar o estado do download. Na janela de progresso, o botão também demorava a passar de "Pausar" a "Retomar".
+
 ## 0.9.18
 
 **Novo: a app instala o ffmpeg sozinha.** Sem ele o YouTube fica em 360p e não há conversão para MP3. Antes era preciso instalá-lo à mão (winget).

@@ -135,6 +135,31 @@ class EngineTests(unittest.TestCase):
         self.assertFileOk(again.path)
         self.assertGreater(paused_at, 0)
 
+    def test_resume_clicked_right_after_pause_is_not_ignored(self):
+        """Seen on Windows: just after a pause the download is "Pausado" while its thread is
+        still closing (saving its state); a "Retomar" clicked then did nothing."""
+        Handler.delay = 0.2
+        try:
+            task = DownloadTask(self.base + "/big.bin", self.tmp.name, 4)
+            task.start()
+            time.sleep(1.0)
+            real_save = task._save_state
+            task._save_state = lambda: (time.sleep(0.5), real_save())[1]  # (a slow disk)
+            task.pause()
+            for _ in range(100):
+                if task.status == Status.PAUSED:
+                    break
+                time.sleep(0.02)
+            self.assertTrue(task.is_running())  # still closing...
+            Handler.delay = 0.0
+            task._save_state = real_save
+            task.start()  # ...and the click is not lost
+            task.wait(30)
+            self.assertEqual(task.status, Status.COMPLETED, task.error)
+            self.assertFileOk(task.path)
+        finally:
+            Handler.delay = 0.0
+
     def test_parts_list_is_never_seen_empty_while_a_part_is_added(self):
         """Found in an audit: adding a part sorted the list in place, and CPython shows a list
         as EMPTY while it sorts it. Threads reading it without the lock (progress, "is it
