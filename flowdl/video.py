@@ -2,7 +2,7 @@
 
 Install with:  pip install yt-dlp
 For resolutions above 360p on YouTube (separate video + audio streams) and for
-MP3 conversion, ffmpeg must also be installed (Windows: winget install ffmpeg).
+MP3 conversion, ffmpeg is needed: the app installs it on request (install_ffmpeg).
 """
 
 from __future__ import annotations
@@ -144,8 +144,144 @@ def _reload() -> None:
     _use_update()
 
 
+# ffmpeg (for 1080p and more on YouTube, and MP3): installed by the app on request, in its own
+# folder (no administrator, no change to the system PATH), from the official Windows builds
+# of the FFmpeg-Builds project, checked against the SHA-256 published with them.
+FFMPEG_BUILD = "ffmpeg-master-latest-win64-gpl.zip"
+FFMPEG_URL = "https://github.com/BtbN/FFmpeg-Builds/releases/latest/download/" + FFMPEG_BUILD
+FFMPEG_SUMS_URL = "https://github.com/BtbN/FFmpeg-Builds/releases/latest/download/checksums.sha256"
+FFMPEG_MAX = 400 * 1024 * 1024  # (the build is ~200 MB: anything far bigger is not it)
+FFMPEG_PROGRAMS = ("ffmpeg.exe", "ffprobe.exe")
+WINDOWS = os.name == "nt"  # (the builds are for Windows)
+
+
+def ffmpeg_home():
+    from .paths import config_dir
+    return config_dir() / "ffmpeg"
+
+
+def _app_ffmpeg() -> str | None:
+    """The app's own copy (installed with install_ffmpeg), if any."""
+    path = ffmpeg_home() / "ffmpeg.exe"
+    return str(path) if WINDOWS and path.is_file() else None
+
+
+def ffmpeg_dir() -> str | None:
+    """Folder of the ffmpeg in use: the app's own copy first, then the system's."""
+    own = _app_ffmpeg()
+    if own:
+        return os.path.dirname(own)
+    found = shutil.which("ffmpeg")
+    return os.path.dirname(found) if found else None
+
+
 def has_ffmpeg() -> bool:
-    return shutil.which("ffmpeg") is not None
+    return ffmpeg_dir() is not None
+
+
+def ffmpeg_state() -> str:
+    if _app_ffmpeg():
+        return "instalado pela app"
+    return "encontrado no sistema" if shutil.which("ffmpeg") else "não instalado"
+
+
+def install_ffmpeg(progress=None) -> tuple[bool, str]:
+    """Download ffmpeg + ffprobe into the app's folder. ``progress(done, total)`` is called
+    while downloading. Returns (ok, message). Nothing is kept unless the checksum matches."""
+    import hashlib
+    import http.client
+    import tempfile
+    import urllib.request
+    import zipfile
+    from .engine import USER_AGENT
+    from .system import free_space
+    if not WINDOWS:
+        return False, "a instalação automática do ffmpeg só existe no Windows"
+    home = ffmpeg_home()
+    home.mkdir(parents=True, exist_ok=True)
+    room = free_space(str(home))
+    if room is not None and room < 600 * 1024 * 1024:  # (the archive + the two programs)
+        return False, "pouco espaço livre no disco para instalar o ffmpeg (são precisos ~600 MB)"
+    try:
+        sums = _fetch(FFMPEG_SUMS_URL, 30).decode("utf-8", "replace")
+    except (OSError, http.client.HTTPException) as exc:
+        return False, f"sem ligação ao GitHub ({exc})"
+    want = next((line.split()[0].lower() for line in sums.splitlines()
+                 if line.split()[1:] == [FFMPEG_BUILD]), None)
+    if not want or not re.fullmatch(r"[0-9a-f]{64}", want):
+        return False, "não encontrei o checksum oficial do ffmpeg: não foi instalado"
+    fd, zip_path = tempfile.mkstemp(suffix=".zip", dir=str(home))
+    try:
+        digest = hashlib.sha256()
+        try:
+            req = urllib.request.Request(FFMPEG_URL, headers={"User-Agent": USER_AGENT})
+            with urllib.request.urlopen(req, timeout=60) as resp, os.fdopen(fd, "wb") as out:
+                total = int(resp.headers.get("Content-Length") or 0)
+                done = 0
+                while chunk := resp.read(1024 * 1024):
+                    done += len(chunk)
+                    if done > FFMPEG_MAX:
+                        return False, "o ficheiro do ffmpeg é maior do que o esperado: não foi instalado"
+                    digest.update(chunk)
+                    out.write(chunk)
+                    if progress:
+                        progress(done, total)
+        except (OSError, http.client.HTTPException) as exc:
+            return False, f"o download do ffmpeg falhou ({exc})"
+        if digest.hexdigest() != want:
+            return False, "o ficheiro descarregado não confere com o checksum oficial: não foi instalado"
+        try:
+            with zipfile.ZipFile(zip_path) as z:
+                # Only the two programs, by exact place (<build>/bin/<name>): never any other
+                # path from the archive.
+                members = {}
+                for info in z.infolist():
+                    parts = info.filename.split("/")
+                    if len(parts) == 3 and parts[1] == "bin" and parts[2] in FFMPEG_PROGRAMS \
+                            and ".." not in parts[0] and "\\" not in info.filename:
+                        members[parts[2]] = info
+                if set(members) != set(FFMPEG_PROGRAMS):
+                    return False, "o ficheiro do ffmpeg não é o esperado: não foi instalado"
+                for name, info in members.items():
+                    tmp = home / (name + ".tmp")
+                    with z.open(info) as src, open(tmp, "wb") as dst:
+                        shutil.copyfileobj(src, dst, 1024 * 1024)
+                    tmp.replace(home / name)
+        except (zipfile.BadZipFile, OSError) as exc:
+            return False, f"não consegui extrair o ffmpeg ({exc})"
+    finally:
+        try:
+            os.remove(zip_path)
+        except OSError:
+            pass
+    version = ffmpeg_version()
+    if not version:
+        remove_ffmpeg()
+        return False, "o ffmpeg descarregado não arrancou: foi removido"
+    return True, f"ffmpeg instalado ({version})"
+
+
+def ffmpeg_version() -> str | None:
+    """First line of `ffmpeg -version` (also proves that it runs)."""
+    folder = ffmpeg_dir()
+    if not folder:
+        return None
+    exe = os.path.join(folder, "ffmpeg.exe" if WINDOWS else "ffmpeg")
+    try:
+        out = subprocess.run([exe, "-version"], capture_output=True, timeout=30,
+                             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    except (OSError, subprocess.SubprocessError):
+        return None
+    line = out.stdout.decode("utf-8", "replace").splitlines()[:1]
+    return line[0][:80] if out.returncode == 0 and line else None
+
+
+def remove_ffmpeg() -> None:
+    for name in FFMPEG_PROGRAMS:
+        try:
+            (ffmpeg_home() / name).unlink()
+        except OSError:
+            pass
 
 
 def install_command() -> list[str]:
@@ -216,6 +352,9 @@ def _base_opts(cookiefile: str | None = None, headers: dict | None = None) -> di
         opts["cookiefile"] = cookiefile
     if headers:
         opts["http_headers"] = {k: v for k, v in headers.items() if k.lower() != "cookie"}
+    own = _app_ffmpeg()
+    if own:
+        opts["ffmpeg_location"] = os.path.dirname(own)  # (the app's copy is not on the PATH)
     return opts
 
 

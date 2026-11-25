@@ -639,7 +639,13 @@ class GuiTests(unittest.TestCase):
 
     def test_no_settings_text_is_cut_off(self):
         """Seen in the audit: a long option text ran past the window's edge (half of it was
-        never visible). Every section, light and dark: nothing wider than the window."""
+        never visible). Every section, light and dark: nothing wider than the window.
+        (With the Windows-only rows shown: ffmpeg installed by the app.)"""
+        from flowdl import video
+        for p in (mock.patch.object(video, "WINDOWS", True),
+                  mock.patch.object(video, "ffmpeg_state", lambda: "instalado pela app")):
+            p.start()
+            self.addCleanup(p.stop)
         app = self.open_app()
         win = app.open_settings()
         pump(app, 0.3)
@@ -735,6 +741,33 @@ class GuiTests(unittest.TestCase):
             pump(app, 2, lambda: err.called)
         err.assert_called_once()
         self.assertIn("sem internet", err.call_args[0][1])
+
+    def test_video_window_installs_ffmpeg_and_shows_the_better_qualities(self):
+        """Without ffmpeg YouTube stops at 360p: the window offers "Instalar ffmpeg" (Windows)
+        and, once installed, lists the qualities again."""
+        app = self.open_app()
+        low = {"title": "T", "url": "u", "limited": True,
+               "options": [{"label": "360p", "format": "18", "audio_only": False}]}
+        full = {"title": "T", "url": "u", "limited": False,
+                "options": [{"label": "1080p", "format": "137+140", "audio_only": False},
+                            {"label": "360p", "format": "18", "audio_only": False}]}
+        answers = [low, full]
+        with mock.patch.object(self.gui.video, "WINDOWS", True), \
+                mock.patch.object(self.gui.video, "available", return_value=True), \
+                mock.patch.object(self.gui.video, "get_options", side_effect=lambda *a, **k: answers.pop(0)), \
+                mock.patch.object(self.gui.video, "install_ffmpeg",
+                                  side_effect=lambda progress: (progress(50, 100), (True, "ffmpeg instalado"))[1]):
+            dlg = self.gui.VideoDialog(app, "https://www.youtube.com/watch?v=abc")
+            pump(app, 3, lambda: dlg.tree.get_children())
+            pump(app, 0.3)
+            self.assertTrue(dlg.ffmpeg_btn.winfo_ismapped())
+            self.assertIn("ffmpeg", dlg.info.get())
+            dlg._install_ffmpeg()
+            pump(app, 4, lambda: "q1" in dlg.tree.get_children())
+            labels = [dlg.tree.item(i)["values"][0] for i in dlg.tree.get_children()]
+            self.assertEqual(labels, ["1080p", "360p"])
+            self.assertFalse(dlg.ffmpeg_btn.winfo_ismapped())
+            dlg.destroy()
 
     def test_video_window_lists_qualities_and_downloads_mp3(self):
         from flowdl import video

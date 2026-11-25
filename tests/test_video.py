@@ -293,3 +293,95 @@ class VideoSupportUpdateTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FfmpegInstallTests(unittest.TestCase):
+    """ffmpeg installed by the app: official build, checked against its SHA-256, only the two
+    programs taken from the archive, used without touching the system PATH. (A local server
+    plays GitHub: no real network in the tests.)"""
+
+    def setUp(self):
+        from unittest import mock
+        self.tmp = tempfile.mkdtemp()
+        self.site = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.addCleanup(shutil.rmtree, self.site, True)
+        env = mock.patch.dict(os.environ, {"APPDATA": self.tmp, "PATH": self.tmp})
+        env.start()
+        self.addCleanup(env.stop)
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), partial(Quiet, directory=self.site))
+        self.server.daemon_threads = True
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        self.addCleanup(self.server.shutdown)
+        base = f"http://127.0.0.1:{self.server.server_address[1]}/"
+        for p in (mock.patch.object(video, "WINDOWS", True),
+                  mock.patch.object(video, "FFMPEG_URL", base + video.FFMPEG_BUILD),
+                  mock.patch.object(video, "FFMPEG_SUMS_URL", base + "checksums.sha256"),
+                  mock.patch.object(video, "ffmpeg_version", lambda: "ffmpeg version test")):
+            p.start()
+            self.addCleanup(p.stop)
+
+    def publish(self, members: dict, checksum: str | None = "right"):
+        import hashlib
+        import zipfile
+        path = os.path.join(self.site, video.FFMPEG_BUILD)
+        with zipfile.ZipFile(path, "w") as z:
+            for name, data in members.items():
+                z.writestr(name, data)
+        with open(path, "rb") as f:
+            digest = hashlib.sha256(f.read()).hexdigest() if checksum == "right" else "0" * 64
+        with open(os.path.join(self.site, "checksums.sha256"), "w") as f:
+            f.write(f"{'1' * 64}  other.zip\n")
+            if checksum is not None:
+                f.write(f"{digest}  {video.FFMPEG_BUILD}\n")
+
+    GOOD = {"ffmpeg-master-latest-win64-gpl/bin/ffmpeg.exe": b"FF", "ffmpeg-master-latest-win64-gpl/bin/ffprobe.exe": b"FP",
+            "ffmpeg-master-latest-win64-gpl/bin/ffplay.exe": b"PL", "ffmpeg-master-latest-win64-gpl/LICENSE.txt": b"L"}
+
+    def test_install_and_use(self):
+        self.assertFalse(video.has_ffmpeg())
+        self.publish(self.GOOD)
+        seen = []
+        ok, msg = video.install_ffmpeg(lambda done, total: seen.append((done, total)))
+        self.assertTrue(ok, msg)
+        home = video.ffmpeg_home()
+        self.assertEqual(sorted(os.listdir(home)), ["ffmpeg.exe", "ffprobe.exe"])  # nothing else kept
+        self.assertEqual((home / "ffmpeg.exe").read_bytes(), b"FF")
+        self.assertTrue(seen)
+        self.assertTrue(video.has_ffmpeg())  # (not on the PATH)
+        self.assertEqual(video.ffmpeg_state(), "instalado pela app")
+        self.assertEqual(video._base_opts()["ffmpeg_location"], str(home))
+        video.remove_ffmpeg()
+        self.assertFalse(video.has_ffmpeg())
+        self.assertNotIn("ffmpeg_location", video._base_opts())
+
+    def test_wrong_checksum_keeps_nothing(self):
+        self.publish(self.GOOD, checksum="wrong")
+        ok, msg = video.install_ffmpeg()
+        self.assertFalse(ok)
+        self.assertIn("checksum", msg)
+        self.assertEqual(os.listdir(video.ffmpeg_home()), [])
+
+    def test_no_official_checksum_no_install(self):
+        self.publish(self.GOOD, checksum=None)
+        ok, msg = video.install_ffmpeg()
+        self.assertFalse(ok)
+        self.assertEqual(os.listdir(video.ffmpeg_home()), [])
+
+    def test_unexpected_archive_is_refused(self):
+        for members in ({"../ffmpeg.exe": b"x", "x/bin/ffprobe.exe": b"y"},
+                        {"x/bin/ffmpeg.exe": b"x"},
+                        {"a/b/bin/ffmpeg.exe": b"x", "a/b/bin/ffprobe.exe": b"y"}):
+            self.publish(members)
+            ok, msg = video.install_ffmpeg()
+            self.assertFalse(ok, members)
+            self.assertEqual(os.listdir(video.ffmpeg_home()), [], members)
+        self.assertFalse(os.path.exists(os.path.join(self.tmp, "ffmpeg.exe")))
+
+    def test_a_copy_that_does_not_run_is_removed(self):
+        from unittest import mock
+        self.publish(self.GOOD)
+        with mock.patch.object(video, "ffmpeg_version", lambda: None):
+            ok, msg = video.install_ffmpeg()
+        self.assertFalse(ok)
+        self.assertFalse(video.has_ffmpeg())

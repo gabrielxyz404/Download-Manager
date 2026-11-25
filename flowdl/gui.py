@@ -448,6 +448,7 @@ class VideoDialog(tk.Toplevel):
         btns = ttk.Frame(frm)
         btns.pack(fill="x")
         self.install_btn = ttk.Button(btns, text="Instalar suporte a vídeos", command=self._install)
+        self.ffmpeg_btn = ttk.Button(btns, text="Instalar ffmpeg (≈ 200 MB)", command=self._install_ffmpeg)
         ttk.Button(btns, text="Cancelar", command=self.destroy).pack(side="right")
         ttk.Button(btns, text="⬇ Baixar", command=self._download).pack(side="right", padx=6)
 
@@ -511,10 +512,31 @@ class VideoDialog(tk.Toplevel):
             self.tree.insert("", i, iid=iid, values=(opt["label"], detail))
         notes = []
         if data.get("limited"):
-            notes.append("Instale o ffmpeg para ter 1080p ou mais e conversão para MP3 "
-                         "(Windows: winget install ffmpeg).")
+            if video.WINDOWS:
+                notes.append("Com o ffmpeg (gratuito) há 1080p ou mais e conversão para MP3. "
+                             "Clique em 'Instalar ffmpeg': a app instala-o sozinha.")
+                self.ffmpeg_btn.pack(side="left")
+            else:
+                notes.append("Instale o ffmpeg para ter 1080p ou mais e conversão para MP3.")
         self.info.set(" ".join(notes) or "Escolha a qualidade e clique em Baixar.")
         self._select_first()
+
+    def _install_ffmpeg(self) -> None:
+        self.ffmpeg_btn.state(["disabled"])
+
+        def done(ok: bool) -> None:
+            if not self.winfo_exists():
+                return
+            if ok:  # the qualities again, now with 1080p+ and MP3
+                self.ffmpeg_btn.pack_forget()
+                for iid in [i for i in self.tree.get_children() if i.startswith("q")]:
+                    self.tree.delete(iid)
+                    self.choices.pop(iid, None)
+                self._lookup()
+            else:
+                self.ffmpeg_btn.state(["!disabled"])
+
+        install_ffmpeg(self.app, self.info, done)
 
     def _select_first(self) -> None:
         kids = self.tree.get_children()
@@ -598,6 +620,57 @@ class VideoDialog(tk.Toplevel):
                 on_done(ok)
 
         app.after(300, poll)
+
+
+def install_ffmpeg(app: "App", info: tk.StringVar | None = None, on_done=None) -> None:
+    """Install ffmpeg in the background, showing the progress (in ``info`` and the status
+    bar); ``on_done(ok)`` afterwards, in the window's thread."""
+    q: queue.Queue = queue.Queue()
+    shown = {"pct": -1}
+
+    def progress(done: int, total: int) -> None:
+        pct = int(done * 100 / total) if total else -1
+        if pct != shown["pct"]:
+            shown["pct"] = pct
+            q.put(("progress", f"A instalar o ffmpeg... {pct}%" if pct >= 0
+                   else f"A instalar o ffmpeg... {done // (1024 * 1024)} MB"))
+
+    def run():
+        try:
+            q.put(("done", video.install_ffmpeg(progress)))
+        except Exception as exc:  # noqa: BLE001 - always an answer
+            q.put(("done", (False, f"falhou ({type(exc).__name__}: {exc})")))
+    threading.Thread(target=run, daemon=True).start()
+
+    def say(text: str) -> None:
+        app.status_var.set(text)
+        if info is not None:
+            try:
+                info.set(text)
+            except tk.TclError:
+                pass
+
+    def poll():
+        try:
+            while True:
+                kind, data = q.get_nowait()
+                if kind == "progress":
+                    say(data)
+                    continue
+                ok, msg = data
+                if ok:
+                    say("✔ " + msg)
+                else:
+                    say("ffmpeg: " + msg)
+                    messagebox.showerror("ffmpeg", "Não consegui instalar o ffmpeg:\n\n" + msg)
+                if on_done:
+                    on_done(ok)
+                return
+        except queue.Empty:
+            app.after(300, poll)
+
+    say("A instalar o ffmpeg...")
+    app.after(300, poll)
 
 
 def re_safe(text: str) -> str:
@@ -1420,6 +1493,14 @@ class SettingsDialog(tk.Toplevel):
             self._row("Versão instalada: " + _version(), "Procurar agora...", app._check_updates)
             self._head("Vídeos")
             self._row("Suporte a vídeos (yt-dlp)", "Atualizar...", lambda: VideoDialog.install(app))
+            if video.WINDOWS or video.has_ffmpeg():
+                state = video.ffmpeg_state()
+                self._row(f"ffmpeg (1080p ou mais, MP3): {state}",
+                          "Atualizar..." if state == "instalado pela app" else "Instalar...",
+                          lambda: install_ffmpeg(app, on_done=lambda _ok: self.winfo_exists() and self._fill()))
+                if state == "instalado pela app":
+                    self._row("Remover o ffmpeg instalado pela app", "Remover",
+                              lambda: (video.remove_ffmpeg(), app.status_var.set("ffmpeg removido")))
 
     def _card(self, parent, value: str, name: str, sub: str) -> None:
         c = self.app.colors

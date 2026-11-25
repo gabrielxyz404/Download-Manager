@@ -1,5 +1,12 @@
 # Novidades do Flow Downloads
 
+## 0.9.18
+
+**Novo: a app instala o ffmpeg sozinha.** Sem ele o YouTube fica em 360p e não há conversão para MP3. Antes era preciso instalá-lo à mão (winget).
+- Na janela de vídeos aparece o botão **"Instalar ffmpeg (≈ 200 MB)"**, com o progresso. No fim, a lista de qualidades volta a aparecer, já com 1080p ou mais.
+- Também em Configurações → Atualizações → Vídeos: instalar, atualizar ou remover.
+- Vem das versões oficiais para Windows do projeto FFmpeg-Builds e é conferido com o SHA-256 publicado com elas: se não conferir, nada é guardado. Da transferência só se guardam o ffmpeg.exe e o ffprobe.exe, na pasta da app. Não precisa de administrador nem muda o PATH do Windows.
+
 ## 0.9.17
 
 **Thinkbroadband: a causa real, encontrada com o "Copiar diagnóstico"**
