@@ -23,7 +23,8 @@ def _valid(entry) -> bool:
     num = lambda v: isinstance(v, (int, float)) and not isinstance(v, bool)
     return (isinstance(entry, dict) and num(entry.get("time")) and num(entry.get("conns"))
             and entry["conns"] >= 1 and (entry.get("limit") is None or num(entry["limit"]))
-            and (entry.get("outage_limit") is None or num(entry["outage_limit"])))
+            and (entry.get("outage_limit") is None or num(entry["outage_limit"]))
+            and (entry.get("few_requests") is None or num(entry["few_requests"])))
 
 
 class HostMemory:
@@ -50,10 +51,25 @@ class HostMemory:
             return None
         entry = dict(entry)
         calm = entry.pop("outage_limit", None)
+        # (a server that answered "too many requests": kept like the rest, 30 days)
+        entry["few_requests"] = bool(entry.get("few_requests"))
         if calm and time.time() - entry.get("time", 0) <= OUTAGE_LIMIT_AGE:
             entry["limit"] = min(entry["limit"], calm) if entry.get("limit") else calm
             entry["outage"] = True  # (the engine then asks for whole pieces: see engine)
         return entry
+
+    def note_few_requests(self, host: str) -> None:
+        """The server answered "429 Too Many Requests": later downloads from it ask for long
+        pieces from the start (seen: thinkbroadband stopped everything for 75 s)."""
+        host = (host or "").lower()
+        if not host:
+            return
+        with self._lock:
+            data = self._load()
+            entry = data.get(host) or {"conns": 1, "limit": None}
+            entry["few_requests"] = entry["time"] = time.time()
+            data[host] = entry
+            self._save(data)
 
     def put(self, host: str, connections: int, limit: int | None, outage_limit: int | None = None) -> None:
         """``limit``: the server refuses more (kept). ``outage_limit``: it stopped every
@@ -63,17 +79,22 @@ class HostMemory:
             return
         with self._lock:
             data = self._load()
+            few = (data.get(host) or {}).get("few_requests")
             data[host] = {"conns": int(connections), "limit": int(limit) if limit else None, "time": time.time(),
-                          **({"outage_limit": int(outage_limit)} if outage_limit else {})}
-            if len(data) > MAX_HOSTS:  # keep the most recent
-                for old in sorted(data, key=lambda h: data[h].get("time", 0))[:len(data) - MAX_HOSTS]:
-                    del data[old]
-            try:
-                tmp = self.path.with_suffix(".tmp")
-                tmp.write_text(json.dumps(data), encoding="utf-8")
-                tmp.replace(self.path)
-            except OSError:
-                pass
+                          **({"outage_limit": int(outage_limit)} if outage_limit else {}),
+                          **({"few_requests": few} if few else {})}
+            self._save(data)
+
+    def _save(self, data: dict) -> None:
+        if len(data) > MAX_HOSTS:  # keep the most recent
+            for old in sorted(data, key=lambda h: data[h].get("time", 0))[:len(data) - MAX_HOSTS]:
+                del data[old]
+        try:
+            tmp = self.path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(data), encoding="utf-8")
+            tmp.replace(self.path)
+        except OSError:
+            pass
 
 
 def parse_limits(text: str) -> dict:

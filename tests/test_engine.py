@@ -659,12 +659,18 @@ class RateServer(BaseHTTPRequestHandler):
     times in 10 s (what thinkbroadband seemed to do: fine at first, then stop after stop while
     the app asked for piece after piece; one long request per connection does not trip it)."""
     protocol_version = "HTTP/1.1"
-    LIMIT, STALL = 12, 10.0
+    LIMIT, STALL, WINDOW = 12, 10.0, 10.0
+    TOO_MANY = False  # while stopped, new requests get "429 Too Many Requests" (thinkbroadband)
     lock = threading.Lock()
     asked: list = []
     stall_until = 0.0
     stalls = 0
     data = b""
+
+    @classmethod
+    def reset(cls, data, limit=12, stall=10.0, window=10.0, too_many=False):
+        cls.asked, cls.stall_until, cls.stalls, cls.data = [], 0.0, 0, data
+        cls.LIMIT, cls.STALL, cls.WINDOW, cls.TOO_MANY = limit, stall, window, too_many
 
     def log_message(self, *a):
         pass
@@ -673,10 +679,16 @@ class RateServer(BaseHTTPRequestHandler):
         cls = RateServer
         now = time.monotonic()
         with cls.lock:
-            cls.asked = [t for t in cls.asked if now - t < 10] + [now]
+            cls.asked = [t for t in cls.asked if now - t < cls.WINDOW] + [now]
             if len(cls.asked) > cls.LIMIT and now >= cls.stall_until:
                 cls.stall_until = now + cls.STALL
                 cls.stalls += 1
+            refuse = cls.TOO_MANY and now < cls.stall_until
+        if refuse:
+            self.send_response(429, "Too Many Requests")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
         data = cls.data
         m = re.match(r"bytes=(\d+)-(\d*)", self.headers.get("Range", ""))
         a = int(m.group(1)) if m else 0
@@ -918,12 +930,51 @@ class StallTests(unittest.TestCase):
             server.shutdown()
             tmp.cleanup()
 
+    def _too_many_requests_download(self, mirror):
+        RateServer.reset(BIG * 12, limit=45, stall=15.0, window=60.0, too_many=True)
+
+        class Server(ThreadingHTTPServer):
+            request_queue_size = 64
+        server = Server(("127.0.0.1", 0), RateServer)
+        server.daemon_threads = True
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        tmp = tempfile.TemporaryDirectory()
+        try:
+            task = DownloadTask(f"http://127.0.0.1:{server.server_address[1]}/f.bin", tmp.name, 8)
+            task.mirror = mirror
+            t0 = time.monotonic()
+            task.start()
+            task.wait(120)
+            took = time.monotonic() - t0
+            self.assertEqual(task.status, Status.COMPLETED, task.error)
+            return task, took
+        finally:
+            server.shutdown()
+            tmp.cleanup()
+
+    def test_server_that_counts_requests_is_never_tripped(self):
+        """Seen on thinkbroadband (diagnostic of a 5 GB file): "429 Too Many Requests" after
+        ~120 requests, then nothing for ~75 s, twice. The app asked every ~2 s per connection
+        (257 requests by 3 GB); now each request is long, as other download managers do."""
+        task, took = self._too_many_requests_download(False)
+        self.assertEqual(RateServer.stalls, 0, task.diagnostic())
+        self.assertLess(task.requests, 30)
+
+    def test_server_that_counts_requests_in_browser_list_mode(self):
+        """Browser-list mode keeps short pieces near the start, but never more than
+        REQUEST_BUDGET for the file (64: ~80 MB pieces for 5 GB). Scaled down here with the
+        small test file (the limit of 45 requests is far tighter than the real ~120 for 5 GB)."""
+        from unittest import mock
+        from flowdl import engine
+        with mock.patch.object(engine, "REQUEST_BUDGET", 16):
+            task, took = self._too_many_requests_download(True)
+        self.assertEqual(RateServer.stalls, 0, task.diagnostic())
+
     def test_server_that_punishes_many_requests_is_asked_less_after_a_stop(self):
         """Seen on thinkbroadband: stop, recover, stop again. After a stop the app asked for
         piece after piece and tripped the server again; now each connection asks for its whole
         piece in one request after a stop. (Simulated: 49.5 s with 3 stops -> 23 s with 1.)"""
-        RateServer.asked, RateServer.stall_until, RateServer.stalls = [], 0.0, 0
-        RateServer.data = BIG * 12
+        RateServer.reset(BIG * 12)
 
         class Server(ThreadingHTTPServer):
             request_queue_size = 64
@@ -1178,6 +1229,21 @@ class HostMemoryTests(unittest.TestCase):
             self.assertFalse(again.get("cdn.exemplo.com").get("outage"))
             self.assertEqual(again.get("cdn.exemplo.com")["conns"], 4)
             self.assertEqual(again.get("recusa.com")["limit"], 2)  # the server's own limit stays
+
+    def test_server_that_counts_requests_is_remembered(self):
+        """After a "429 Too Many Requests", the next download from that server asks for long
+        pieces from the start; a later put() (what the download learned) keeps it."""
+        from flowdl import hostmemory
+        import pathlib
+        with tempfile.TemporaryDirectory() as d:
+            path = pathlib.Path(d) / "hosts.json"
+            mem = hostmemory.HostMemory(path)
+            mem.note_few_requests("Download.Exemplo.com")
+            self.assertTrue(hostmemory.HostMemory(path).get("download.exemplo.com")["few_requests"])
+            mem.put("download.exemplo.com", 8, None)
+            self.assertTrue(hostmemory.HostMemory(path).get("download.exemplo.com")["few_requests"])
+            mem.put("outro.com", 8, None)
+            self.assertFalse(hostmemory.HostMemory(path).get("outro.com")["few_requests"])
 
     def test_second_download_from_the_same_server_starts_where_it_paid_off(self):
         from flowdl.hostmemory import HostMemory

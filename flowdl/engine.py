@@ -48,9 +48,17 @@ MIN_SPLIT_SIZE = 512 * 1024  # do not split segments smaller than 2x this
 MAX_RETRIES = 8
 NETWORK_PATIENCE = 30 * 60  # no way to the server at all: keep trying this long
 FIRST_REQUEST = 2 * 1024 * 1024  # the first request already fetches this much
-REQUEST_SECONDS = 2.0     # each later request asks for ~2 s worth of data...
-MIN_REQUEST = 4 * 1024 * 1024  # ...between 4 MB (a new connection must not stop to ask again at once)...
-MAX_REQUEST = 32 * 1024 * 1024  # ...and 32 MB, on a connection that stays open
+# Each later request asks for ~15 s worth of data, between 4 MB (a new connection must not
+# stop to ask again at once) and 256 MB, on a connection that stays open. Few requests: some
+# servers count them and stop a client that asks too often (seen on thinkbroadband: "429 Too
+# Many Requests" after ~120 requests in 20 s, then nothing for 75 s, with 2 s requests).
+REQUEST_SECONDS = 15.0
+MIN_REQUEST = 4 * 1024 * 1024
+MAX_REQUEST = 256 * 1024 * 1024
+MIRROR_SECONDS = 2.0  # browser-list downloads: shorter (see the worker)...
+# ...but never more than ~REQUEST_BUDGET pieces for the whole file: a server that counts
+# requests (thinkbroadband: 429 after ~120) must not see hundreds for one big file.
+REQUEST_BUDGET = 64
 MIRROR_REQUEST = 1024 * 1024  # browser-list downloads: shorter requests (see the worker)
 START_CONNECTIONS = 2     # adaptive mode starts small (4 for big files)...
 START_CONNECTIONS_BIG = 8  # (was 4: fast lines waited seconds for the speed to build up)
@@ -87,6 +95,7 @@ RESCUE_EXTRA = 2          # a stuck piece may add this many connections over the
 CERT_ERROR = ("O certificado de segurança (HTTPS) deste site não é válido ou não é de confiança. "
               "Tentar de novo não resolve.")
 TRANSIENT_CODES = (408, 425, 429, 500, 502, 503, 504)  # worth asking again
+LIMITED_QUIET_S = 90.0  # after a 429: no replacing / reopening connections for this long
 MAX_RETRY_AFTER = 120  # never wait longer than this for a server's "try again in N s"
 FIRST_TRIES = 4
 MAX_SAME_REFUSALS = 5  # the same, still valid address refused again and again with no progress
@@ -426,6 +435,8 @@ class DownloadTask:
         self.outages = 0  # times every connection went silent together (this download)
         self._last_outage_at = 0.0
         self._punishing_host = False
+        self._few_requests = False  # the server said "too many requests" (429): whole pieces
+        self._last_429 = 0.0
         self._target = 1 << 30  # connections wanted now (set by the download loop)
         self._in_outage = False  # every connection stopped together (no cutting / reopening)
         self._outage_started: float | None = None
@@ -763,6 +774,7 @@ class DownloadTask:
         lines = [f"Flow Downloads {__version__} - diagnóstico",
                  f"servidor: {host_of(self._current_url())}  tamanho: "
                  f"{(self.size or 0) / MB:.0f} MB  estado: {self.status}"
+                 + ("  (na lista do navegador)" if self.mirror else "")
                  + (f"  erro: {self.error}" if self.error else ""),
                  f"ligações máx.: {self.connections}  paragens: {self.outages}  "
                  f"substituídas: {self.reconnections}  pedidos: {self.requests}  "
@@ -1119,9 +1131,11 @@ class DownloadTask:
         known = self.host_memory.get(host_of(self._current_url())) if self.host_memory else None
         # (Stopped us again and again on an earlier download, a few hours ago at most.)
         self._punishing_host = bool(known and known.get("limit") and known.get("outage"))
+        self._few_requests = bool(known and known.get("few_requests"))
         if known:
             self._event(f"memória do servidor: {known.get('conns')} ligações, limite {known.get('limit')}"
-                        + (", já nos parou (pedidos longos)" if self._punishing_host else ""))
+                        + (", já nos parou (pedidos longos)" if self._punishing_host else "")
+                        + (", conta os pedidos (pedidos longos)" if self._few_requests else ""))
         if known:
             # This server taught us before: start where it paid off (and within its limit),
             # still measuring and adapting from there.
@@ -1357,7 +1371,7 @@ class DownloadTask:
                 # The server stopped every connection: splitting work now would only cut
                 # requests and open new connections (what such servers punish). Wait.
                 return None
-            if self.mirror:
+            if self.mirror and not self._few_requests:
                 head = self._split_near_start()
                 if head is not None:
                     return head
@@ -1385,7 +1399,10 @@ class DownloadTask:
         follows, so all connections work side by side near the start and the part the browser
         can already receive grows at the full speed. Called with self._lock held."""
         per_conn = self.speed / max(1, self._active_workers)
-        keep = int(min(32 * 1024 * 1024, max(MIN_SPLIT_SIZE, per_conn * 2)))
+        # (2 s of work, but at least 1/REQUEST_BUDGET of the file: 2 s pieces of a 5 GB file
+        # meant hundreds of requests, and thinkbroadband answers "too many requests" to that)
+        keep = int(min(MAX_REQUEST, max(MIN_SPLIT_SIZE, per_conn * MIRROR_SECONDS,
+                                        (self.size or 0) // REQUEST_BUDGET)))
         for s in sorted(self.segments, key=lambda x: x.start):
             with s.lock:
                 free_from = max(s.pos, s.inflight_end + 1) if s.active else s.pos
@@ -1480,6 +1497,11 @@ class DownloadTask:
             busy = [(w, w.seg) for w in self._workers if w.alive and w.seg is not None and w.seg.active]
         receiving = sum(1 for w, _ in busy if now - w.last_data < 1.0)
         self._shed_extra_connections(now, target)
+        if self._last_429 and now - self._last_429 < LIMITED_QUIET_S:
+            # The server just said "too many requests": every replacement or reopened
+            # connection is one more request for it to count (seen: more 429s, and the stop
+            # went on). Wait: it sends again on the same connections when its block ends.
+            return
         # When every connection seems stopped, ONE fresh connection tells whether the server
         # stopped (it gets nothing either: then wait) or only some connections are stuck (it
         # gets data at once: rescue goes on, one at a time). Never a crowd of new ones.
@@ -1516,8 +1538,11 @@ class DownloadTask:
             # Rescue only outside an outage and within the maximum + RESCUE_EXTRA (and as many
             # stuck ones still leaving): never more connections than that.
             with self._lock:
-                working = sum(1 for x in self._workers if x.alive and not x.retired)
-                alive = sum(1 for x in self._workers if x.alive)
+                # (+ the fresh ones already promised in this pass: seen, 3 rescued at once with
+                # 8 open -> 11, over the maximum)
+                pending = len(self._rescued)
+                working = sum(1 for x in self._workers if x.alive and not x.retired) + pending
+                alive = sum(1 for x in self._workers if x.alive and not (x.retired and x.reconnect)) + pending
             # A rescuer that never received anything is not rescued in turn (only reconnected,
             # with back-off): otherwise every silent spell added a new generation of connections.
             if (quiet > base and now - w.rescued_at > base and not outage and not w.retired
@@ -1615,13 +1640,15 @@ class DownloadTask:
                                 # Not before the connection's speed is known: tiny first
                                 # requests kept new connections slow (seen: a 5 GB file started
                                 # at ~6 MB/s and took 16 s longer than the browser).
-                                size = min(size, max(MIRROR_REQUEST, int(est * 2)))
-                            if (self._touchy() or self._punishing_host) and not self.mirror:
+                                size = min(size, max(MIRROR_REQUEST, int(est * MIRROR_SECONDS),
+                                                     (self.size or 0) // REQUEST_BUDGET))
+                            if self._few_requests or ((self._touchy() or self._punishing_host) and not self.mirror):
                                 # A server that stopped us: one long request per connection (its
                                 # whole piece), as other download managers do - many requests
                                 # look like a robot to such servers (seen: thinkbroadband).
-                                # (Not in browser-list mode: the browser reads from the start,
-                                # and long requests there made it wait - 23 s -> 33 s simulated.)
+                                # (Not in browser-list mode unless the server said "too many
+                                # requests": the browser reads from the start, and long requests
+                                # there made it wait - 23 s -> 33 s simulated.)
                                 size = seg.end - seg.pos + 1
                             req_end = min(seg.end, seg.pos + size - 1)
                             with seg.lock:
@@ -1746,14 +1773,31 @@ class DownloadTask:
                             w.reset_speed()
                             continue
                         code = exc.code if isinstance(exc, net.HTTPError) else None
-                        self._event(f"erro numa ligação: {f'HTTP {code}' if code else type(exc).__name__}"
-                                    f" {str(exc)[:80]}")
+                        self._event(f"erro numa ligação: {'' if code else type(exc).__name__ + ' '}"
+                                    f"{str(exc)[:80]}"
+                                    + (f" (esperar {exc.retry_after:.0f} s)" if getattr(exc, "retry_after", None) else ""))
                         refused = isinstance(exc, ConnectionRefusedError)
                         if conn.address and not isinstance(exc, net.HTTPError):
                             conn.address = None  # that address failed: let the system choose
                         if is_cert_error(exc):
                             raise RuntimeError(CERT_ERROR) from exc
                         wait = getattr(exc, "retry_after", None)
+                        if code == 429:
+                            self._last_429 = time.monotonic()
+                            # "Too many requests": from now on one long request per connection
+                            # (and remembered for this server). Asking again soon only adds to
+                            # its count: wait longer than for other errors.
+                            if not self._few_requests:
+                                self._few_requests = True
+                                self._event("o servidor conta os pedidos: passa a pedidos longos")
+                                if self.host_memory:
+                                    self.host_memory.note_few_requests(host_of(self._current_url()))
+                            if wait is None:
+                                retries += 1
+                                if retries > MAX_RETRIES and time.monotonic() - (self._last_rx or self._run_started) > NETWORK_PATIENCE:
+                                    raise RuntimeError(f"HTTP 429: {exc.reason}") from exc
+                                self._nap(min(10.0 * retries, 60.0))
+                                continue
                         if code in TRANSIENT_CODES and wait is not None:
                             # The server said when to come back: do exactly that, without using
                             # up a retry or concluding it limits connections.

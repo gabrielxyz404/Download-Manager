@@ -1,5 +1,15 @@
 # Novidades do Flow Downloads
 
+## 0.9.17
+
+**Thinkbroadband: a causa real, encontrada com o "Copiar diagnóstico"**
+- O servidor não conta as ligações, conta os **pedidos**. Ao fim de ~120 pedidos responde "429 Too Many Requests" e deixa de enviar durante ~75 s. A app fazia um pedido a cada ~2 s por ligação: 257 pedidos em 3 GB, duas paragens longas.
+- Agora cada pedido traz muito mais dados (~15 s por ligação, até 256 MB), como fazem os outros gestores de downloads. No simulador que imita esse servidor (3 GB a 62,5 MB/s): de 139 s, com uma paragem de 75 s, para 48,5 s sem paragens (o máximo possível é 48 s). Com "Mostrar também na lista do navegador" ligado: de 155 s para 48,8 s; 5 GB em 82,6 s (máximo possível: 82 s).
+- Se um servidor responder 429 na mesma, a app passa a pedir o pedaço inteiro de cada ligação, não abre nem reabre ligações enquanto o servidor está bloqueado (cada uma era mais um pedido) e espera mais antes de tentar de novo. Lembra-se desse servidor para os downloads seguintes.
+- Corrigido: ao substituir várias ligações presas ao mesmo tempo, a app chegava a 11 ligações com o máximo em 8.
+- O diagnóstico mostra também se o download estava na lista do navegador.
+- Testes novos: servidor que responde 429 ao passar de N pedidos (com e sem a lista do navegador), e memória do servidor.
+
 ## 0.9.16
 
 **Thinkbroadband (e servidores parecidos): parava, voltava e parava outra vez**
