@@ -155,7 +155,7 @@ class EngineTests(unittest.TestCase):
             task._save_state = real_save
             task.start()  # ...and the click is not lost
             task.wait(30)
-            self.assertEqual(task.status, Status.COMPLETED, task.error)
+            self.assertEqual(task.status, Status.COMPLETED, task.diagnostic())
             self.assertFileOk(task.path)
         finally:
             Handler.delay = 0.0

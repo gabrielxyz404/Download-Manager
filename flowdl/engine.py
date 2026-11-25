@@ -771,6 +771,10 @@ class DownloadTask:
                     self._discard_progress()
                     self.restarted_changed = True
         except DiskProblem as exc:
+            import traceback
+            where = "; ".join(f"{os.path.basename(f.filename)}:{f.lineno} {f.name}"
+                              for f in traceback.extract_tb(exc.__traceback__)[-3:])
+            self._event(f"disco: {exc.__cause__!r} em {where}")
             self.error = str(exc)
             self.status = Status.PAUSED  # nothing lost: Resume once there is room / a folder
         except Exception as exc:  # noqa: BLE001 - report any failure to the UI
@@ -1948,6 +1952,7 @@ class DownloadTask:
         except FileChanged:
             self._file_changed = True  # the download loop starts over with the new version
         except DiskProblem as exc:
+            self._event(f"disco (ligação): {exc.__cause__!r}")
             self._disk_problem = exc
         except _Finished:
             pass
