@@ -26,7 +26,7 @@ jobs:
         run: python -m pip install pyinstaller yt-dlp psutil
 
       - name: Testes em Windows (motor, serviço, navegador, arranque, interface)
-        run: python -m unittest -v tests.test_engine tests.test_features tests.test_service tests.test_mirror tests.test_video tests.test_autostart tests.test_security tests.test_versions tests.test_network_errors tests.test_categories tests.test_capture tests.test_system tests.test_after tests.test_nativehost tests.test_tray tests.test_updater tests.test_robustness tests.test_gui
+        run: python -m unittest -v tests.test_engine tests.test_features tests.test_service tests.test_mirror tests.test_video tests.test_autostart tests.test_security tests.test_versions tests.test_network_errors tests.test_categories tests.test_capture tests.test_system tests.test_after tests.test_nativehost tests.test_tray tests.test_updater tests.test_robustness tests.test_queues tests.test_gui
 
       - name: Gerar Flow Downloads.exe
         run: >

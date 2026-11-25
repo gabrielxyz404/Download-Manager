@@ -1687,7 +1687,7 @@ class BadServer(BaseHTTPRequestHandler):
                 return
             self.wfile.write(body)
             return
-        if cls.mode == "new_version" and cls.hits > 3:
+        if cls.mode == "new_version" and cls.hits > 1:  # (from the second request on)
             data = cls.data2  # the file was replaced on the server
         a = int(m.group(1))
         b = min(int(m.group(2)) if m.group(2) else len(data) - 1, len(data) - 1)
@@ -1777,6 +1777,7 @@ class BadServerTests(unittest.TestCase):
         self.assertEqual(task.status, Status.COMPLETED, task.error)
         with open(task.path, "rb") as f:
             self.assertEqual(f.read(), BadServer.data2)
+        self.assertTrue(task.restarted_changed)
 
     def test_answer_without_the_rest_does_not_flood_the_server(self):
         """Answers shorter than they say: it asked again thousands of times a second."""
@@ -1925,3 +1926,85 @@ class FormDownloadTests(unittest.TestCase):
         task.status = Status.COMPLETED
         self.assertIsNone(task.to_dict()["post"])
         self.assertNotIn("report", task.diagnostic())
+
+
+class VersionlessServer(BaseHTTPRequestHandler):
+    """Ranges, but no ETag / Last-Modified (so no If-Range), and the file can be replaced by
+    another of the same size between two requests."""
+    protocol_version = "HTTP/1.1"
+    data = b""
+    delay = 0.0
+
+    def log_message(self, *a):
+        pass
+
+    def do_GET(self):
+        data = VersionlessServer.data
+        m = re.match(r"bytes=(\d+)-(\d*)", self.headers.get("Range", ""))
+        a = int(m.group(1)) if m else 0
+        b = min(int(m.group(2)) if m and m.group(2) else len(data) - 1, len(data) - 1)
+        self.send_response(206 if m else 200)
+        if m:
+            self.send_header("Content-Range", f"bytes {a}-{b}/{len(data)}")
+        self.send_header("Accept-Ranges", "bytes")
+        self.send_header("Content-Length", str(b - a + 1))
+        self.end_headers()
+        try:
+            for i in range(a, b + 1, 65536):
+                self.wfile.write(data[i:min(i + 65536, b + 1)])
+                if VersionlessServer.delay:
+                    time.sleep(VersionlessServer.delay)
+        except OSError:
+            pass
+
+
+class SeamTests(unittest.TestCase):
+    """Each request starts a few bytes before where it continues and compares them with what is
+    stored: a file replaced on the server is noticed even without ETag / Last-Modified."""
+
+    def setUp(self):
+        self.old, self.new = DATA * 2, bytes(b ^ 0x5A for b in DATA * 2)
+        VersionlessServer.data, VersionlessServer.delay = self.old, 0.1
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), VersionlessServer)
+        self.server.daemon_threads = True
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.addCleanup(self.server.shutdown)
+        self.url = f"http://127.0.0.1:{self.server.server_address[1]}/v.bin"
+
+    def paused_half_way(self):
+        task = DownloadTask(self.url, self.tmp.name, 4)
+        task.start()
+        for _ in range(200):
+            if task.downloaded > len(self.old) // 4:
+                break
+            time.sleep(0.05)
+        task.pause()
+        task.wait(10)
+        self.assertEqual(task.status, Status.PAUSED)
+        self.assertIsNone(task.validator)  # (nothing for If-Range)
+        VersionlessServer.delay = 0.0
+        return task
+
+    def resume(self):
+        again = DownloadTask(self.url, self.tmp.name, 4)
+        again.start()
+        again.wait(30)
+        self.assertEqual(again.status, Status.COMPLETED, again.error)
+        with open(again.path, "rb") as f:
+            return again, f.read()
+
+    def test_same_file_resumes_and_the_joins_are_checked(self):
+        self.paused_half_way()
+        again, data = self.resume()
+        self.assertEqual(data, self.old)
+        self.assertGreater(again.seams_checked, 0)
+
+    def test_file_replaced_while_paused_starts_over(self):
+        """Before: the new file's second half was joined to the old one's first half."""
+        self.paused_half_way()
+        VersionlessServer.data = self.new
+        again, data = self.resume()
+        self.assertEqual(data, self.new)  # whole, and only the new version
+        self.assertTrue(again.restarted_changed)

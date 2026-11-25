@@ -23,7 +23,7 @@ from .limiter import GLOBAL_LIMITER
 from .manager import config_dir
 from .paths import FROZEN, install_dir
 from .scheduler import ACTIONS, shutdown_computer, sleep_computer
-from .settings import DEFAULT_COLUMNS, OLD_DEFAULT_COLUMNS, Settings  # noqa: F401 (re-exported)
+from .settings import DEFAULT_COLUMNS, OLD_DEFAULT_COLUMNS, Settings, clean_queues  # noqa: F401 (re-exported)
 from .video import VideoTask
 
 REFRESH_MS = 500
@@ -46,6 +46,7 @@ COLUMNS = {
     "category": ("Categoria", 95),
     "added": ("Adicionado", 115),
     "url": ("Endereço", 200),
+    "queue": ("Fila", 95),
 }
 
 # Looks of the app: black & white only (light / dark). Colours only, no images or extra library,
@@ -242,11 +243,13 @@ class AddDialog(tk.Toplevel):
 class SchedulerDialog(tk.Toplevel):
     DAYS = ["Seg", "Ter", "Qua", "Qui", "Sex", "Sáb", "Dom"]
 
-    def __init__(self, app: "App"):
+    def __init__(self, app: "App", scheduler=None, queue_name: str | None = None, on_save=None):
         super().__init__(app)
         self.app = app
-        s = app.scheduler
-        self.title("Agendador")
+        # (another queue's schedule: no "when everything finishes" - that one is for the app)
+        self.scheduler, self.on_save = scheduler or app.scheduler, on_save
+        s = self.scheduler
+        self.title(f"Agendador: {queue_name}" if queue_name else "Agendador")
         app.attach_dialog(self)
         self.resizable(False, False)
         frm = ttk.Frame(self, padding=14)
@@ -273,10 +276,11 @@ class SchedulerDialog(tk.Toplevel):
         for i, name in enumerate(self.DAYS):
             ttk.Checkbutton(days, text=name, variable=self.days[i]).pack(side="left", padx=2)
 
-        ttk.Label(frm, text="Quando todos os downloads terminarem:").grid(row=3, column=0, columnspan=2,
-                                                                          sticky="w", pady=(8, 2))
-        ttk.Combobox(frm, textvariable=self.action, values=list(ACTIONS.values()), state="readonly",
-                     width=26).grid(row=4, column=0, columnspan=2, sticky="w")
+        if on_save is None:
+            ttk.Label(frm, text="Quando todos os downloads terminarem:").grid(row=3, column=0, columnspan=2,
+                                                                              sticky="w", pady=(8, 2))
+            ttk.Combobox(frm, textvariable=self.action, values=list(ACTIONS.values()), state="readonly",
+                         width=26).grid(row=4, column=0, columnspan=2, sticky="w")
 
         btns = ttk.Frame(frm)
         btns.grid(row=5, column=0, columnspan=3, sticky="e", pady=(14, 0))
@@ -299,15 +303,146 @@ class SchedulerDialog(tk.Toplevel):
         if (self.start_on.get() or self.stop_on.get()) and not any(v.get() for v in self.days):
             messagebox.showwarning("Agendador", "Escolha pelo menos um dia.", parent=self)
             return
-        s = self.app.scheduler
+        s = self.scheduler
         s.start_enabled, s.start_time = self.start_on.get(), self.start_at.get().strip()
         s.stop_enabled, s.stop_time = self.stop_on.get(), self.stop_at.get().strip()
         s.days = [i for i, v in enumerate(self.days) if v.get()]
+        if self.on_save is not None:
+            self.on_save(s)
+            self.app.status_var.set("Agendamento salvo")
+            self.destroy()
+            return
         s.on_complete = next((k for k, v in ACTIONS.items() if v == self.action.get()), "nothing")
         self.app.settings.scheduler = s.to_dict()
         self.app.settings.save()
         self.app.status_var.set("Agendamento salvo")
         self.destroy()
+
+
+class QueuesDialog(tk.Toplevel):
+    """Queues, like other download managers': each with how many downloads at a time and its
+    own schedule. "Principal" always exists (new downloads go there)."""
+
+    def __init__(self, app: "App"):
+        super().__init__(app)
+        self.app = app
+        self.title("Filas")
+        app.attach_dialog(self)
+        self.resizable(False, False)
+        frm = ttk.Frame(self, padding=14)
+        frm.pack(fill="both", expand=True)
+        self.tree = ttk.Treeview(frm, columns=("name", "limit", "when", "count"), show="headings",
+                                 selectmode="browse", height=7)
+        for col, text, width in (("name", "Fila", 150), ("limit", "Ao mesmo tempo", 110),
+                                 ("when", "Horário", 200), ("count", "Downloads", 80)):
+            self.tree.heading(col, text=text)
+            self.tree.column(col, width=width, anchor="w")
+        self.tree.grid(row=0, column=0, rowspan=7, sticky="nsew")
+        for i, (text, cmd) in enumerate((("Nova fila...", self._new), ("Renomear...", self._rename),
+                                         ("Ao mesmo tempo...", self._limit), ("Horário...", self._schedule),
+                                         ("Apagar", self._delete), ("Fechar", self.destroy))):
+            ttk.Button(frm, text=text, command=cmd, width=18).grid(row=i, column=1, sticky="ew", padx=(10, 0), pady=2)
+        self._fill()
+
+    @staticmethod
+    def _when(s) -> str:
+        parts = ([f"começa {s.start_time}"] if s.start_enabled else []) + \
+                ([f"para {s.stop_time}"] if s.stop_enabled else [])
+        return ", ".join(parts) or "sem horário"
+
+    def _fill(self, select: str | None = None) -> None:
+        from .manager import MAIN_QUEUE
+        app, svc = self.app, self.app.service
+        self.tree.delete(*self.tree.get_children())
+        count = lambda q: sum(1 for t in app.manager.tasks if app.manager.queue_of(t) == q)
+        self.tree.insert("", "end", iid=MAIN_QUEUE, values=("Principal", app.manager.max_active,
+                                                             self._when(svc.scheduler), count(MAIN_QUEUE)))
+        for q in app.settings.queues:
+            sch = svc.queue_schedulers.get(q["id"])
+            self.tree.insert("", "end", iid=q["id"], values=(q["name"], q["max_active"],
+                                                             self._when(sch) if sch else "", count(q["id"])))
+        self.tree.selection_set(select or MAIN_QUEUE)
+
+    def _chosen(self) -> str:
+        sel = self.tree.selection()
+        return sel[0] if sel else "main"
+
+    def _queue(self, qid: str) -> dict | None:
+        return next((q for q in self.app.settings.queues if q["id"] == qid), None)
+
+    def _apply(self, select: str | None = None) -> None:
+        app = self.app
+        app.service.save_queue_schedules()
+        app.settings.queues = clean_queues(app.settings.queues)
+        app.settings.save()
+        app.service.apply_queues()
+        app._refresh(schedule=False)
+        self._fill(select)
+
+    def _new(self) -> None:
+        name = simpledialog.askstring("Nova fila", "Nome da fila (ex.: Noturna):", parent=self)
+        if not name or not name.strip():
+            return
+        import uuid
+        qid = "q" + uuid.uuid4().hex[:8]
+        self.app.settings.queues.append({"id": qid, "name": name.strip()[:40], "max_active": 2, "scheduler": {}})
+        self._apply(qid)
+
+    def _rename(self) -> None:
+        q = self._queue(self._chosen())
+        if q is None:
+            messagebox.showinfo("Filas", "A fila Principal não muda de nome.", parent=self)
+            return
+        name = simpledialog.askstring("Renomear", "Novo nome:", initialvalue=q["name"], parent=self)
+        if name and name.strip():
+            q["name"] = name.strip()[:40]
+            self._apply(q["id"])
+
+    def _limit(self) -> None:
+        qid = self._chosen()
+        q = self._queue(qid)
+        if q is None:
+            self.app._max_active()
+            self._fill(qid)
+            return
+        n = simpledialog.askinteger("Ao mesmo tempo", f"Quantos downloads da fila {q['name']} ao mesmo tempo?",
+                                    initialvalue=q["max_active"], minvalue=1, maxvalue=20, parent=self)
+        if n:
+            q["max_active"] = n
+            self._apply(qid)
+
+    def _schedule(self) -> None:
+        qid = self._chosen()
+        q = self._queue(qid)
+        if q is None:
+            dlg = SchedulerDialog(self.app)
+        else:
+            from .scheduler import Scheduler
+            sch = self.app.service.queue_schedulers.get(qid) or Scheduler(q.get("scheduler"))
+
+            def saved(s):
+                q["scheduler"] = s.to_dict()
+                self.app.service.queue_schedulers[qid] = s
+                self._apply(qid)
+            dlg = SchedulerDialog(self.app, sch, q["name"], on_save=saved)
+        dlg.bind("<Destroy>", lambda e: e.widget is dlg and self.winfo_exists() and self._fill(qid), add="+")
+
+    def _delete(self) -> None:
+        qid = self._chosen()
+        q = self._queue(qid)
+        if q is None:
+            messagebox.showinfo("Filas", "A fila Principal não pode ser apagada.", parent=self)
+            return
+        if not messagebox.askyesno("Apagar fila", f"Apagar a fila {q['name']}? Os seus downloads "
+                                   "passam para a Principal.", parent=self):
+            return
+        from .manager import MAIN_QUEUE
+        for t in list(self.app.manager.tasks):
+            if getattr(t, "queue_id", MAIN_QUEUE) == qid:
+                t.queue_id = MAIN_QUEUE
+        self.app.settings.queues = [x for x in self.app.settings.queues if x["id"] != qid]
+        self.app.service.queue_schedulers.pop(qid, None)
+        self._apply()
 
 
 class GrabberDialog(tk.Toplevel):
@@ -1453,6 +1588,8 @@ class SettingsDialog(tk.Toplevel):
             self._row("Categorias, regras e pastas", "Editar...", lambda: CategoriesDialog(app))
             self._head("Fila")
             self._row(f"Downloads ao mesmo tempo: {app.manager.max_active}", "Alterar...", app._max_active)
+            self._row(f"Filas, cada uma com o seu limite e horário ({1 + len(st.queues)})", "Editar...",
+                      lambda: QueuesDialog(app))
             self._row(f"Ligações por download (novos downloads): {st.connections}", "Alterar...",
                       app._connections)
             self._check("Retomar downloads ao abrir o Flow Downloads", app.resume_var,
@@ -1730,6 +1867,7 @@ class App(tk.Tk):
         gear.add_cascade(label="Colunas", menu=cols)
         gear.add_command(label="Limitador de velocidade...", command=self._global_limit)
         gear.add_command(label="Agendador...", command=lambda: SchedulerDialog(self))
+        gear.add_command(label="Filas...", command=lambda: QueuesDialog(self))
         gear.add_command(label="Limites por site...", command=lambda: HostLimitsDialog(self))
         gear.add_separator()
         gear.add_command(label="Procurar atualizações...", command=self._check_updates)
@@ -1846,6 +1984,8 @@ class App(tk.Tk):
         self.ctx.add_command(label="Retomar", command=self._resume)
         self.ctx.add_command(label="Pausar", command=self._pause)
         self.ctx.add_command(label="Limitar velocidade...", command=self._task_limit)
+        self.queue_menu = tk.Menu(self.ctx, tearoff=False)  # (filled when the menu opens)
+        self.ctx.add_cascade(label="Mover para fila", menu=self.queue_menu)
         self.ctx.add_command(label="Copiar endereço", command=self._copy_url)
         self.ctx.add_command(label="Copiar diagnóstico", command=self._copy_diagnostic)
         self.ctx.add_command(label="Verificar checksum...", command=self._verify_checksum)
@@ -2401,11 +2541,25 @@ class App(tk.Tk):
             self._last_clip = text
             self.status_var.set("Diagnóstico copiado: cola-o numa mensagem")
 
+    def _fill_queue_menu(self) -> None:
+        from .manager import MAIN_QUEUE
+        self.queue_menu.delete(0, "end")
+        for qid, name in [(MAIN_QUEUE, "Principal"), *((q["id"], q["name"]) for q in self.settings.queues)]:
+            self.queue_menu.add_command(label=name, command=lambda q=qid: self._move_to_queue(q))
+        self.queue_menu.add_separator()
+        self.queue_menu.add_command(label="Gerir filas...", command=lambda: QueuesDialog(self))
+
+    def _move_to_queue(self, queue: str) -> None:
+        for t in self._selected():
+            self.manager.move_to_queue(t, queue)
+        self._refresh(schedule=False)
+
     def _context_menu(self, event) -> None:
         row = self.tree.identify_row(event.y)
         if row:
             if row not in self.tree.selection():
                 self.tree.selection_set(row)
+            self._fill_queue_menu()
             self.ctx.tk_popup(event.x_root, event.y_root)
 
     def _on_filter(self, _event=None) -> None:
@@ -2573,6 +2727,10 @@ class App(tk.Tk):
         if getattr(self, "pill_buttons", None) and self.settings.filter_style == "pills":
             self._build_pills()
 
+    def _queue_name(self, t) -> str:
+        q = self.manager.queue_of(t)
+        return next((x["name"] for x in self.settings.queues if x["id"] == q), "Principal")
+
     def _category(self, t) -> str:
         if getattr(t, "kind", "") == "video":
             return t.category
@@ -2612,6 +2770,7 @@ class App(tk.Tk):
             self._category(t),
             time.strftime("%d/%m/%Y %H:%M", time.localtime(t.added_at)),
             t.url,
+            self._queue_name(t),
         )
 
     def _refresh(self, schedule: bool = True) -> None:

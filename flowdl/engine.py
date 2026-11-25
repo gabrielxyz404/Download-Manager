@@ -42,6 +42,10 @@ USER_AGENT = (
     "(KHTML, like Gecko) Chrome/120.0 Safari/537.36"
 )
 MB = 1024 * 1024
+# Each request starts this many bytes before where it continues, and those bytes must match the
+# ones already stored: the file was not replaced on the server meanwhile. (If-Range does this
+# only when the server names its versions - ETag / Last-Modified; many do not.)
+SEAM_BYTES = 64
 CHUNK_SIZE = 256 * 1024
 MIN_CHUNK = 64 * 1024      # each connection reads pieces of ~0.25 s of data...
 MAX_CHUNK = 1024 * 1024    # ...between 64 KB and 1 MB (few, big pieces = little processor use)
@@ -460,6 +464,7 @@ class DownloadTask:
         self.server_limit: int | None = None  # connections the server accepts, when it refuses more
         self.connection_note = ""  # shown in the list: speed test / limit found
         self.reconnections = 0  # slow connections replaced
+        self.seams_checked = 0  # joins verified against the bytes already stored (see _check_seam)
         # Diagnostic ("Copiar diagnóstico"): what happened, second by second, in the last run.
         self.requests = 0  # range requests sent (this run)
         self._diag: deque = deque(maxlen=900)  # one row per second (the last 15 min)
@@ -790,6 +795,41 @@ class DownloadTask:
             self._save_state()
             if self.on_done:
                 self.on_done(self)
+
+    def _stored_before(self, seg: "Segment") -> int:
+        """How many bytes right before ``seg.pos`` are already stored (at most SEAM_BYTES):
+        its own piece, or the piece before it if that one is complete."""
+        pos = seg.pos
+        if pos <= 0:
+            return 0
+        if pos > seg.start:
+            return min(SEAM_BYTES, pos - seg.start)
+        with self._lock:
+            prev = next((s for s in self.segments if s.end == pos - 1), None)
+        if prev is not None and prev.pos > prev.end:
+            return min(SEAM_BYTES, prev.end - prev.start + 1)
+        return 0
+
+    def _check_seam(self, resp, at: int, n: int) -> None:
+        """The first ``n`` bytes of this answer are ones we already stored at ``at``: they must
+        be the same, or the file changed on the server - then start over with the new version
+        instead of joining two versions into one file."""
+        got = b""
+        while len(got) < n:
+            chunk = resp.read1(n - len(got))
+            if not chunk:
+                raise http.client.IncompleteRead(got, n - len(got))
+            got += chunk
+        with self._fh_lock:
+            if self._fh.closed:
+                raise _Finished()
+            self._fh.seek(at)
+            have = self._fh.read(n)
+        self.seams_checked += 1
+        if have != got:
+            self._event(f"junção aos {at // MB} MB: os bytes não conferem - o ficheiro mudou no servidor")
+            self._file_changed = True
+            raise FileChanged()
 
     def _event(self, text: str) -> None:
         t = time.monotonic() - self._run_started if self._run_started else 0.0
@@ -1744,7 +1784,8 @@ class DownloadTask:
                             w.answering = False
                             sent = w.last_data = time.monotonic()  # waiting for the answer starts now
                             self.requests += 1
-                            resp = conn.get(req_url, hdrs, seg.pos, req_end, cookies=self.cookies)
+                            back = self._stored_before(seg)  # (a few bytes we have: see _check_seam)
+                            resp = conn.get(req_url, hdrs, seg.pos - back, req_end, cookies=self.cookies)
                             w.answering = True
                             w.last_data = now_ = time.monotonic()
                             # How long this server takes to start answering (slow ones exist):
@@ -1767,9 +1808,11 @@ class DownloadTask:
                             if m and m.group(3) != "*" and self.size and int(m.group(3)) != self.size:
                                 self._file_changed = True
                                 raise FileChanged()
-                            if not m or int(m.group(1)) != seg.pos:
+                            if not m or int(m.group(1)) != seg.pos - back:
                                 raise http.client.HTTPException(
                                     f"o servidor enviou outra parte do ficheiro ({resp.headers.get('Content-Range')!r})")
+                            if back:
+                                self._check_seam(resp, seg.pos - back, back)
                             self._final_url = resp.url
                         got_this = 0  # bytes this answer brought
                         while not self._stop.is_set():

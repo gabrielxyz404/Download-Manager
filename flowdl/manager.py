@@ -11,9 +11,19 @@ from .engine import DownloadTask, Status, sanitize_filename
 from .paths import config_dir, default_download_dir  # noqa: F401 (re-exported)
 
 
+MAIN_QUEUE = "main"  # "Principal": every download is in it unless moved to another queue
+
+
 def task_from_dict(d: dict):
     if not isinstance(d, dict):
         raise TypeError("not a download")
+    task = _task_from_dict(d)
+    queue = d.get("queue")
+    task.queue_id = queue if isinstance(queue, str) and queue else MAIN_QUEUE
+    return task
+
+
+def _task_from_dict(d: dict):
     if d.get("kind") == "video":
         from .video import VideoTask
         return VideoTask.from_dict(d)
@@ -23,7 +33,10 @@ def task_from_dict(d: dict):
 class DownloadManager:
     def __init__(self, max_active: int = 3, db_path: str | Path | None = None,
                  auto_resume: bool = False):
-        self.max_active = max_active
+        self.max_active = max_active  # (the main queue's limit)
+        # Other queues (like other download managers' "queues"): id -> downloads at a time.
+        # A download in a queue that no longer exists counts as the main queue's.
+        self.queue_limits: dict[str, int] = {}
         self.db_path = Path(db_path) if db_path else config_dir() / "downloads.json"
         self.tasks: list[DownloadTask] = []
         self._lock = threading.RLock()
@@ -99,7 +112,7 @@ class DownloadManager:
 
     def _save(self) -> None:
         with self._lock:
-            items = [t.to_dict() for t in self.tasks]
+            items = [{**t.to_dict(), "queue": self.queue_of(t)} for t in self.tasks]
             for d in items:
                 if d["id"] in self._resume_ids:
                     d["status"] = Status.QUEUED  # was running when the app was closed
@@ -208,11 +221,31 @@ class DownloadManager:
                     pass
         self.save()
 
-    def resume_all(self) -> None:
+    def queue_of(self, task) -> str:
+        q = getattr(task, "queue_id", MAIN_QUEUE)
+        return q if q in self.queue_limits else MAIN_QUEUE
+
+    def limit_of(self, queue: str) -> int:
+        n = self.max_active if queue == MAIN_QUEUE else self.queue_limits.get(queue, self.max_active)
+        return max(1, int(n or 1))
+
+    def move_to_queue(self, task, queue: str) -> None:
+        task.queue_id = queue if queue in self.queue_limits else MAIN_QUEUE
+        self._signature = ()  # (saved at the next tick)
+        self.tick()
+
+    def resume_all(self, queue: str | None = None) -> None:
+        """Queue again every paused / failed download (of one queue only, if given)."""
         for t in list(self.tasks):
-            if t.status in (Status.PAUSED, Status.ERROR):
+            if t.status in (Status.PAUSED, Status.ERROR) and (queue is None or self.queue_of(t) == queue):
                 t.status = Status.QUEUED
         self.tick()
+
+    def pause_queue(self, queue: str) -> None:
+        for t in list(self.tasks):
+            if self.queue_of(t) == queue:
+                t.pause()
+        self.save()
 
     def all_finished(self) -> bool:
         return bool(self.tasks) and not any(
@@ -234,13 +267,17 @@ class DownloadManager:
     def tick(self) -> None:
         """Start queued downloads while there are free slots. Call periodically."""
         with self._lock:
-            running = sum(1 for t in self.tasks if t.is_running())
+            running: dict[str, int] = {}
             for t in self.tasks:
-                if running >= max(1, int(self.max_active or 1)):
-                    break
-                if t.status == Status.QUEUED and not t.is_running():
+                if t.is_running():
+                    q = self.queue_of(t)
+                    running[q] = running.get(q, 0) + 1
+            for t in self.tasks:  # each queue up to its own limit
+                q = self.queue_of(t)
+                if t.status == Status.QUEUED and not t.is_running() and running.get(q, 0) < self.limit_of(q):
                     t.start()
-                    running += 1
+                    running[q] = running.get(q, 0) + 1
+            running = sum(running.values())
             if running and self.keep_awake:
                 self._awake.poke()
             signature = tuple((t.id, t.status, t.path) for t in self.tasks)

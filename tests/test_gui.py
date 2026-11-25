@@ -233,6 +233,50 @@ class GuiTests(unittest.TestCase):
             app._global_limit()
         self.assertEqual(GLOBAL_LIMITER.rate, 0)
 
+    def test_queues_window_and_moving_downloads(self):
+        """Filas: a new queue with its own limit and schedule; downloads moved to it with the
+        right-click menu; deleting it sends them back to Principal."""
+        app = self.open_app()
+        app.add_download(self.base + "/q.bin", self.dl, 2, start=False)
+        task = self.svc.manager.tasks[0]
+        try:
+            dlg = self.gui.QueuesDialog(app)
+            with mock.patch.object(self.gui.simpledialog, "askstring", return_value="Noturna"):
+                dlg._new()
+            q = self.svc.settings.queues[0]
+            self.assertEqual(q["name"], "Noturna")
+            self.assertEqual(self.svc.manager.queue_limits, {q["id"]: 2})
+            with mock.patch.object(self.gui.simpledialog, "askinteger", return_value=1):
+                dlg._limit()
+            self.assertEqual(self.svc.manager.queue_limits[q["id"]], 1)
+            dlg._schedule()
+            pump(app, 0.3)
+            sched = next(w for w in app.winfo_children() if isinstance(w, self.gui.SchedulerDialog))
+            sched.start_on.set(True)
+            sched.start_at.set("03:15")
+            sched._save()
+            pump(app, 0.3)
+            self.assertTrue(self.svc.queue_schedulers[q["id"]].start_enabled)
+            self.assertEqual(self.svc.settings.queues[0]["scheduler"]["start_time"], "03:15")
+            self.assertFalse(self.svc.scheduler.start_enabled)  # (Principal's schedule untouched)
+            self.select(task)
+            app._fill_queue_menu()
+            labels = [app.queue_menu.entrycget(i, "label") for i in range(app.queue_menu.index("end") + 1)
+                      if app.queue_menu.type(i) == "command"]
+            self.assertEqual(labels, ["Principal", "Noturna", "Gerir filas..."])
+            app._move_to_queue(q["id"])
+            self.assertEqual(self.svc.manager.queue_of(task), q["id"])
+            self.assertEqual(app._queue_name(task), "Noturna")
+            dlg.tree.selection_set(q["id"])
+            with mock.patch.object(self.gui.messagebox, "askyesno", return_value=True):
+                dlg._delete()
+            self.assertEqual(self.svc.settings.queues, [])
+            self.assertEqual(app._queue_name(task), "Principal")
+            dlg.destroy()
+        finally:
+            self.svc.settings.queues = []
+            self.svc.apply_queues()
+
     def test_connections_per_download_setting(self):
         """Configurações -> Downloads: the maximum for new downloads (before, only the "+"
         window had it), and the "+" window starts from it."""

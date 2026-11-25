@@ -45,6 +45,21 @@ def keep_damaged(path) -> None:
         pass
 
 
+def clean_queues(queues) -> list:
+    """Only well-formed queues (a hand-edited file must not break the app), names unique."""
+    out, ids = [], {"main"}
+    for q in queues if isinstance(queues, list) else []:
+        if not (isinstance(q, dict) and isinstance(q.get("id"), str) and q["id"] and q["id"] not in ids
+                and isinstance(q.get("name"), str) and q["name"].strip()):
+            continue
+        n = q.get("max_active")
+        n = n if isinstance(n, int) and not isinstance(n, bool) else 2
+        ids.add(q["id"])
+        out.append({"id": q["id"], "name": q["name"].strip()[:40], "max_active": max(1, min(20, n)),
+                    "scheduler": q["scheduler"] if isinstance(q.get("scheduler"), dict) else {}})
+    return out
+
+
 class Settings:
     def __init__(self) -> None:
         self.path = config_dir() / "settings.json"
@@ -74,7 +89,10 @@ class Settings:
         self.auto_resume = True
         self.run_in_background = True
         self.background_hint_shown = False
-        self.scheduler: dict = {}
+        self.scheduler: dict = {}  # (the main queue's schedule)
+        # Other queues, each with its own limit and schedule:
+        # [{"id": "q1", "name": "Noturna", "max_active": 2, "scheduler": {...}}]
+        self.queues: list = []
         # Browser downloads the app takes over: these types (like IDM), or all of them; never
         # from these sites.
         from .capture import DEFAULT_TYPES
@@ -131,6 +149,7 @@ class Settings:
         self.connections = max(1, min(32, int(self.connections)))
         self.max_active = max(1, min(20, int(self.max_active)))
         self.global_limit_kb = max(0, int(self.global_limit_kb))
+        self.queues = clean_queues(self.queues)
 
     def category_rules(self) -> list:
         from .categories import default_rules

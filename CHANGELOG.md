@@ -1,5 +1,19 @@
 # Novidades do Flow Downloads
 
+## 0.9.20
+
+**Novo: várias filas, cada uma com o seu limite e o seu horário** (como no IDM). Exemplo: uma fila "Noturna" com 2 downloads de cada vez, das 2h às 7h, e a "Principal" sem horário.
+- ⚙ → Filas, ou Configurações → Downloads → Filas: criar, renomear, apagar, "ao mesmo tempo" e horário de cada fila.
+- Botão direito num download → **Mover para fila**. Os downloads de uma fila apagada voltam para a Principal.
+- Cada fila só começa e para os seus próprios downloads. A ação "quando todos os downloads terminarem" continua no Agendador da Principal.
+- Há também uma coluna **Fila** na lista: para a mostrar, ⚙ → Colunas → Fila.
+
+**Novo: verificação das junções** (ideia vista no IDM, escrita de raiz para o Flow).
+- Cada pedido começa 64 bytes antes do ponto onde continua e confirma que esses bytes são iguais aos que já estão guardados.
+- Se o ficheiro foi trocado no servidor (por exemplo, enquanto estava em pausa), a app recomeça com a versão nova em vez de juntar as duas.
+- Antes isto só era garantido quando o servidor dava a versão (ETag/Last-Modified). Num teste sem essa informação, a versão antiga juntava as duas versões num só ficheiro.
+- Na bateria de 86 servidores problemáticos: 74 passam (eram 73).
+
 ## 0.9.19
 
 **Novo: downloads gerados por formulários** (exportações, relatórios, alguns sites de alojamento de ficheiros). Antes ficavam sempre com o navegador.

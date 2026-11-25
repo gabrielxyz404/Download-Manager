@@ -82,7 +82,8 @@ class Service:
         self._manager = None
         if manager is not None:
             self._attach(manager)
-        self.scheduler = Scheduler(self.settings.scheduler)
+        self.scheduler = Scheduler(self.settings.scheduler)  # (the main queue's)
+        self.apply_queues()  # the other queues' (limits and schedules)
         GLOBAL_LIMITER.rate = self.settings.global_limit_kb * 1024 if getattr(self.settings, "limit_on", True) else 0
         self.tray = None  # icon next to the Windows clock (see start_tray)
         self.port = port
@@ -115,6 +116,21 @@ class Service:
         manager.host_limits = dict(getattr(self.settings, "host_limits", {}) or {})
         manager.mark_internet = getattr(self.settings, "mark_internet", True)
         self.apply_category_settings()
+        self.apply_queues()
+
+    def apply_queues(self) -> None:
+        """The other queues, from the settings: their limits (manager) and schedules."""
+        queues = getattr(self.settings, "queues", []) or []
+        if self._manager is not None:
+            self._manager.queue_limits = {q["id"]: q["max_active"] for q in queues}
+            self._manager.tick()
+        old = getattr(self, "queue_schedulers", {})
+        self.queue_schedulers = {}
+        for q in queues:
+            sch = Scheduler(q.get("scheduler"))
+            if q["id"] in old:
+                sch._fired = old[q["id"]]._fired  # (an event already fired today stays fired)
+            self.queue_schedulers[q["id"]] = sch
 
     def apply_category_settings(self) -> None:
         """Category folders on/off and their rules, from the settings."""
@@ -457,8 +473,8 @@ class Service:
         t.start()
 
     def _scheduler_enabled(self) -> bool:
-        s = self.scheduler
-        return s.start_enabled or s.stop_enabled
+        return any(s.start_enabled or s.stop_enabled
+                   for s in [self.scheduler, *getattr(self, "queue_schedulers", {}).values()])
 
     def check_scheduler(self) -> None:
         import time
@@ -466,12 +482,14 @@ class Service:
         if not self._scheduler_enabled() or now < self._next_schedule_check:
             return
         self._next_schedule_check = now + SCHEDULER_CHECK_S
-        for event in self.scheduler.due():
-            if event == "start":
-                self.manager.resume_all()
-            elif event == "stop" and self._manager is not None:
-                for t in self._manager.tasks:
-                    t.pause()
+        from .manager import MAIN_QUEUE
+        # Each queue follows its own schedule (only its own downloads start / stop).
+        for qid, sch in [(MAIN_QUEUE, self.scheduler), *self.queue_schedulers.items()]:
+            for event in sch.due():
+                if event == "start":
+                    self.manager.resume_all(qid)
+                elif event == "stop" and self._manager is not None:
+                    self._manager.pause_queue(qid)
 
     # ------------------------------------------------------------- updates
     def check_updates_later(self, delay: float = 90) -> None:
@@ -707,10 +725,16 @@ class Service:
     def shutdown(self) -> None:
         self.stop_tray()
         self.settings.scheduler = self.scheduler.to_dict()
+        self.save_queue_schedules()
         self.settings.save()
         self.stop_bridge()
         if self._manager is not None:
             self._manager.shutdown()
+
+    def save_queue_schedules(self) -> None:
+        for q in getattr(self.settings, "queues", []) or []:
+            if q["id"] in self.queue_schedulers:
+                q["scheduler"] = self.queue_schedulers[q["id"]].to_dict()
 
     def restart_slim(self) -> bool:
         """Replace this process with a fresh background one (frees all window memory).
