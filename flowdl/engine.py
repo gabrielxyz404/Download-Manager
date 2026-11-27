@@ -46,6 +46,8 @@ MB = 1024 * 1024
 # ones already stored: the file was not replaced on the server meanwhile. (If-Range does this
 # only when the server names its versions - ETag / Last-Modified; many do not.)
 SEAM_BYTES = 64
+ZIP_TAIL = 1024 * 1024  # a ZIP's last bytes, asked for first (its table of contents is there)
+ZIP_LIKE = (".zip", ".jar", ".apk", ".docx", ".xlsx", ".pptx", ".epub", ".odt", ".ods", ".cbz", ".nupkg", ".whl")
 CHUNK_SIZE = 256 * 1024
 MIN_CHUNK = 64 * 1024      # each connection reads pieces of ~0.25 s of data...
 MAX_CHUNK = 1024 * 1024    # ...between 64 KB and 1 MB (few, big pieces = little processor use)
@@ -465,6 +467,8 @@ class DownloadTask:
         self.connection_note = ""  # shown in the list: speed test / limit found
         self.reconnections = 0  # slow connections replaced
         self.seams_checked = 0  # joins verified against the bytes already stored (see _check_seam)
+        self._zip_tail = None
+        self.zip_listing: dict | None = None  # a ZIP's contents, known before the end (see zipindex)
         # Diagnostic ("Copiar diagnóstico"): what happened, second by second, in the last run.
         self.requests = 0  # range requests sent (this run)
         self._diag: deque = deque(maxlen=900)  # one row per second (the last 15 min)
@@ -795,6 +799,19 @@ class DownloadTask:
             self._save_state()
             if self.on_done:
                 self.on_done(self)
+
+    def _read_zip_listing(self) -> None:
+        """The ZIP's end has arrived: read its table of contents (names, sizes)."""
+        from . import zipindex
+        tail = self._zip_tail
+        with self._fh_lock:
+            if self._fh.closed:
+                return
+            self._fh.seek(tail.start)
+            data = self._fh.read(tail.end - tail.start + 1)
+        self.zip_listing = zipindex.read_listing(data, tail.start, self.size) or {}
+        if self.zip_listing:
+            self._event(f"ZIP: {self.zip_listing['count']} ficheiros (conteúdo lido antes do fim)")
 
     def _stored_before(self, seg: "Segment") -> int:
         """How many bytes right before ``seg.pos`` are already stored (at most SEAM_BYTES):
@@ -1280,7 +1297,8 @@ class DownloadTask:
             # which would look like an expired link and stop the download for good.
             self._accepted_any = first is not None
             allowed = lambda: target if self._accepted_any else 1  # noqa: E731
-            for seg in self.segments:
+            # (a ZIP's end first: its table of contents, see _create_segments)
+            for seg in sorted(self.segments, key=lambda x: not getattr(x, "priority", False)):
                 if seg.remaining > 0 and not seg.active and self._active_workers < allowed():
                     seg.active = True
                     spawn(seg)
@@ -1396,6 +1414,8 @@ class DownloadTask:
                     self.connection_note = "sem ligação ao servidor: a tentar de novo"
                 self._target = target  # connections above this leave when they get the chance
                 self._diag_row(now, target)
+                if self._zip_tail is not None and self.zip_listing is None and self._zip_tail.remaining == 0:
+                    self._read_zip_listing()
                 if not self._stop.is_set():
                     self._replace_slow_connections(now, target)
                     while self._rescued:  # pieces taken from stuck connections: a fresh one each
@@ -1481,6 +1501,19 @@ class DownloadTask:
                     s.start = s.pos = seg0.end + 1
                 rest.append(s)
             segments = [seg0] + rest
+        # A ZIP (and .jar/.apk/.docx...): its table of contents is at the END of the file. Ask
+        # for the last bytes first, so the contents can be shown while the rest arrives.
+        self._zip_tail = None
+        if (not self.mirror and len(segments) >= 2 and self.size >= 4 * ZIP_TAIL
+                and (self.filename or "").lower().endswith(ZIP_LIKE)):
+            last = segments[-1]
+            tail_start = self.size - ZIP_TAIL
+            if last.start < tail_start:
+                last.end = tail_start - 1
+                tail = Segment(tail_start, self.size - 1)
+                tail.priority = True
+                segments.append(tail)
+                self._zip_tail = tail
         self.segments = segments
 
     def _split_largest(self) -> Segment | None:
@@ -1489,6 +1522,7 @@ class DownloadTask:
         with self._lock:
             idle = [s for s in self.segments if not s.active and s.remaining > 0]
             if idle:
+                idle.sort(key=lambda s: not getattr(s, "priority", False))  # (a ZIP's end first)
                 idle[0].active = True
                 return idle[0]
             if self._in_outage:

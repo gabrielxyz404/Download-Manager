@@ -446,6 +446,8 @@ class QueuesDialog(tk.Toplevel):
 
 
 class GrabberDialog(tk.Toplevel):
+    SCOPES = (("site", "Só este site"), ("folder", "Só esta pasta e abaixo"), ("any", "Qualquer site"))
+
     def __init__(self, app: "App"):
         super().__init__(app)
         self.app = app
@@ -462,7 +464,7 @@ class GrabberDialog(tk.Toplevel):
         ttk.Entry(top, textvariable=self.url).pack(side="left", fill="x", expand=True, padx=6)
         ttk.Label(top, text="Profundidade:").pack(side="left")
         self.depth = tk.IntVar(value=0)
-        ttk.Spinbox(top, from_=0, to=2, width=3, textvariable=self.depth).pack(side="left", padx=4)
+        ttk.Spinbox(top, from_=0, to=3, width=3, textvariable=self.depth).pack(side="left", padx=4)
         self.go_btn = ttk.Button(top, text="Procurar", command=self._search)
         self.go_btn.pack(side="left", padx=(6, 0))
 
@@ -474,10 +476,27 @@ class GrabberDialog(tk.Toplevel):
         for c, v in self.cat_vars.items():
             ttk.Checkbutton(cats, text=c, variable=v).pack(side="left", padx=3)
 
+        opts = ttk.Frame(self, padding=(12, 0, 12, 6))
+        opts.pack(fill="x")
+        ttk.Label(opts, text="Incluir:").pack(side="left")
+        self.include = tk.StringVar()
+        ttk.Entry(opts, textvariable=self.include, width=16).pack(side="left", padx=(4, 10))
+        ttk.Label(opts, text="Excluir:").pack(side="left")
+        self.exclude = tk.StringVar()
+        ttk.Entry(opts, textvariable=self.exclude, width=16).pack(side="left", padx=(4, 10))
+        self.scope = tk.StringVar(value=self.SCOPES[0][1])
+        ttk.Combobox(opts, textvariable=self.scope, values=[t for _k, t in self.SCOPES], state="readonly",
+                     width=22).pack(side="left", padx=(0, 10))
+        self.robots = tk.BooleanVar(value=True)
+        ttk.Checkbutton(opts, text="Respeitar robots.txt", variable=self.robots).pack(side="left")
+        ttk.Label(self, text="Ex.: incluir *.pdf · excluir */thumbs/* (vários separados por vírgulas)",
+                  style="Muted.TLabel", padding=(12, 0, 12, 4)).pack(anchor="w")
+
         body = ttk.Frame(self, padding=(12, 0, 12, 0))
         body.pack(fill="both", expand=True)
-        self.tree = ttk.Treeview(body, columns=("name", "category", "url"), show="headings")
-        for key, title, w in (("name", "Arquivo", 220), ("category", "Tipo", 90), ("url", "Endereço", 420)):
+        self.tree = ttk.Treeview(body, columns=("name", "category", "size", "url"), show="headings")
+        for key, title, w in (("name", "Arquivo", 220), ("category", "Tipo", 90), ("size", "Tamanho", 80),
+                              ("url", "Endereço", 360)):
             self.tree.heading(key, text=title)
             self.tree.column(key, width=w, stretch=key == "url")
         sb = ttk.Scrollbar(body, orient="vertical", command=self.tree.yview)
@@ -501,16 +520,23 @@ class GrabberDialog(tk.Toplevel):
             return
         cats = {c for c, v in self.cat_vars.items() if v.get()}
         try:
-            depth = max(0, min(2, int(self.depth.get() or 0)))
+            depth = max(0, min(3, int(self.depth.get() or 0)))
         except (tk.TclError, ValueError):  # empty or not a number
-            messagebox.showwarning("Profundidade", "Escreva 0, 1 ou 2.", parent=self)
+            messagebox.showwarning("Profundidade", "Escreva 0, 1, 2 ou 3.", parent=self)
             return
+        scope = next((k for k, t in self.SCOPES if t == self.scope.get()), "site")
+        include, exclude, robots = self.include.get(), self.exclude.get(), self.robots.get()
         self.go_btn.state(["disabled"])
         self.info.set("Procurando...")
 
         def work():
             try:
-                self.results.put(("ok", grabber.grab(url, cats, depth)))
+                items = grabber.grab(url, cats, depth, include=include, exclude=exclude, scope=scope,
+                                     robots=robots, on_progress=lambda pages, files: self.results.put(
+                                         ("progress", f"Procurando... {pages} páginas, {files} ficheiros")))
+                self.results.put(("ok", items))
+                grabber.sizes(items)  # (the sizes, after the list is shown)
+                self.results.put(("sizes", items))
             except Exception as exc:  # noqa: BLE001
                 self.results.put(("err", str(exc)))
 
@@ -518,10 +544,21 @@ class GrabberDialog(tk.Toplevel):
         self.after(200, self._poll)
 
     def _poll(self) -> None:
+        if not self.winfo_exists():
+            return
         try:
             kind, data = self.results.get_nowait()
         except queue.Empty:
             self.after(200, self._poll)
+            return
+        if kind == "progress":
+            self.info.set(data)
+            self.after(200, self._poll)
+            return
+        if kind == "sizes":
+            for iid, item in self.items.items():
+                if self.tree.exists(iid) and item.get("size"):
+                    self.tree.set(iid, "size", format_size(item["size"]))
             return
         self.go_btn.state(["!disabled"])
         if kind == "err":
@@ -532,9 +569,10 @@ class GrabberDialog(tk.Toplevel):
         for i, item in enumerate(data):
             iid = str(i)
             self.items[iid] = item
-            self.tree.insert("", "end", iid=iid, values=(item["name"], item["category"], item["url"]))
+            self.tree.insert("", "end", iid=iid, values=(item["name"], item["category"], "", item["url"]))
         self.tree.selection_set(self.tree.get_children())
         self.info.set(f"{len(data)} arquivo(s) encontrado(s)")
+        self.after(200, self._poll)  # (then the sizes)
 
     def _download(self) -> None:
         sel = self.tree.selection()
@@ -1290,6 +1328,33 @@ def error_hint(error: str) -> str:
     return "clique em Tentar de novo; se repetir, atualize o link"
 
 
+def zip_summary(t) -> str:
+    """A ZIP's contents in a line or three: known before the end of the download (its end is
+    asked for first), or read from the finished file (once)."""
+    listing = getattr(t, "zip_listing", None)
+    if listing is None and t.status == Status.COMPLETED and t.path and t.path.lower().endswith(
+            (".zip", ".jar", ".apk", ".docx", ".xlsx", ".epub", ".cbz")):
+        from . import zipindex
+        try:
+            size = os.path.getsize(t.path)
+            with open(t.path, "rb") as f:
+                start = max(0, size - 4 * 1024 * 1024)
+                f.seek(start)
+                listing = zipindex.read_listing(f.read(), start, size) or {}
+        except OSError:
+            listing = {}
+        try:
+            t.zip_listing = listing
+        except AttributeError:
+            pass
+    if not listing:
+        return ""
+    names = ", ".join(n for n, _s in listing["names"][:3])
+    more = f" e mais {listing['count'] - 3}" if listing["count"] > 3 else ""
+    return (f"{listing['count']} ficheiros · {format_size(listing['uncompressed'])} descompactado\n"
+            f"{names}{more}")
+
+
 class DetailsPanel(ttk.Frame):
     """Right side of the window: the chosen download, with the map of its parts.
     Built once; refresh() only changes texts and colours (cheap, twice a second)."""
@@ -1314,7 +1379,7 @@ class DetailsPanel(ttk.Frame):
         grid = ttk.Frame(self.box, style="Soft.TFrame")
         grid.pack(anchor="w", pady=(12, 8), fill="x")
         self.rows = []
-        for i in range(5):
+        for i in range(6):
             k = ttk.Label(grid, style="SoftMuted.TLabel")
             v = ttk.Label(grid, style="Soft.TLabel", wraplength=self.WIDTH - 110, justify="left")
             k.grid(row=i, column=0, sticky="nw", pady=3, padx=(0, 18))
@@ -1438,6 +1503,9 @@ class DetailsPanel(ttk.Frame):
                        else ("▶ Começar já", app._start_now) if st == Status.QUEUED
                        else ("▶ Iniciar", app._resume),
                        ("Abrir pasta", app._open_folder), ("✕", app._remove)]
+        contents = zip_summary(t)
+        if contents:
+            rows.insert(min(len(rows), 3), ("Conteúdo", contents))
         self._set_rows(rows)
         self._buttons(buttons)
         show_map = (app.settings.show_parts_map and st != Status.COMPLETED and bool(t.size)

@@ -1,5 +1,19 @@
 # Novidades do Flow Downloads
 
+## 0.9.23
+
+**Novo: o conteúdo de um ZIP aparece logo no início do download.**
+- O índice de um ZIP fica no fim do ficheiro. Agora a app pede essa parte primeiro e mostra nos detalhes quantos ficheiros tem, quanto ocupa descompactado e os primeiros nomes, enquanto o resto ainda baixa.
+- Vale também para .jar, .apk, .docx, .xlsx, .epub, .cbz e semelhantes, e para ficheiros ZIP de mais de 4 GB.
+- Num teste com um ZIP de 9 MB, o conteúdo apareceu antes de metade do download.
+
+**Capturar arquivos de um site (⚙ → Capturar...), mais completo:**
+- Profundidade até 3 níveis.
+- Filtros **Incluir** e **Excluir**, por exemplo `*.pdf` ou `*/thumbs/*`.
+- Âmbito: **só este site** (o padrão), **só esta pasta e abaixo**, ou **qualquer site**.
+- Cuidado com os sites: uma página de cada vez, com uma pequena pausa, e respeita o robots.txt. Pode desligar-se.
+- Mostra o **tamanho** de cada ficheiro e o progresso da procura.
+
 ## 0.9.22
 
 **Novo: downloads por FTP** (e FTPS), com retomada e várias ligações. Antes a app recusava links ftp://.
