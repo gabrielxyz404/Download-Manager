@@ -1419,9 +1419,9 @@ class AdaptiveServer(BaseHTTPRequestHandler):
         start = int(m.group(1)) if m else 0
         end = int(m.group(2)) if m and m.group(2) else cls.size - 1
         with cls.lock:
-            if cls.mode in ("max2", "max2_403") and cls.active >= 2 and end > start:
+            if cls.mode in ("max2", "max2_403", "max2_429") and cls.active >= 2 and end > start:
                 cls.refused += 1
-                self.send_error(503 if cls.mode == "max2" else 403)
+                self.send_error({"max2": 503, "max2_403": 403, "max2_429": 429}[cls.mode])
                 return
             cls.active += 1
             cls.peak = max(cls.peak, cls.active)
@@ -1517,6 +1517,17 @@ class AdaptiveConnectionTests(unittest.TestCase):
             self.assertIn(f"servidor aceita {task.server_limit}", notes)
             self.assertLess(task.server_limit, 8)
 
+
+    def test_connection_limit_answered_with_429_is_learned_not_slowed(self):
+        """Found in a review: 429 to extra connections was taken for "too many requests"
+        (long waits, whole pieces, remembered): 72 s instead of 31 s. Now, as for 503: the
+        server's limit, learned, and the download goes on with the connections it accepts."""
+        t0 = time.monotonic()
+        task, notes = self.run_download("max2_429", 12 * 1024 * 1024)
+        took = time.monotonic() - t0
+        self.assertEqual(task.server_limit, 2, notes)
+        self.assertFalse(task._few_requests)
+        self.assertLess(took, 45, f"{took:.0f}s")
 
 class KeepAliveServer(BaseHTTPRequestHandler):
     """HTTP/1.1 server that counts TCP connections and requests (like a real CDN)."""

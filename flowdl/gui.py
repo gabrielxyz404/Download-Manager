@@ -1347,7 +1347,7 @@ def zip_summary(t) -> str:
             t.zip_listing = listing
         except AttributeError:
             pass
-    if not listing:
+    if not listing or not isinstance(listing.get("names"), list):
         return ""
     names = ", ".join(n for n, _s in listing["names"][:3])
     more = f" e mais {listing['count'] - 3}" if listing["count"] > 3 else ""
@@ -2202,8 +2202,10 @@ class App(tk.Tk):
         """A site that refuses the app (single-use link, protection page): the browser downloads
         it as if the app were not there; this download leaves the list."""
         import webbrowser
-        tasks = [t for t in self._selected() if getattr(t, "kind", "") != "video"]
+        tasks = [t for t in self._selected() if getattr(t, "kind", "") not in ("video", "ftp")]
         if not tasks:
+            if any(getattr(t, "kind", "") == "ftp" for t in self._selected()):
+                self.status_var.set("Os navegadores já não baixam links FTP: este fica na app.")
             return
         t = tasks[0]
         if t.status == Status.COMPLETED:

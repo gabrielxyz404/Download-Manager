@@ -419,6 +419,8 @@ class DownloadTask:
         # Random id: ids from the clock collided on Windows (coarse clock) when several
         # downloads were added at once.
         self.id = task_id or uuid.uuid4().hex[:16]
+        # A password in the link: kept apart (encrypted when saved), never in the link itself.
+        url, self._secret = net.remember_password(url)
         self.url = url
         self.dest_dir = dest_dir
         self.connections = max(1, int(connections))
@@ -627,6 +629,7 @@ class DownloadTask:
                                           "origin": self.post.get("origin") or ""})
             if self.post and self.status != Status.COMPLETED else None,
             "post_direct": self._post_direct,
+            "secret": vault.protect_cached(self._secret) if self._secret else None,
         }
 
     @classmethod
@@ -649,6 +652,11 @@ class DownloadTask:
         t.leftovers = [p for p in d.get("leftovers", []) if isinstance(p, str)
                        and p.endswith((".part", ".part.json"))]
         t.peak_speed = d.get("peak_speed", 0.0)
+        secret = vault.unprotect(d.get("secret"), None) if d.get("secret") else None
+        if isinstance(secret, str):
+            t._secret = secret
+            parts = urllib.parse.urlsplit(t.url)
+            net.remember_site_password(parts.hostname or "", urllib.parse.unquote(parts.username or ""), secret)
         post = vault.unprotect(d.get("post"), None)
         if isinstance(post, dict) and isinstance(post.get("body"), str):
             try:
@@ -809,7 +817,10 @@ class DownloadTask:
                 return
             self._fh.seek(tail.start)
             data = self._fh.read(tail.end - tail.start + 1)
-        self.zip_listing = zipindex.read_listing(data, tail.start, self.size) or {}
+        try:
+            self.zip_listing = zipindex.read_listing(data, tail.start, self.size) or {}
+        except Exception:  # noqa: BLE001 - a listing must never fail the download
+            self.zip_listing = {}
         if self.zip_listing:
             self._event(f"ZIP: {self.zip_listing['count']} ficheiros (conteúdo lido antes do fim)")
 
@@ -945,6 +956,10 @@ class DownloadTask:
                     self._first_peer = conn.peer
                     break
                 if self._final_url and exc.code in (401, 403, 404, 410):
+                    if self.post:
+                        # (the address a form led to: sending the form again could make another
+                        # file or repeat an action - not behind the user's back)
+                        raise RuntimeError("O endereço dado pelo formulário expirou: baixe outra vez no site") from exc
                     # The browser's final address expired already: start again from the link.
                     self._final_url = None
                     continue
@@ -1943,7 +1958,14 @@ class DownloadTask:
                         if is_cert_error(exc):
                             raise RuntimeError(CERT_ERROR) from exc
                         wait = getattr(exc, "retry_after", None)
-                        if code == 429:
+                        with self._lock:
+                            others_receiving = any(x is not w and x.alive and time.monotonic() - x.last_data < 2.0
+                                                   and x.got_data for x in self._workers)
+                        if code == 429 and not others_receiving:
+                            # (429 while other connections still receive is the server's limit
+                            # of connections, handled below like 503 - a review found that taking
+                            # it for "too many requests" made such a download 2x slower. A
+                            # server counting requests stops everyone: thinkbroadband.)
                             self._last_429 = time.monotonic()
                             # "Too many requests": from now on one long request per connection
                             # (and remembered for this server). Asking again soon only adds to

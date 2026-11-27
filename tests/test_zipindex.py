@@ -39,6 +39,14 @@ class ListingTests(unittest.TestCase):
     def test_zip64(self):
         self.check(make_zip(5, 1000, zip64=True))
 
+    def test_fake_zip64_record_does_not_raise(self):
+        """Found in a review: a short ZIP64 record raised (struct.error) and failed the download."""
+        import struct
+        eocd = b"PK\x05\x06" + struct.pack("<HHHHIIH", 0, 0, 0xFFFF, 0xFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0)
+        loc = b"PK\x06\x07" + struct.pack("<IQI", 0, 990, 1)
+        data = b"x" * 990 + b"PK\x06\x06" + b"\0" * 2 + loc + eocd
+        self.assertIsNone(zipindex.read_listing(data, 0, len(data)))
+
     def test_not_a_zip_or_index_not_in_the_end(self):
         self.assertIsNone(zipindex.read_listing(os.urandom(5000), 0, 5000))
         data = make_zip(3000, 300)  # a big table of contents: not all in the last 64 KB

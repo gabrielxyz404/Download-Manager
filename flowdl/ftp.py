@@ -38,7 +38,7 @@ TIMEOUT = 30
 MAX_TRIES = 8
 
 
-class _TooMany(Exception):
+class _TooMany(ftplib.error_temp):
     """421: the server takes no more connections from us."""
 
 
@@ -99,6 +99,11 @@ class FtpTask:
         self._socks: list = []
         self.on_done = None
         self.on_change = None
+        # (as for HTTP: Windows' "came from the internet" mark, and the end-of-download actions)
+        self.mark_internet = True
+        self.after_ran = False
+        self.expected_hash: str | None = None
+        self.check = ""
 
     # ------------------------------------------------------------- interface
     @property
@@ -179,6 +184,7 @@ class FtpTask:
             "connections": self.connections, "filename": self.filename, "path": self.path,
             "size": self.size, "downloaded": self.downloaded, "status": self.status,
             "added_at": self.added_at, "speed_limit": self.speed_limit,
+            "check": self.check, "expected_hash": self.expected_hash,
             # (anonymous needs nothing; a real password only encrypted, and not once done)
             "secret": vault.protect_cached(self._password)
             if self._password and self._password != "anonymous@" and self.status != Status.COMPLETED else None,
@@ -192,11 +198,26 @@ class FtpTask:
         t.path, t.size = d.get("path"), d.get("size")
         t.downloaded = d.get("downloaded", 0) if isinstance(d.get("downloaded"), int) else 0
         t.added_at = d.get("added_at", t.added_at)
+        t.after_ran = d.get("status") == Status.COMPLETED  # (never again for an old download)
+        t.check = d.get("check", "") if isinstance(d.get("check"), str) else ""
+        t.expected_hash = d.get("expected_hash") if isinstance(d.get("expected_hash"), str) else None
         status = d.get("status")
         t.status = status if status in (Status.COMPLETED, Status.ERROR) else Status.PAUSED
         return t
 
     # ------------------------------------------------------------- connections
+    def _login_patiently(self) -> ftplib.FTP:
+        """The first connection: a server that says "421 too many" (ours, just closed, may
+        still count) is asked again a few times before giving up."""
+        for attempt in range(6):
+            try:
+                return self._login()
+            except _TooMany:
+                if attempt == 5 or self._stop.is_set():
+                    raise
+                self._stop.wait(5)
+        raise _TooMany("421")
+
     def _login(self) -> ftplib.FTP:
         info = split_url(self.url)
         cls = ftplib.FTP_TLS if info["tls"] else ftplib.FTP
@@ -257,7 +278,7 @@ class FtpTask:
         """Size, version and resume support; the saved progress if it is the same file."""
         self._changed = False
         info = split_url(self.url)
-        ftp = self._login()
+        ftp = self._login_patiently()
         try:
             try:
                 size = ftp.size(info["path"])
@@ -317,6 +338,16 @@ class FtpTask:
     def _save_state(self) -> None:
         if not self.resumable:
             return
+        fh = getattr(self, "_fh", None)
+        if fh is not None:
+            # The bytes onto the disk first, then the positions (a power cut must never leave a
+            # record that claims bytes that were not stored - as the HTTP engine does).
+            try:
+                with self._fh_lock:
+                    if not fh.closed:
+                        os.fsync(fh.fileno())
+            except OSError:
+                return
         tmp = self._state_path + ".tmp"
         try:
             with open(tmp, "w", encoding="utf-8") as f:
@@ -350,7 +381,7 @@ class FtpTask:
         """One connection, from the start (no size or no REST)."""
         info = split_url(self.url)
         self.downloaded = 0
-        ftp = self._login()
+        ftp = self._login_patiently()
         self._active = 1
         try:
             sock = ftp.transfercmd("RETR " + info["path"])
@@ -454,6 +485,12 @@ class FtpTask:
                         self.server_limit = max(1, self._active - 1)
                         self.connection_note = f"servidor aceita {self.server_limit}"
                     return
+                except (OSError, EOFError, ftplib.error_temp, ftplib.error_reply, ftplib.error_proto):
+                    tries += 1  # (a network hiccup while connecting: again, a moment later)
+                    if tries > MAX_TRIES:
+                        raise
+                    self._stop.wait(min(2 ** tries, 30))
+                    continue
                 sock = None
                 try:
                     sock = ftp.transfercmd("RETR " + info["path"], rest=seg.pos)
@@ -465,7 +502,10 @@ class FtpTask:
                                 want = seg.end - seg.pos + 1
                             if want <= 0:
                                 break  # piece done (or taken over in part): drop the rest
-                            data = sock.recv(min(CHUNK, want))
+                            try:
+                                data = sock.recv(min(CHUNK, want))
+                            except OSError:
+                                data = b""  # (dropped: continued below from where it stopped)
                             if not data:
                                 break
                             with seg.lock:
@@ -483,6 +523,8 @@ class FtpTask:
                             if sock in self._socks:
                                 self._socks.remove(sock)
                         sock.close()
+                except (OSError, EOFError, ftplib.error_temp, ftplib.error_reply, ftplib.error_proto):
+                    pass  # (a dropped connection, "425 can't open data connection"...: again, below)
                 finally:
                     try:
                         if sock is not None:  # (a transfer was going: end it properly)
@@ -513,6 +555,9 @@ class FtpTask:
             pass
         self.path, self.filename = final, os.path.basename(final)
         self.downloaded = self.size or self.downloaded
+        if self.mark_internet:
+            from .system import mark_from_internet
+            mark_from_internet(final, clean_url(self.url))
         self.status = Status.COMPLETED
 
 

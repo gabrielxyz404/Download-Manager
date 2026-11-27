@@ -51,8 +51,10 @@ class HostMemory:
             return None
         entry = dict(entry)
         calm = entry.pop("outage_limit", None)
-        # (a server that answered "too many requests": kept like the rest, 30 days)
-        entry["few_requests"] = bool(entry.get("few_requests"))
+        # (a server that answered "too many requests": 30 days from that answer, not from
+        # the last download - before, a server used often was remembered for ever)
+        few = entry.get("few_requests")
+        entry["few_requests"] = bool(few) and time.time() - few <= MAX_AGE
         if calm and time.time() - entry.get("time", 0) <= OUTAGE_LIMIT_AGE:
             entry["limit"] = min(entry["limit"], calm) if entry.get("limit") else calm
             entry["outage"] = True  # (the engine then asks for whole pieces: see engine)

@@ -146,6 +146,33 @@ def happy_connect(address, timeout=None, source_address=None):
     raise socket.timeout("timed out")
 
 
+def fetch(url: str, limit: int, headers: dict | None = None, timeout: float = 30,
+          on_chunk=None, truncate: bool = False) -> tuple[str, str, bytes]:
+    """A whole (small) answer, through the same proxy and rules as the downloads (pages for
+    the grabber, robots.txt, checksum lists...). Returns (final address, content type, body).
+    ``on_chunk(bytes)``: given each piece instead of keeping it (for big files)."""
+    from .engine import USER_AGENT
+    conn = Connection(timeout)
+    try:
+        resp = conn.get(url, {"User-Agent": USER_AGENT, **(headers or {})})
+        ctype = (resp.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+        body, got = [], 0
+        while got < limit:
+            chunk = resp.read1(min(1024 * 1024, limit - got))
+            if not chunk:
+                break
+            got += len(chunk)
+            if on_chunk is not None:
+                on_chunk(chunk)
+            else:
+                body.append(chunk)
+        if got >= limit and not truncate and resp.read1(1):
+            raise ValueError("resposta maior do que o esperado")
+        return resp.url, ctype, b"".join(body)
+    finally:
+        conn.close()
+
+
 _PROXY_CACHE: dict = {}  # (scheme, host) -> (when, answer)
 
 
@@ -171,13 +198,45 @@ def _proxy_for(scheme: str, host: str):
 _SITE_CREDS: dict = {}  # (host, user) -> proxy.Credentials: a site's user / password from its link
 
 
+def remember_password(url: str) -> tuple[str, str | None]:
+    """A link with "user:password@": the password is kept here (in memory) and the link is
+    returned without it - so it is never saved in plain text nor shown. Returns (link, password)."""
+    parts = urllib.parse.urlsplit(url)
+    if parts.password is None:
+        return url, None
+    password = urllib.parse.unquote(parts.password)
+    remember_site_password(parts.hostname or "", urllib.parse.unquote(parts.username or ""), password)
+    host = parts.hostname or ""
+    if ":" in host:
+        host = f"[{host}]"
+    netloc = f"{parts.username}@{host}" + (f":{parts.port}" if parts.port else "")
+    return urllib.parse.urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment)), password
+
+
+_PASSWORDS: dict = {}  # (host, user) -> password, for links kept without it
+
+
+def remember_site_password(host: str, user: str, password: str) -> None:
+    _PASSWORDS[((host or "").lower(), user)] = password
+
+
+def without_userinfo(url: str) -> str:
+    parts = urllib.parse.urlsplit(url)
+    if "@" not in parts.netloc:
+        return url
+    return urllib.parse.urlunsplit((parts.scheme, parts.netloc.rsplit("@", 1)[-1], parts.path, parts.query,
+                                    parts.fragment))
+
+
 def _site_credentials(parts):
     if not parts.username:
         return None
     from . import proxy
     user = urllib.parse.unquote(parts.username)
-    password = urllib.parse.unquote(parts.password or "")
     key = ((parts.hostname or "").lower(), user)
+    password = urllib.parse.unquote(parts.password) if parts.password is not None else _PASSWORDS.get(key)
+    if password is None:
+        return None
     creds = _SITE_CREDS.get(key)
     if creds is None or creds.password != password:
         if len(_SITE_CREDS) > 100:
@@ -298,7 +357,8 @@ class Connection:
             if self.key != (scheme, host, port):
                 self._connect(scheme, host, port)
             path = urllib.parse.urlunsplit(("", "", parts.path or "/", parts.query, ""))
-            target = url if self.via_proxy_http else path
+            # (to an HTTP proxy, the whole address - never with the user / password in it)
+            target = without_userinfo(url) if self.via_proxy_http else path
             hdrs = {"Host": parts.netloc.rsplit("@", 1)[-1], "Accept-Encoding": "identity"}
             for k, v in headers.items():
                 if k.lower() in SENSITIVE and host.lower() != first_host:
@@ -312,8 +372,9 @@ class Connection:
             if self.via_proxy_http and route is not None:
                 hdrs.update(route.headers)
                 pcreds = proxies.proxy_credentials(route)
-                if pcreds:
-                    hdrs["Proxy-Authorization"] = pcreds.header("POST" if post else "GET", target)
+                answer = pcreds.header("POST" if post else "GET", target) if pcreds else None
+                if answer:
+                    hdrs["Proxy-Authorization"] = answer
             creds = _site_credentials(parts) if host.lower() == first_host else None
             if creds and not any(k.lower() == "authorization" for k in hdrs):
                 answer = creds.header("POST" if post else "GET", target)

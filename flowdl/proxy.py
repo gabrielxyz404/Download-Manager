@@ -288,8 +288,9 @@ def proxy_credentials(r: Route) -> Credentials | None:
     with _lock:
         creds = _PROXY_CREDS.get(key)
         if creds is None or creds.password != r.password:
+            # (nothing sent before the proxy asks: then Digest if it offers it - the password
+            # never travels - else Basic; a review found Basic was always sent first)
             creds = _PROXY_CREDS[key] = Credentials(r.user, r.password)
-            creds.learn("basic", {})  # (sent at once; a Digest proxy answers 407 and we learn)
         return creds
 
 

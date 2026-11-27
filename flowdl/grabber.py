@@ -11,7 +11,6 @@ import urllib.robotparser
 from html.parser import HTMLParser
 
 from .categories import OTHER, category_for
-from .engine import USER_AGENT
 
 MAX_PAGE_BYTES = 5 * 1024 * 1024
 LINK_ATTRS = {"a": "href", "img": "src", "video": "src", "audio": "src", "source": "src",
@@ -37,13 +36,18 @@ class _LinkParser(HTMLParser):
 
 
 def _fetch(url: str) -> tuple[str, str, str]:
-    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-    with urllib.request.urlopen(req, timeout=30) as resp:
-        ctype = resp.headers.get_content_type()
-        charset = resp.headers.get_content_charset() or "utf-8"
-        body = resp.read(MAX_PAGE_BYTES).decode(charset, "replace") if ctype in (
-            "text/html", "application/xhtml+xml") else ""
-        return resp.geturl(), ctype, body
+    """A page, through the app's proxy (a review found the grabber went straight to the
+    sites even with Tor chosen in the app)."""
+    from . import net
+    final, ctype, data = net.fetch(url, MAX_PAGE_BYTES, truncate=True)
+    if ctype not in ("text/html", "application/xhtml+xml"):
+        return final, ctype, ""
+    m = re.search(rb'charset=["\']?([\w-]+)', data[:2048])
+    charset = m.group(1).decode() if m else "utf-8"
+    try:
+        return final, ctype, data.decode(charset, "replace")
+    except LookupError:
+        return final, ctype, data.decode("utf-8", "replace")
 
 
 def extract_links(html: str, base_url: str) -> list[str]:
@@ -93,9 +97,9 @@ class _Robots:
         if key not in self.cache:
             rp = urllib.robotparser.RobotFileParser()
             try:
-                req = urllib.request.Request(key + "/robots.txt", headers={"User-Agent": USER_AGENT})
-                with urllib.request.urlopen(req, timeout=10) as resp:
-                    rp.parse(resp.read(512 * 1024).decode("utf-8", "replace").splitlines())
+                from . import net
+                _u, _t, body = net.fetch(key + "/robots.txt", 512 * 1024, timeout=10)
+                rp.parse(body.decode("utf-8", "replace").splitlines())
             except Exception:  # noqa: BLE001 - none (or unreachable): everything allowed
                 rp = None
             self.cache[key] = rp

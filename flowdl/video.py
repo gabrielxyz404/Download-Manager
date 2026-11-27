@@ -90,11 +90,9 @@ def current_version() -> str | None:
 
 
 def _fetch(url: str, timeout: float = 60) -> bytes:
-    import urllib.request
-    from .engine import USER_AGENT
-    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return resp.read(64 * 1024 * 1024)
+    """(Through the app's proxy, like the downloads.)"""
+    from . import net
+    return net.fetch(url, 64 * 1024 * 1024, timeout=timeout)[2]
 
 
 def update_yt_dlp() -> tuple[bool, str]:
@@ -151,6 +149,7 @@ FFMPEG_BUILD = "ffmpeg-master-latest-win64-gpl.zip"
 FFMPEG_URL = "https://github.com/BtbN/FFmpeg-Builds/releases/latest/download/" + FFMPEG_BUILD
 FFMPEG_SUMS_URL = "https://github.com/BtbN/FFmpeg-Builds/releases/latest/download/checksums.sha256"
 FFMPEG_MAX = 400 * 1024 * 1024  # (the build is ~200 MB: anything far bigger is not it)
+FFMPEG_EXPECTED = 200 * 1024 * 1024  # (for the progress shown while it downloads)
 FFMPEG_PROGRAMS = ("ffmpeg.exe", "ffprobe.exe")
 WINDOWS = os.name == "nt"  # (the builds are for Windows)
 
@@ -191,9 +190,7 @@ def install_ffmpeg(progress=None) -> tuple[bool, str]:
     import hashlib
     import http.client
     import tempfile
-    import urllib.request
     import zipfile
-    from .engine import USER_AGENT
     from .system import free_space
     if not WINDOWS:
         return False, "a instalação automática do ffmpeg só existe no Windows"
@@ -211,21 +208,23 @@ def install_ffmpeg(progress=None) -> tuple[bool, str]:
     if not want or not re.fullmatch(r"[0-9a-f]{64}", want):
         return False, "não encontrei o checksum oficial do ffmpeg: não foi instalado"
     fd, zip_path = tempfile.mkstemp(suffix=".zip", dir=str(home))
+    out = os.fdopen(fd, "wb")  # (owned at once: closed even when the download cannot start)
     try:
         digest = hashlib.sha256()
+        from . import net
+        done = [0]
+
+        def piece(chunk: bytes) -> None:
+            done[0] += len(chunk)
+            digest.update(chunk)
+            out.write(chunk)
+            if progress:
+                progress(done[0], FFMPEG_EXPECTED)
         try:
-            req = urllib.request.Request(FFMPEG_URL, headers={"User-Agent": USER_AGENT})
-            with urllib.request.urlopen(req, timeout=60) as resp, os.fdopen(fd, "wb") as out:
-                total = int(resp.headers.get("Content-Length") or 0)
-                done = 0
-                while chunk := resp.read(1024 * 1024):
-                    done += len(chunk)
-                    if done > FFMPEG_MAX:
-                        return False, "o ficheiro do ffmpeg é maior do que o esperado: não foi instalado"
-                    digest.update(chunk)
-                    out.write(chunk)
-                    if progress:
-                        progress(done, total)
+            with out:  # (through the app's proxy, like the downloads)
+                net.fetch(FFMPEG_URL, FFMPEG_MAX, timeout=60, on_chunk=piece)
+        except ValueError:
+            return False, "o ficheiro do ffmpeg é maior do que o esperado: não foi instalado"
         except (OSError, http.client.HTTPException) as exc:
             return False, f"o download do ffmpeg falhou ({exc})"
         if digest.hexdigest() != want:
@@ -250,6 +249,7 @@ def install_ffmpeg(progress=None) -> tuple[bool, str]:
         except (zipfile.BadZipFile, OSError) as exc:
             return False, f"não consegui extrair o ffmpeg ({exc})"
     finally:
+        out.close()
         try:
             os.remove(zip_path)
         except OSError:

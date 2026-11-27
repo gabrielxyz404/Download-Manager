@@ -1,5 +1,25 @@
 # Novidades do Flow Downloads
 
+## 0.9.24
+
+Auditoria às versões 0.9.16–0.9.23: uma revisão de código independente encontrou 12 problemas. Estão todos corrigidos, cada um com um teste automático:
+- **Velocidade:** um servidor que recusa ligações a mais com "429" (em vez de "503") deixava o download 2× mais lento. A app confundia-o com o caso do thinkbroadband (pedidos a mais). Agora distingue os dois: se as outras ligações continuam a receber, é um limite de ligações e a app aprende-o; se o servidor parou toda a gente, conta pedidos. Num teste: 72 s → 31 s.
+- **Senhas em links** (`http://utilizador:senha@...`): ficavam em texto na lista de downloads e iam inteiras para os proxies HTTP. Agora ficam cifradas e nunca aparecem no link.
+- **FTP:**
+  - um "421 demasiadas ligações" no primeiro contacto deixava o download em "Conectando" para sempre;
+  - uma ligação que caía a meio fazia falhar o download todo;
+  - faltava a marca "veio da internet" do Windows e as ações no fim (antivírus, checksum, extrair...);
+  - o progresso é agora gravado de forma segura contra cortes de energia.
+- **Proxy:**
+  - o grabber, o robots.txt e a instalação do ffmpeg não usavam o proxy escolhido na app (importante com o Tor);
+  - a senha do proxy já não é enviada em Basic antes de o proxy a pedir.
+- **ZIP:** um ficheiro com o índice danificado fazia falhar o download. Agora só não mostra o conteúdo.
+- **Formulários:** se o endereço dado por um formulário expirar, a app não volta a enviar o formulário sozinha; diz para baixar outra vez no site.
+- **ffmpeg:** se a instalação falhasse logo no início, ficava um ficheiro temporário preso.
+- "Baixar no navegador" num download FTP dava erro. Agora explica que os navegadores já não baixam FTP.
+
+Verificado que nada ficou mais lento: os 22 cenários do simulador dão o mesmo que na 0.9.17. O servidor tipo thinkbroadband dá 48,5 s, quando o máximo possível é 48 s, e o mesmo com ficheiros ZIP.
+
 ## 0.9.23
 
 **Novo: o conteúdo de um ZIP aparece logo no início do download.**

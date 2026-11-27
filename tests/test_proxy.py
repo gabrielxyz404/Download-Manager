@@ -1,6 +1,7 @@
 """Proxies chosen in the app (SOCKS5, HTTP) and Basic / Digest authentication, against small
 local proxies and sites (no real network)."""
 import hashlib
+import os
 import re
 import select
 import socket
@@ -316,6 +317,11 @@ class ProxyTests(_Servers):
         proxy.configure("http", "127.0.0.1", self.hproxy.server_address[1], "rui", "pr0xy", bypass=[])
         self.assertWhole(self.download(f"http://localhost:{self.port}/f.bin", conns=1))
         self.assertIn(("GET", f"http://localhost:{self.port}/f.bin", "Digest"), HttpProxy.seen)
+        HttpProxy.seen = []
+        net._SITE_CREDS.clear()
+        self.download(f"http://ana:s3gredo@localhost:{self.port}/u.bin", conns=1)
+        self.assertTrue(HttpProxy.seen)
+        self.assertFalse([u for _m, u, _a in HttpProxy.seen if "s3gredo" in u or "@" in u])
 
     def test_https_tunnel_through_http_proxy_with_digest(self):
         HttpProxy.auth = "digest"
@@ -325,7 +331,19 @@ class ProxyTests(_Servers):
         sock.sendall(b"GET /f.bin HTTP/1.1\r\nHost: x\r\nRange: bytes=0-9\r\n\r\n")
         self.assertTrue(sock.recv(100).startswith(b"HTTP/1.1 206"))
         sock.close()
-        self.assertEqual([s[2] for s in HttpProxy.seen if s[0] == "CONNECT"], ["Basic", "Digest"])
+        # (nothing sent before the proxy asked; then Digest: the password never travelled)
+        self.assertEqual([s[2] for s in HttpProxy.seen if s[0] == "CONNECT"], ["", "Digest"])
+
+    def test_grabber_and_checksums_go_through_the_chosen_proxy(self):
+        """Found in a review: the grabber (pages, robots.txt) and the ffmpeg / yt-dlp downloads
+        went straight to the sites even with a proxy (Tor) chosen in the app."""
+        from flowdl import grabber, video
+        proxy.configure("http", "127.0.0.1", self.hproxy.server_address[1], bypass=[])
+        grabber.grab(f"http://localhost:{self.port}/pagina.html", depth=1, pause=0)
+        video._fetch(f"http://localhost:{self.port}/sums.txt")
+        seen = [u for _m, u, _a in HttpProxy.seen]
+        self.assertIn(f"http://localhost:{self.port}/pagina.html", seen)
+        self.assertIn(f"http://localhost:{self.port}/sums.txt", seen)
 
     def test_http_proxy_wrong_password(self):
         HttpProxy.auth = "basic"
@@ -389,6 +407,27 @@ class SiteAuthTests(_Servers):
         self.assertEqual(task.status, Status.ERROR)
         self.assertIn("401", task.error)
         self.assertLess(len(FileSite.seen_auth), 20)
+
+    def test_password_in_the_link_is_never_saved_or_shown(self):
+        """Found in a review: http://user:pass@... was saved as it was (downloads.json, the
+        .part.json) and sent whole to HTTP proxies. Now kept apart, encrypted."""
+        import json
+        self.run_auth("digest")
+        task = DownloadTask(f"http://ana:s3gredo@127.0.0.1:{self.port}/g.bin", self.tmp.name, 2)
+        self.assertNotIn("s3gredo", task.url)
+        saved = json.dumps(task.to_dict())
+        self.assertNotIn("s3gredo", saved)
+        net._PASSWORDS.clear()
+        net._SITE_CREDS.clear()
+        again = DownloadTask.from_dict(json.loads(saved))  # (the app started again)
+        again.start()
+        again.wait(30)
+        self.assertWhole(again)
+        with open(again.path, "rb"):
+            pass
+        for name in os.listdir(self.tmp.name):
+            with open(os.path.join(self.tmp.name, name), "rb") as f:
+                self.assertNotIn(b"s3gredo", f.read() if name.endswith(".json") else b"")
 
     def test_digest_unit(self):
         """RFC 2617's example (MD5, qop=auth)."""

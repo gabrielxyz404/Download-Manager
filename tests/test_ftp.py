@@ -23,6 +23,7 @@ class FtpHandler(socketserver.StreamRequestHandler):
     size = True
     limit = 0
     pace = 0.0  # seconds per 64 KB
+    drop_once = False  # the first transfer is cut after 1 MB (a dropped connection)
     users = {"anonymous": None, "ana": "s3gredo"}
     open_now = 0
     peak = 0
@@ -87,6 +88,10 @@ class FtpHandler(socketserver.StreamRequestHandler):
                     complete = True
                     try:
                         for i in range(offset, len(cls.data), 65536):
+                            if cls.drop_once and i - offset >= 1024 * 1024:
+                                cls.drop_once = False
+                                conn.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, b"\x01\x00\x00\x00\x00\x00\x00\x00")
+                                raise OSError("dropped")
                             conn.sendall(cls.data[i:i + 65536])
                             if cls.pace:
                                 time.sleep(cls.pace)
@@ -131,7 +136,7 @@ class FtpTests(unittest.TestCase):
     def setUp(self):
         h = FtpHandler
         h.data, h.mdtm, h.rest, h.size, h.limit, h.pace = DATA, "20261126120000", True, True, 0, 0.0
-        h.peak, h.retr_offsets = 0, []
+        h.peak, h.retr_offsets, h.drop_once = 0, [], False
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
 
@@ -204,6 +209,30 @@ class FtpTests(unittest.TestCase):
         task = self.run_task(self.base + "/limite.bin")
         self.assertWhole(task)
         self.assertLessEqual(task.server_limit or 99, 2)
+
+    def test_dropped_connection_continues(self):
+        """Found in a review: one dropped data connection failed the whole download."""
+        FtpHandler.drop_once = True
+        task = self.run_task(self.base + "/cai.bin", conns=2)
+        self.assertWhole(task)
+
+    def test_too_many_connections_at_the_first_login_is_not_stuck(self):
+        """Found in a review: a 421 at the first login left the download "Conectando" for ever."""
+        task = FtpTask(self.base + "/x.bin", self.tmp.name)
+        with unittest.mock.patch.object(FtpTask, "_login", side_effect=ftpmod._TooMany("421 Too many")):
+            task.start()
+            task._stop.wait = lambda timeout=None: False  # (no 5 s waits in the test)
+            task.wait(20)
+        self.assertFalse(task.is_running())
+        self.assertEqual(task.status, Status.ERROR)
+
+    def test_marked_as_from_the_internet_and_after_actions_run(self):
+        with unittest.mock.patch("flowdl.system.mark_from_internet") as mark:
+            task = self.run_task(self.base + "/marca.exe")
+        self.assertWhole(task)
+        mark.assert_called_once()
+        self.assertFalse(task.after_ran)  # (the service runs the actions, then sets it)
+        self.assertTrue(FtpTask.from_dict(task.to_dict()).after_ran)
 
     def test_password_not_kept_in_plain_text(self):
         task = FtpTask("ftp://ana:s3gredo@a.com/x.bin", self.tmp.name)

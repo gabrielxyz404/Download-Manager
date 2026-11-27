@@ -15,6 +15,15 @@ MAX_NAMES = 500  # names kept for the window (the count and the totals cover all
 
 
 def read_listing(data: bytes, offset: int, total_size: int) -> dict | None:
+    """(Never raises: a damaged or fake ZIP gives None - found in a review: a short ZIP64
+    record made the whole download fail.)"""
+    try:
+        return _read_listing(data, offset, total_size)
+    except (struct.error, IndexError, ValueError, OverflowError):
+        return None
+
+
+def _read_listing(data: bytes, offset: int, total_size: int) -> dict | None:
     """``data`` holds the file's bytes from ``offset`` to its end (``total_size``). Returns
     {"count", "uncompressed", "compressed", "names": [(name, size), ...]} or None when the
     table of contents is not in ``data`` (or this is not a ZIP)."""
