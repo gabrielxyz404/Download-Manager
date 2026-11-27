@@ -277,6 +277,36 @@ class GuiTests(unittest.TestCase):
             self.svc.settings.queues = []
             self.svc.apply_queues()
 
+    def test_proxy_settings_page(self):
+        """Configurações -> Rede: a SOCKS5 proxy with a password (kept encrypted), used at once."""
+        from flowdl import proxy
+        app = self.open_app()
+        win = app.open_settings()
+        try:
+            win.show("Rede")
+            pump(app, 0.2)
+            win.proxy_mode.set("socks5")
+            for key, value in (("host", "10.0.0.5"), ("port", "1080"), ("user", "ana"), ("pass", "s3gredo"),
+                               ("bypass", "localhost, *.lan")):
+                win.proxy_vars[key].set(value)
+            win._save_proxy()
+            c = proxy.current()
+            self.assertEqual((c["mode"], c["host"], c["port"], c["user"], c["password"], c["bypass"]),
+                             ("socks5", "10.0.0.5", 1080, "ana", "s3gredo", ["localhost", "*.lan"]))
+            self.assertNotIn("s3gredo", read_text(self.svc.settings.path))
+            with mock.patch.object(self.gui.messagebox, "showwarning") as warn:
+                win.proxy_vars["port"].set("99999")
+                win._save_proxy()
+            warn.assert_called_once()
+            win._use_tor()
+            self.assertEqual((proxy.current()["host"], proxy.current()["port"]), ("127.0.0.1", 9150))
+            win.destroy()
+        finally:
+            st = self.svc.settings
+            st.proxy_mode, st.proxy_host, st.proxy_port, st.proxy_user, st.proxy_pass = "system", "", 0, "", ""
+            st.save()
+            self.svc.apply_proxy()
+
     def test_connections_per_download_setting(self):
         """Configurações -> Downloads: the maximum for new downloads (before, only the "+"
         window had it), and the "+" window starts from it."""

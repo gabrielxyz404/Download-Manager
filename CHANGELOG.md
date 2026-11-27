@@ -1,5 +1,22 @@
 # Novidades do Flow Downloads
 
+## 0.9.21
+
+**Novo: proxy próprio** (Configurações → Rede), como nos outros gestores de downloads:
+- **O do Windows** (como até aqui), **nenhum**, **proxy HTTP** ou **proxy SOCKS5**, com utilizador e senha.
+- Botão **"Usar o Tor Browser"**. No SOCKS5, o próprio proxy procura os nomes dos sites, por isso nada passa pelo DNS do computador.
+- Lista de endereços sem proxy, por exemplo `localhost, *.lan`.
+- Vale para os downloads e para os vídeos (yt-dlp).
+- A senha fica cifrada nas configurações.
+
+**Novo: autenticação Basic e Digest.**
+- Nos sites: links com utilizador e senha, como `http://utilizador:senha@site/ficheiro`.
+- Nos proxies HTTP: também se a ligação for HTTPS.
+- O Digest funciona com MD5 e SHA-256, e renova a resposta sozinho quando o servidor a dá por expirada.
+- Uma senha errada dá erro claro, sem ficar a tentar para sempre.
+
+Testado com um proxy SOCKS5, um proxy HTTP e um site com Digest, todos de teste: em cada caso confirma-se que os dados passaram mesmo pelo proxy.
+
 ## 0.9.20
 
 **Novo: várias filas, cada uma com o seu limite e o seu horário** (como no IDM). Exemplo: uma fila "Noturna" com 2 downloads de cada vez, das 2h às 7h, e a "Principal" sem horário.

@@ -9,7 +9,6 @@ like IDM does. It follows redirects and honours the system proxy settings.
 
 from __future__ import annotations
 
-import base64
 import http.client
 import os
 import socket
@@ -150,34 +149,41 @@ def happy_connect(address, timeout=None, source_address=None):
 _PROXY_CACHE: dict = {}  # (scheme, host) -> (when, answer)
 
 
-def _proxy_for(scheme: str, host: str) -> tuple[str, int, dict] | None:
-    """The system's proxy for this address (or None). Remembered for a minute: on Windows
-    the check reads the registry and may look the name up in DNS, for every new connection."""
+def _proxy_for(scheme: str, host: str):
+    """The proxy for this address (a proxy.Route, or None). The system's is remembered for a
+    minute: on Windows the check reads the registry and may look the name up in DNS, for every
+    new connection. One chosen in the app is used as it is."""
     import time
+    from . import proxy
+    if proxy.current()["mode"] != "system":
+        return proxy.route(scheme, host)
     key, now = (scheme, host), time.monotonic()
     cached = _PROXY_CACHE.get(key)
     if cached and now - cached[0] < 60:
         return cached[1]
-    answer = _find_proxy(scheme, host)
+    answer = proxy.route(scheme, host)
     if len(_PROXY_CACHE) > 200:
         _PROXY_CACHE.clear()
     _PROXY_CACHE[key] = (now, answer)
     return answer
 
 
-def _find_proxy(scheme: str, host: str) -> tuple[str, int, dict] | None:
-    proxies = urllib.request.getproxies()
-    proxy = proxies.get(scheme)
-    if not proxy or urllib.request.proxy_bypass(host):
+_SITE_CREDS: dict = {}  # (host, user) -> proxy.Credentials: a site's user / password from its link
+
+
+def _site_credentials(parts):
+    if not parts.username:
         return None
-    if "://" not in proxy:
-        proxy = "http://" + proxy
-    p = urllib.parse.urlsplit(proxy)
-    headers = {}
-    if p.username:
-        creds = f"{urllib.parse.unquote(p.username)}:{urllib.parse.unquote(p.password or '')}"
-        headers["Proxy-Authorization"] = "Basic " + base64.b64encode(creds.encode()).decode()
-    return p.hostname, p.port or 80, headers
+    from . import proxy
+    user = urllib.parse.unquote(parts.username)
+    password = urllib.parse.unquote(parts.password or "")
+    key = ((parts.hostname or "").lower(), user)
+    creds = _SITE_CREDS.get(key)
+    if creds is None or creds.password != password:
+        if len(_SITE_CREDS) > 100:
+            _SITE_CREDS.clear()
+        creds = _SITE_CREDS[key] = proxy.Credentials(user, password)
+    return creds
 
 
 class Connection:
@@ -228,23 +234,27 @@ class Connection:
         self.conn, self.key, self.response = None, None, None
 
     def _connect(self, scheme: str, host: str, port: int) -> None:
+        from . import proxy as proxies
         self.close()
         proxy = _proxy_for(scheme, host)
-        if scheme == "https":
-            if proxy:
-                conn = http.client.HTTPSConnection(proxy[0], proxy[1], timeout=self.timeout, context=ssl_context())
-                conn.set_tunnel(host, port, headers=proxy[2] or None)
-            else:
-                conn = http.client.HTTPSConnection(host, port, timeout=self.timeout, context=ssl_context())
-            self.via_proxy_http = False
+        self.route = proxy
+        self.via_proxy_http = bool(proxy and proxy.kind == "http" and scheme == "http")
+        if self.via_proxy_http:
+            # Plain HTTP through an HTTP proxy: the request names the whole address.
+            conn = http.client.HTTPConnection(proxy.host, proxy.port, timeout=self.timeout)
+        elif scheme == "https":
+            conn = http.client.HTTPSConnection(host, port, timeout=self.timeout, context=ssl_context())
         else:
-            if proxy:
-                conn = http.client.HTTPConnection(proxy[0], proxy[1], timeout=self.timeout)
-                self.proxy_headers = proxy[2]
-                self.via_proxy_http = True
-            else:
-                conn = http.client.HTTPConnection(host, port, timeout=self.timeout)
-                self.via_proxy_http = False
+            conn = http.client.HTTPConnection(host, port, timeout=self.timeout)
+        if proxy and proxy.kind == "socks5":
+            # The socket comes through the SOCKS proxy; TLS (and the certificate check for the
+            # site's name) on top of it, as without a proxy.
+            conn._create_connection = lambda addr, timeout=None, source=None, r=proxy: \
+                proxies.socks5_connect(r, host, port, timeout)
+        elif proxy and not self.via_proxy_http:
+            # HTTPS through an HTTP proxy: our own CONNECT (it answers Basic and Digest).
+            conn._create_connection = lambda addr, timeout=None, source=None, r=proxy: \
+                proxies.http_tunnel(r, host, port, timeout)
         if not proxy and self.address and self.address[0] == host.lower():
             # Connect to one chosen address of this server (it has several): the name is still
             # used for the Host header and the HTTPS certificate check, exactly as before.
@@ -275,8 +285,10 @@ class Connection:
         if self.aborted:  # cut on purpose while idle or before this request: start clean
             self.close()
             self.aborted = False
+        from . import proxy as proxies
         first_host = (urllib.parse.urlsplit(url).hostname or "").lower()
-        for _ in range(MAX_REDIRECTS + 1):
+        auth_tries = 0
+        for _ in range(MAX_REDIRECTS + 3):
             parts = urllib.parse.urlsplit(url)
             scheme = parts.scheme.lower()
             if scheme not in ("http", "https"):
@@ -296,8 +308,17 @@ class Connection:
                 hdrs = {k: v for k, v in hdrs.items() if k.lower() != "cookie"}
                 if cookies.get(host.lower()):
                     hdrs["Cookie"] = cookies[host.lower()]
-            if self.via_proxy_http:
-                hdrs.update(getattr(self, "proxy_headers", {}))
+            route = getattr(self, "route", None)
+            if self.via_proxy_http and route is not None:
+                hdrs.update(route.headers)
+                pcreds = proxies.proxy_credentials(route)
+                if pcreds:
+                    hdrs["Proxy-Authorization"] = pcreds.header("POST" if post else "GET", target)
+            creds = _site_credentials(parts) if host.lower() == first_host else None
+            if creds and not any(k.lower() == "authorization" for k in hdrs):
+                answer = creds.header("POST" if post else "GET", target)
+                if answer:
+                    hdrs["Authorization"] = answer
             if start is not None and post is None:
                 hdrs["Range"] = f"bytes={start}-{'' if end is None else end}"
             if post is not None:
@@ -306,6 +327,19 @@ class Connection:
                     hdrs["Origin"] = post["origin"]
             raw = self._send(target, hdrs, post["body"] if post is not None else None)
             self.requests += 1
+            # A user / password: the site's (from the link) or the proxy's. Asked for: answer
+            # its challenge (Basic or Digest) and ask once more.
+            if raw.status in (401, 407) and auth_tries < 2:
+                who = creds if raw.status == 401 else (proxies.proxy_credentials(route)
+                                                       if self.via_proxy_http and route else None)
+                found = proxies.pick_challenge(raw.headers.get_all(
+                    "WWW-Authenticate" if raw.status == 401 else "Proxy-Authenticate") or [])
+                if who is not None and found is not None and (
+                        auth_tries == 0 or found[1].get("stale", "").lower() == "true"):
+                    who.learn(*found)
+                    auth_tries += 1
+                    raw.read()
+                    continue
             if raw.status in REDIRECTS and raw.getheader("Location"):
                 raw.read()  # small body; keeps the connection reusable
                 url = urllib.parse.urljoin(url, raw.getheader("Location"))

@@ -93,6 +93,14 @@ class Settings:
         # Other queues, each with its own limit and schedule:
         # [{"id": "q1", "name": "Noturna", "max_active": 2, "scheduler": {...}}]
         self.queues: list = []
+        # Proxy (see proxy.py): "system" (Windows settings), "none", "http" or "socks5"
+        self.proxy_mode = "system"
+        self.proxy_host = ""
+        self.proxy_port = 0
+        self.proxy_user = ""
+        self.proxy_pass = ""        # encrypted (vault), never in plain text
+        self.proxy_remote_dns = True  # SOCKS5: the proxy looks names up (Tor)
+        self.proxy_bypass = ["localhost", "127.0.0.1", "::1"]
         # Browser downloads the app takes over: these types (like IDM), or all of them; never
         # from these sites.
         from .capture import DEFAULT_TYPES
@@ -150,6 +158,10 @@ class Settings:
         self.max_active = max(1, min(20, int(self.max_active)))
         self.global_limit_kb = max(0, int(self.global_limit_kb))
         self.queues = clean_queues(self.queues)
+        if self.proxy_mode not in ("system", "none", "http", "socks5"):
+            self.proxy_mode = "system"
+        self.proxy_port = self.proxy_port if 0 < self.proxy_port < 65536 else 0
+        self.proxy_bypass = [b for b in self.proxy_bypass if isinstance(b, str)]
 
     def category_rules(self) -> list:
         from .categories import default_rules

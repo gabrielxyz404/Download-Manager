@@ -352,6 +352,11 @@ def _base_opts(cookiefile: str | None = None, headers: dict | None = None) -> di
         opts["cookiefile"] = cookiefile
     if headers:
         opts["http_headers"] = {k: v for k, v in headers.items() if k.lower() != "cookie"}
+    from . import proxy
+    if proxy.current()["mode"] == "none":
+        opts["proxy"] = ""  # (straight, even if the system has one)
+    elif proxy.url_for_tools():
+        opts["proxy"] = proxy.url_for_tools()  # the proxy chosen in the app (SOCKS5 / HTTP)
     own = _app_ffmpeg()
     if own:
         opts["ffmpeg_location"] = os.path.dirname(own)  # (the app's copy is not on the PATH)

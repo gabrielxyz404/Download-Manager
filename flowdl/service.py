@@ -83,6 +83,7 @@ class Service:
         if manager is not None:
             self._attach(manager)
         self.scheduler = Scheduler(self.settings.scheduler)  # (the main queue's)
+        self.apply_proxy()
         self.apply_queues()  # the other queues' (limits and schedules)
         GLOBAL_LIMITER.rate = self.settings.global_limit_kb * 1024 if getattr(self.settings, "limit_on", True) else 0
         self.tray = None  # icon next to the Windows clock (see start_tray)
@@ -117,6 +118,16 @@ class Service:
         manager.mark_internet = getattr(self.settings, "mark_internet", True)
         self.apply_category_settings()
         self.apply_queues()
+
+    def apply_proxy(self) -> None:
+        """The proxy chosen in the settings (or the system's), for every new connection."""
+        from . import net, proxy, vault
+        st = self.settings
+        proxy.configure(getattr(st, "proxy_mode", "system"), getattr(st, "proxy_host", ""),
+                        getattr(st, "proxy_port", 0), getattr(st, "proxy_user", ""),
+                        vault.unprotect(getattr(st, "proxy_pass", "") or None, "") or "",
+                        getattr(st, "proxy_remote_dns", True), getattr(st, "proxy_bypass", None))
+        net._PROXY_CACHE.clear()
 
     def apply_queues(self) -> None:
         """The other queues, from the settings: their limits (manager) and schedules."""

@@ -1480,7 +1480,7 @@ class DetailsPanel(ttk.Frame):
 class SettingsDialog(tk.Toplevel):
     """⚙ → Configurações: every option in one window, by section."""
 
-    SECTIONS = ("Aparência", "Downloads", "Velocidade", "Navegador", "Sistema", "Atualizações")
+    SECTIONS = ("Aparência", "Downloads", "Velocidade", "Navegador", "Rede", "Sistema", "Atualizações")
 
     def __init__(self, app: "App", section: str = "Aparência"):
         super().__init__(app)
@@ -1544,6 +1544,68 @@ class SettingsDialog(tk.Toplevel):
                 after()
         self._check(text, var, changed)
         return var
+
+    def _proxy_page(self) -> None:
+        """Proxy: the system's (default), none, HTTP or SOCKS5 (e.g. Tor), with user / password."""
+        from . import vault
+        st = self.app.settings
+        self._head("Proxy", first=True)
+        self.proxy_mode = tk.StringVar(value=st.proxy_mode)
+        for value, text in (("system", "O do Windows (como o navegador)"), ("none", "Nenhum (ligação direta)"),
+                            ("http", "Proxy HTTP"), ("socks5", "Proxy SOCKS5 (ex.: Tor)")):
+            ttk.Radiobutton(self.page, text=text, value=value, variable=self.proxy_mode).pack(anchor="w", pady=2)
+        form = ttk.Frame(self.page)
+        form.pack(anchor="w", pady=(8, 0))
+        self.proxy_vars = {
+            "host": tk.StringVar(value=st.proxy_host), "port": tk.StringVar(value=str(st.proxy_port or "")),
+            "user": tk.StringVar(value=st.proxy_user),
+            "pass": tk.StringVar(value=vault.unprotect(st.proxy_pass or None, "") or ""),
+            "bypass": tk.StringVar(value=", ".join(st.proxy_bypass)),
+        }
+        for row, (key, text, width, show) in enumerate((("host", "Endereço", 26, ""), ("port", "Porta", 8, ""),
+                                                        ("user", "Utilizador", 20, ""), ("pass", "Senha", 20, "•"),
+                                                        ("bypass", "Sem proxy para", 34, ""))):
+            ttk.Label(form, text=text).grid(row=row, column=0, sticky="w", pady=2, padx=(0, 8))
+            ttk.Entry(form, textvariable=self.proxy_vars[key], width=width, show=show).grid(row=row, column=1,
+                                                                                            sticky="w", pady=2)
+        self.proxy_dns = tk.BooleanVar(value=st.proxy_remote_dns)
+        self._check("SOCKS5: o proxy procura os nomes dos sites (para o Tor)", self.proxy_dns)
+        btns = ttk.Frame(self.page)
+        btns.pack(anchor="w", pady=(8, 0))
+        ttk.Button(btns, text="Guardar", command=self._save_proxy).pack(side="left")
+        ttk.Button(btns, text="Usar o Tor Browser (9150)", command=self._use_tor).pack(side="left", padx=8)
+        self.proxy_note = tk.StringVar(value="")
+        ttk.Label(self.page, textvariable=self.proxy_note, style="Muted.TLabel").pack(anchor="w", pady=(6, 0))
+
+    def _use_tor(self) -> None:
+        self.proxy_mode.set("socks5")
+        self.proxy_vars["host"].set("127.0.0.1")
+        self.proxy_vars["port"].set("9150")
+        self.proxy_dns.set(True)
+        self._save_proxy()
+
+    def _save_proxy(self) -> None:
+        from . import vault
+        st, v = self.app.settings, self.proxy_vars
+        mode = self.proxy_mode.get()
+        try:
+            port = int(v["port"].get().strip() or 0)
+        except ValueError:
+            port = -1
+        if mode in ("http", "socks5") and (not v["host"].get().strip() or not 0 < port < 65536):
+            messagebox.showwarning("Proxy", "Indique o endereço e a porta do proxy (1 a 65535).", parent=self)
+            return
+        st.proxy_mode, st.proxy_host = mode, v["host"].get().strip()
+        st.proxy_port = port if 0 < port < 65536 else 0
+        st.proxy_user = v["user"].get().strip()
+        password = v["pass"].get()
+        st.proxy_pass = vault.protect(password) if password else ""
+        st.proxy_remote_dns = bool(self.proxy_dns.get())
+        st.proxy_bypass = [b.strip() for b in v["bypass"].get().replace(";", ",").split(",") if b.strip()]
+        st.save()
+        self.app.service.apply_proxy()
+        self.proxy_note.set("Guardado: vale para os próximos downloads e para os vídeos.")
+        self.app.status_var.set("Proxy guardado")
 
     def _set(self, key: str, value) -> None:
         """Change a setting and save it at once (a crash or log-off must not lose it)."""
@@ -1617,6 +1679,8 @@ class SettingsDialog(tk.Toplevel):
             self._head("Área de transferência")
             self._check("Detetar links copiados", app.clip_var,
                         lambda: self._set("watch_clipboard", app.clip_var.get()))
+        elif section == "Rede":
+            self._proxy_page()
         elif section == "Sistema":
             self._head("Segundo plano", first=True)
             self._check("Continuar em segundo plano ao fechar a janela", app.bg_var,
