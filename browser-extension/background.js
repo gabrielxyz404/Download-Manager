@@ -647,7 +647,7 @@ async function handleDownload(item) {
   const label = shortName(finalUrl, item.filename ? item.filename.split(/[\\/]/).pop() : "");
   if (!/^https?:/i.test(finalUrl)) { // (FTP stays with the browser: the app speaks HTTP only)
     const scheme = finalUrl.split(":")[0].toLowerCase();
-    return note(label, scheme === "ftp" ? "deixado ao navegador: a app ainda não baixa por FTP"
+    return note(label, scheme === "ftp" ? "deixado ao navegador: para FTP use o botão direito → Baixar com Flow Downloads"
                                         : "deixado ao navegador: o ficheiro foi criado pela própria página (" + scheme + ":)");
   }
   if (passThrough.delete(url) || passThrough.delete(finalUrl)) return;

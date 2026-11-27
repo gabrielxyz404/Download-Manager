@@ -1,6 +1,14 @@
 # Novidades do Flow Downloads
 
-## 0.9.21
+## 0.9.22
+
+**Novo: downloads por FTP** (e FTPS), com retomada e várias ligações. Antes a app recusava links ftp://.
+- Cola o link na app (ou "+"). Também funciona com utilizador e senha: `ftp://utilizador:senha@servidor/ficheiro`. A senha fica cifrada na lista.
+- No navegador: botão direito no link → **Baixar com Flow Downloads**. Os navegadores já não abrem ftp://.
+- Até 4 ligações. Se o servidor disser que são demais (421), a app usa menos em vez de falhar.
+- Pausar e retomar continua de onde estava. Se o ficheiro mudou no servidor entretanto, começa de novo: nunca junta duas versões.
+- Servidores sem retomada: uma ligação, do início.
+- Extensão 0.9.14: recarregue-a em brave://extensions (↻).
 
 **Novo: proxy próprio** (Configurações → Rede), como nos outros gestores de downloads:
 - **O do Windows** (como até aqui), **nenhum**, **proxy HTTP** ou **proxy SOCKS5**, com utilizador e senha.

@@ -307,6 +307,32 @@ class GuiTests(unittest.TestCase):
             st.save()
             self.svc.apply_proxy()
 
+    def test_ftp_link_downloads_in_the_window(self):
+        """An ftp:// link pasted in the app: downloaded (several connections), shown in the
+        list and the details like any other, the diagnostic works."""
+        import tests.test_ftp as tf
+        server = tf.Server(("127.0.0.1", 0), tf.FtpHandler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        try:
+            tf.FtpHandler.data, tf.FtpHandler.pace, tf.FtpHandler.limit = tf.DATA, 0.0, 0
+            app = self.open_app()
+            app.url_var.set(f"ftp://127.0.0.1:{server.server_address[1]}/pasta/arquivo.zip")
+            app._quick_add()
+            task = self.svc.manager.tasks[-1]
+            self.assertEqual(task.kind, "ftp")
+            self.wait_status(task, "Concluído", 30)
+            with open(task.path, "rb") as f:
+                self.assertEqual(f.read(), tf.DATA)
+            app._refresh(schedule=False)
+            self.select(task)
+            pump(app, 0.5)
+            app._copy_diagnostic()
+            self.assertIn("FTP", app.clipboard_get())
+            self.svc.manager.save()
+            self.assertIn('"kind": "ftp"', read_text(self.svc.manager.db_path))
+        finally:
+            server.shutdown()
+
     def test_connections_per_download_setting(self):
         """Configurações -> Downloads: the maximum for new downloads (before, only the "+"
         window had it), and the "+" window starts from it."""

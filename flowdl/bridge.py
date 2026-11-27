@@ -93,7 +93,8 @@ def _expected(size, mime) -> dict | None:
 
 def _download_item(data: dict) -> dict:
     url = str(data.get("url", ""))
-    if not url.startswith(("http://", "https://")):  # (no FTP: the engine speaks HTTP only)
+    ftp = url.lower().startswith(("ftp://", "ftps://"))  # (from the right-click menu: browsers no longer open them)
+    if not url.startswith(("http://", "https://")) and not ftp:
         raise ValueError("url inválida")
     parts = urlsplit(url)  # raises ValueError for a broken address ("http://[::1/x")
     if not parts.hostname:
@@ -133,7 +134,7 @@ def _download_item(data: dict) -> dict:
                         or "application/x-www-form-urlencoded",
                         # (sites check that a form came from their own page)
                         "origin": origin if origin.startswith(("http://", "https://")) else ""}
-    if data.get("mirror"):
+    if data.get("mirror") and not ftp:  # (an FTP download is not streamed to the browser)
         # The extension wants to show this download in the browser too: it will ask about
         # this request id until the download starts (or is cancelled in the app).
         item["rid"] = secrets.token_urlsafe(12)

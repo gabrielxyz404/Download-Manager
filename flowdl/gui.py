@@ -181,8 +181,8 @@ class AddDialog(tk.Toplevel):
             self.destroy()
             return
         url = self.url.get().strip()
-        if not url.lower().startswith(("http://", "https://")):
-            messagebox.showwarning("URL inválida", "O link deve começar com http:// ou https:// (FTP ainda não é suportado)",
+        if not url.lower().startswith(("http://", "https://", "ftp://", "ftps://")):
+            messagebox.showwarning("URL inválida", "O link deve começar com http://, https:// ou ftp://",
                                    parent=self)
             return
         from .after import algo_for, clean_hash
@@ -2166,9 +2166,9 @@ class App(tk.Tk):
         url = (url or "").strip()
         if not url:
             return
-        if not url.lower().startswith(("http://", "https://")):
-            messagebox.showwarning("URL inválida", "Informe um link que comece com http:// ou https:// (FTP ainda não é suportado)",
-                                   parent=self)
+        if not url.lower().startswith(("http://", "https://")) or getattr(t, "kind", "") == "ftp":
+            messagebox.showwarning("URL inválida", "Informe um link que comece com http:// ou https:// "
+                                   "(um download FTP: adicione o link novo com \"+\")", parent=self)
             return
         t.pause()
         t.wait(5)  # stopped (pausing is immediate) before the address changes under it
@@ -2339,8 +2339,8 @@ class App(tk.Tk):
 
     def _quick_add(self) -> None:
         url = self.url_var.get().strip()
-        if not url.lower().startswith(("http://", "https://")):
-            messagebox.showwarning("URL inválida", "Informe um link que comece com http:// ou https:// (FTP ainda não é suportado)",
+        if not url.lower().startswith(("http://", "https://", "ftp://", "ftps://")):
+            messagebox.showwarning("URL inválida", "Informe um link que comece com http://, https:// ou ftp://",
                                    parent=self)
             return
         self.url_var.set("")

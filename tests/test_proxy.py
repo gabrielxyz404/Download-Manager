@@ -9,6 +9,7 @@ import tempfile
 import threading
 import time
 import unittest
+import unittest.mock
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from flowdl import net, proxy
@@ -287,6 +288,18 @@ class ProxyTests(_Servers):
                         remote_dns=False, bypass=[])
         self.assertWhole(self.download(f"http://localhost:{self.port}/f.bin"))
         self.assertTrue(all(atyp in (1, 4) for atyp, _h in Socks5.seen), Socks5.seen)
+
+    def test_local_lookup_tries_the_next_address(self):
+        """Seen on Windows: "localhost" is ::1 first; the site listens on 127.0.0.1 only."""
+        proxy.configure("socks5", "127.0.0.1", self.socks.server_address[1], remote_dns=False, bypass=[])
+        import socket as sk
+        real = sk.getaddrinfo
+        fake = [(sk.AF_INET6, sk.SOCK_STREAM, 6, "", ("::1", self.port, 0, 0)),
+                (sk.AF_INET, sk.SOCK_STREAM, 6, "", ("127.0.0.1", self.port))]
+        with unittest.mock.patch.object(proxy.socket, "getaddrinfo",
+                                        side_effect=lambda h, *a, **k: fake if h == "localhost" else real(h, *a, **k)):
+            self.assertWhole(self.download(f"http://localhost:{self.port}/f.bin", conns=1))
+        self.assertEqual([h for _a, h in Socks5.seen][:2], ["::1", "127.0.0.1"])
 
     def test_socks5_wrong_password_says_so_and_does_not_hammer(self):
         Socks5.user = ("ana", "p4ss")

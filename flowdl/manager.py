@@ -24,6 +24,9 @@ def task_from_dict(d: dict):
 
 
 def _task_from_dict(d: dict):
+    if d.get("kind") == "ftp":
+        from .ftp import FtpTask
+        return FtpTask.from_dict(d)
     if d.get("kind") == "video":
         from .video import VideoTask
         return VideoTask.from_dict(d)
@@ -139,6 +142,13 @@ class DownloadManager:
             post: dict | None = None) -> DownloadTask:
         """``auto_folder``: ``dest_dir`` is only the base; the category folder inside it is
         chosen once the real file name is known."""
+        if url.strip().lower().startswith(("ftp://", "ftps://")):
+            from .ftp import FtpTask
+            task = FtpTask(url.strip(), dest_dir or default_download_dir(), connections, filename)
+            if auto_folder and self.folder_rules is not None:
+                from .categories import folder_for
+                task.dest_dir = folder_for(task.dest_dir, task.filename, url, page, self.folder_rules)
+            return self.add_task(task, start, now)
         task = DownloadTask(url.strip(), dest_dir or default_download_dir(), connections,
                             filename=sanitize_filename(filename) if filename else None,
                             headers=headers, cookies=cookies, final_url=final_url)

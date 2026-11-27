@@ -140,7 +140,27 @@ SOCKS_ERRORS = {
 
 
 def socks5_connect(r: Route, host: str, port: int, timeout=None) -> socket.socket:
-    """A socket to host:port through a SOCKS5 proxy (ready for HTTP or TLS on top)."""
+    """A socket to host:port through a SOCKS5 proxy (ready for HTTP or TLS on top). With the
+    name looked up here, each of its addresses in turn (seen on Windows: "localhost" is ::1
+    first, and the site listened on 127.0.0.1 only)."""
+    try:
+        ipaddress.ip_address(host.strip("[]"))
+        targets = [host]
+    except ValueError:
+        if r.remote_dns:
+            targets = [host]
+        else:
+            targets = list(dict.fromkeys(i[4][0] for i in socket.getaddrinfo(host, port, 0, socket.SOCK_STREAM)))[:4]
+    for n, target in enumerate(targets):
+        try:
+            return _socks5_once(r, target, port, timeout)
+        except ProxyError as exc:
+            if n == len(targets) - 1 or getattr(exc, "code", 0) not in (3, 4, 5):
+                raise
+    raise ProxyError("o proxy não conseguiu chegar ao site")
+
+
+def _socks5_once(r: Route, host: str, port: int, timeout=None) -> socket.socket:
     from .net import happy_connect
     sock = happy_connect((r.host, r.port), timeout)
     try:
@@ -161,8 +181,6 @@ def socks5_connect(r: Route, host: str, port: int, timeout=None) -> socket.socke
             ip = ipaddress.ip_address(host.strip("[]"))
         except ValueError:
             ip = None
-        if ip is None and not r.remote_dns:
-            ip = ipaddress.ip_address(socket.getaddrinfo(host, port, 0, socket.SOCK_STREAM)[0][4][0])
         if ip is None:  # the proxy looks the name up (Tor: nothing leaks to the local DNS)
             name = host.encode("idna")[:255]
             addr = b"\x03" + bytes([len(name)]) + name
@@ -171,7 +189,9 @@ def socks5_connect(r: Route, host: str, port: int, timeout=None) -> socket.socke
         sock.sendall(b"\x05\x01\x00" + addr + port.to_bytes(2, "big"))
         ver, rep, _rsv, atyp = _recv_exact(sock, 4)
         if rep != 0:
-            raise ProxyError(f"o proxy recusou a ligação: {SOCKS_ERRORS.get(rep, f'erro {rep}')}")
+            exc = ProxyError(f"o proxy recusou a ligação: {SOCKS_ERRORS.get(rep, f'erro {rep}')}")
+            exc.code = rep
+            raise exc
         size = {1: 4, 4: 16}.get(atyp)
         if size is None:
             size = _recv_exact(sock, 1)[0]
